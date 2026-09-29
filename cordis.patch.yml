@@ -1,0 +1,27 @@
+# danger-guard（2026-09-03）：危险命令物理拦截 + 首次编辑事实强制门。
+# ECC（MIT, github.com/affaan-m/ECC）机制移植：
+#   1) git 钩子绕过（--no-verify / core.hooksPath）拦截；
+#   2) rm -rf 灾难目标（~ / / .. $HOME）拦截，项目内相对路径放行；
+#   3) 下载即执行（curl|sh / sh <(curl)）拦截，先下载审计后执行；
+#   4) 长驻 dev server（vite/cargo watch/npm run dev*）拦截——防挂死会话；
+#   5) 密钥/凭据路径编辑拦截（.ssh/id_rsa/*.pem/*.keystore）；
+#   6) gateguard 事实门：每文件首次编辑强制取证（列 import 者/受影响公共接口/
+#      引用用户指令），ECC A/B 实测 +2.25 分的机制；测试/文档面豁免。
+# 全部挂 ctx.tools.guard（同步谓词，拒绝=模型收到 Error: <指令> 的可行动反馈）。
+# 设置卡：enabled + factGateEnabled 双开关。
+#
+# 组合包层（2026-09-05 bundle 化）：本文件由 package.json 的 dsh.bundle.patch
+# 指向，随 `dsh plugin --profile web add/remove ./plugins/danger-guard` 维护。
+# 行按裸包名引用本包（client-modules 只扫描裸包名条目的 dsh.client 声明）。
+# 注意 pnpm ≥12.3.0：12.0.0 的 add 本地目录有 #14437 bug。
+#
+# 两行 = bulkhead（隔舱）：0.1.7 的 cordis 在 apply **之前**按条目自己的 Config 校验
+# 配置（vendor/cordis/src/fiber.ts:50、:641-664），越界值即让该条目 FAILED。
+#   · danger-guard           —— 拦截半，**没有 Config**：用户配置怎么写都杀不掉闸门。
+#   · danger-guard-settings  —— 设置半，持有那份严格 schema（= 设置卡的命名空间）。
+# 设置半 FAILED 时拦截半读不到它的投影，回落内置默认底座并告警（host.ts settingsConfig）。
+- insert:
+    - id: danger-guard
+      name: "@jayyuen666/dsh-danger-guard"
+    - id: danger-guard-settings
+      name: "@jayyuen666/dsh-danger-guard/settings"
