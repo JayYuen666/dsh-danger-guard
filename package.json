@@ -1,5 +1,5 @@
 {
-  "name": "@jayyuen666/dsh-danger-guard",
+  "name": "@jayyuen66/dsh-danger-guard",
   "version": "1.2.1",
   "description": "dsh 插件：危险命令物理拦截（git --no-verify / rm -rf / curl|sh / dev server）+ 首次编辑事实强制门（gateguard 移植，ECC MIT）",
   "license": "MIT",
@@ -33,7 +33,7 @@
       "./package.json": "./package.json"
     },
     "access": "public",
-    "registry": "https://npm.pkg.github.com"
+    "registry": "https://registry.npmjs.org"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.client.json",
@@ -48,7 +48,7 @@
   "dependencies": {
     "@deepseek-ai/dsh-brand": "0.2.0-rc.2",
     "@deepseek-ai/schemastery": "3.18.4",
-    "@jayyuen666/dsh-plugin-shared": "^0.6.3",
+    "@jayyuen66/dsh-plugin-shared": "^0.6.3",
     "zod": "^4.6.5"
   },
   "devDependencies": {

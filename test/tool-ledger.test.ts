@@ -9,8 +9,8 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { scanToolEvents } from "@jayyuen666/dsh-plugin-shared/lib/tool-events";
-import type { SessionEvent } from "@jayyuen666/dsh-plugin-shared/lib/tool-events";
+import { scanToolEvents } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
+import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 import {
   LEDGER_KEY,
   asLedger,

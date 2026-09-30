@@ -12,7 +12,7 @@
 //
 // 带变量的文案用 `{name}` 占位符（与官方 client-locale 同字形），由本模块的 fillTemplate 填充；
 // 两语模板的占位符集合是否一致由测试比对（翻译漏掉插值是这类改造最容易静默发生的错）。
-import type { MessagesCatalog } from "@jayyuen666/dsh-plugin-shared/lib/locale";
+import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 
 /**
  * 模板槽位：占位符名 → 已文本化的替换值。

@@ -20,7 +20,7 @@ import type { Context, Fiber } from "@deepseek-ai/cordis";
 import type { SettingsForms } from "@deepseek-ai/dsh-settings";
 import { ConfigSchema, SETTINGS_READER, snapshot } from "./lib/settings-schema.ts";
 import type { Config, ConfigRefs } from "./lib/settings-schema.ts";
-import { isRecord } from "@jayyuen666/dsh-plugin-shared/lib/record";
+import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 /** 页面策略面：本包自带卡片页，关掉宿主的自动生成分页。签名整体取官方成员——
  *  手抄成 `owner?: unknown` 比官方（`configure(presentation, owner?: Fiber)`，

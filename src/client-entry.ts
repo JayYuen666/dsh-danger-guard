@@ -1,7 +1,7 @@
 // danger-guard client 半：设置卡（总开关 + 事实门开关/放行次数/严格模式/写面阈值/引用取证
 // 检索工具名单 + 两份危险面词表）。
 // 参照 session-rescue / ctx-observe / quality-gate 的卡片模式：keyed plugins.bundle.config
-// 槽（key = bundle 包名 `@jayyuen666/dsh-danger-guard`，见 BUNDLE_PKG）+ 0.1.7 的
+// 槽（key = bundle 包名 `@jayyuen66/dsh-danger-guard`，见 BUNDLE_PKG）+ 0.1.7 的
 // ctx.configForms.get(条目 id) 表单（id = 设置条目 `danger-guard-settings`），React 由模块
 // 系统提供（rolldown external），只用 createElement。
 
@@ -63,12 +63,12 @@ const SETTINGS_NS = "danger-guard-settings";
  *   · 官方占位者 dsh-experimental-client-ui-voice-input/lib/client.js:5659-5661 亦用包名。
  * 行槽（本包未用）写成 `<pkg>#<rowId>`（plugin-manager/lib/client.js:27-28 `rowConfigKey`）。
  * bulkhead 的第二行 `danger-guard-settings` 只是同一个 bundle 里的**行**（name 是
- * `@jayyuen666/dsh-danger-guard/settings`，导出子路径而非 bundle），profile 的 bundles
+ * `@jayyuen66/dsh-danger-guard/settings`，导出子路径而非 bundle），profile 的 bundles
  * 清单里只有本包名这一条，所以 key 不能是 `-settings` 那条。
  * 值必须与 package.json 的 name 一致并出现在 `~/.dsh/profiles/web/package.json` 的
  * `dsh.profile.bundles` 里——test/client-card.test.ts 从该文件解析校验，不抄硬编码。
  */
-const BUNDLE_PKG = "@jayyuen666/dsh-danger-guard";
+const BUNDLE_PKG = "@jayyuen66/dsh-danger-guard";
 
 const CARD_CSS = [
   ".dgc-card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;list-style:none;transition:border-color .16s,background .16s}",

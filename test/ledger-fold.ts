@@ -9,7 +9,7 @@
 // 入参与 shared `scanToolEvents` 同形，等价用例因此能把**同一个数组**喂给两条读法；
 // 夹具的 seq 递增器保证「事件位 = 数组下标」，那正是官方 `seq = log.length` 连号契约下的同一个值。
 
-import type { SessionEvent } from "@jayyuen666/dsh-plugin-shared/lib/tool-events";
+import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 import { toolLedgerProjection } from "../lib/tool-ledger.ts";
 import type { ToolLedger } from "../lib/tool-ledger.ts";
 

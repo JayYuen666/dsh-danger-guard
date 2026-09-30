@@ -26,7 +26,7 @@ import { DEFAULT_BIG_EDIT_CHARS, DEFAULT_SMALL_EDIT_CHARS } from "../lib/fact-ga
 // 官方形状里写不出的坏契约（无 callId 的极旧事件）显式走 fxBadEvent()。
 import { badEvent as fxBadEvent, call as fxCall, result as fxResult } from "./fixtures/events.ts";
 // 事件类型与生产面（host.ts）同源：官方判别联合由 shared 具名 re-export。
-import type { SessionEvent } from "@jayyuen666/dsh-plugin-shared/lib/tool-events";
+import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 
 // ── 轻量宿主替身（同 test/host.test.ts 契约，只实现本用例用到的面）──────────
 interface MockCtx {

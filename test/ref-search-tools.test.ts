@@ -32,7 +32,7 @@ import type { RefSearchPolicy } from "../lib/ref-search-policy.ts";
 // 品牌都在夹具里补一次）；fx 前缀避开与 makeEvents() 交出的局部 `call` 遮蔽。
 import { call as fxCall, result as fxResult } from "./fixtures/events.ts";
 // 事件类型与生产面（host.ts）同源：官方判别联合由 shared 具名 re-export。
-import type { SessionEvent } from "@jayyuen666/dsh-plugin-shared/lib/tool-events";
+import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 
 // ── 轻量宿主替身（同 test/host-tier-settings.test.ts 契约）────────────────────
 interface MockCtx {

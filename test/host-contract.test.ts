@@ -19,7 +19,7 @@ import { MESSAGES } from "../lib/messages.ts";
 // 品牌都在夹具里补一次）；fx 前缀避开与本文件里 `const result = …` 之类局部量的遮蔽。
 import { call as fxCall, result as fxResult } from "./fixtures/events.ts";
 // 事件类型与生产面（host.ts）同源：官方判别联合由 shared 具名 re-export。
-import type { SessionEvent } from "@jayyuen666/dsh-plugin-shared/lib/tool-events";
+import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 
 /** locale 命名空间未注册（本文件的 mock 默认）→ 宿主按中文渲染拒绝理由，
  *  期望值即中文文案表的对应条目：断言看的是"回给模型的那句话"，与迁移前逐字相同。 */

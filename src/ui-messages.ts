@@ -9,7 +9,7 @@
 // `{tools}`/`{chars}` 占位 + 官方 Translate 的 params 填（占位符集合两语一致由测试比对）。
 // host 半回给模型的拒绝理由是另一份字典（lib/messages.ts）——那边没有官方 i18n 面。
 import type { TranslateNS as OfficialTranslateNS } from "@deepseek-ai/dsh-client-ui-slots";
-import type { MessagesCatalog } from "@jayyuen666/dsh-plugin-shared/lib/locale";
+import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 
 /** 本包设置卡产出的全部界面文案。 */
 export interface UiMessages {

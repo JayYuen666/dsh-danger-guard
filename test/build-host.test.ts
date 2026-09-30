@@ -26,7 +26,7 @@ describe("danger-guard 两份 host 产物的外部化", () => {
     );
     assert.ok(!/^function brandNumber\(/mu.test(host), "host.js 不得内联 brandNumber 的函数体");
     assert.ok(
-      host.includes('from "@jayyuen666/dsh-plugin-shared/lib/record"'),
+      host.includes('from "@jayyuen66/dsh-plugin-shared/lib/record"'),
       "shared/record 必须外部化（isRecord 是跨包单点）",
     );
     assert.equal(LOCAL_TS_IMPORT.test(host), false, "不得残留 ./x.ts 说明符");
@@ -35,7 +35,7 @@ describe("danger-guard 两份 host 产物的外部化", () => {
   it("settings.js：shared 与 schemastery 外部化，且不含 dsh-brand（设置半不导入它）", async () => {
     const settings = await buildSettings();
     assert.ok(
-      settings.includes('from "@jayyuen666/dsh-plugin-shared/lib/record"'),
+      settings.includes('from "@jayyuen66/dsh-plugin-shared/lib/record"'),
       "settings.js 的 shared/record 必须外部化",
     );
     assert.ok(

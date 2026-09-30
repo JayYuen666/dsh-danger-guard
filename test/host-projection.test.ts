@@ -19,7 +19,7 @@ import { SETTINGS_READER } from "../lib/settings-schema.ts";
 import { asLedger, LEDGER_KEY, toolLedgerProjection } from "../lib/tool-ledger.ts";
 // 替身台账：沿单元自己的 init/apply 折（test/ledger-fold.ts），与官方 drive 同一条路。
 import { foldLedger } from "./ledger-fold.ts";
-import type { SessionEvent } from "@jayyuen666/dsh-plugin-shared/lib/tool-events";
+import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 import { call as fxCall, result as fxResult } from "./fixtures/events.ts";
 
 /** `ctx.sessionProjections` 替身：register 收下单元；stateOf 按用例交给它的 fold 现算。

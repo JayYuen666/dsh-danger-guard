@@ -1,5 +1,5 @@
-// danger-guard/tsconfig.client.json —— 编译选项全部继承 @jayyuen666/dsh-plugin-shared/config/tsconfig.client.base.json，这里只留本包与基线不同的部分。
+// danger-guard/tsconfig.client.json —— 编译选项全部继承 @jayyuen66/dsh-plugin-shared/config/tsconfig.client.base.json，这里只留本包与基线不同的部分。
 {
-  "extends": "@jayyuen666/dsh-plugin-shared/config/tsconfig.client.base.json",
+  "extends": "@jayyuen66/dsh-plugin-shared/config/tsconfig.client.base.json",
   "include": ["src/**/*.ts"]
 }

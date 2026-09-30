@@ -20,7 +20,7 @@ import {
   result as fxResult,
 } from "./fixtures/events.ts";
 // 事件类型与生产面（host.ts）同源：官方判别联合由 shared 具名 re-export。
-import type { SessionEvent } from "@jayyuen666/dsh-plugin-shared/lib/tool-events";
+import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 
 /** locale 命名空间未注册（本文件的 mock 默认）→ 宿主按中文渲染，期望值即中文文案表。 */
 const INDETERMINATE_MESSAGE = MESSAGES.zh.indeterminate;
@@ -262,7 +262,7 @@ describe("danger-guard host 接线", () => {
     //  :382 的写入侧按同一个 `options.id === ns` 找回条目；哪些条目算可配置则由
     //  :425-428 的 `private schema()` 判——看 Config 键上有无 'toJSON'）。
     // ⚠ 必须等于 cordis.patch.yml 里**持有 schema 的那一行**的 id（danger-guard-settings）：
-    //   既不是 npm 包名（迁移第一版写成了 @jayyuen666/dsh-danger-guard ⇒ 卡片永远读不到），
+    //   既不是 npm 包名（迁移第一版写成了 @jayyuen66/dsh-danger-guard ⇒ 卡片永远读不到），
     //   也不是拦截条目 id（那一条刻意没有 Config）。
     assert.equal(SETTINGS_NS, "danger-guard-settings");
     assert.equal(settingsPlugin.Config, ConfigSchema);

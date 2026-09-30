@@ -22,6 +22,6 @@
 # 设置半 FAILED 时拦截半读不到它的投影，回落内置默认底座并告警（host.ts settingsConfig）。
 - insert:
     - id: danger-guard
-      name: "@jayyuen666/dsh-danger-guard"
+      name: "@jayyuen66/dsh-danger-guard"
     - id: danger-guard-settings
-      name: "@jayyuen666/dsh-danger-guard/settings"
+      name: "@jayyuen66/dsh-danger-guard/settings"

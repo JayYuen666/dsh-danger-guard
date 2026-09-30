@@ -60,18 +60,18 @@ import {
   LOCALE_SETTINGS_NAMESPACE,
   messagesFor,
   resolveLocalePreference,
-} from "@jayyuen666/dsh-plugin-shared/lib/locale";
+} from "@jayyuen66/dsh-plugin-shared/lib/locale";
 // 共享记账骨架：事件流 → tool/call+tool/result 两张表，
 // 与 quality-gate 共用同一实现；FieldGate 的读/写/引用分类留在本文件。
 // `SessionEvent` 是**官方**判别联合（shared 从 @deepseek-ai/dsh-session 原样 re-export，
 // 两个 PTC 变体由 @deepseek-ai/dsh-tools/types 官方增强并入）：本文件不再自声明
 // 「最小投影」，按 event.type 分支即收窄 data，宿主换形状就编译不过。
-import { scanToolEvents } from "@jayyuen666/dsh-plugin-shared/lib/tool-events";
+import { scanToolEvents } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 import type {
   SessionEvent,
   ToolCallRecord,
   ToolResultRecord,
-} from "@jayyuen666/dsh-plugin-shared/lib/tool-events";
+} from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 // 取证台账投影：单元 + 读侧换算 + 采信门（台账不可信 ⇒ undefined ⇒ 回退全量扫描）。
 import {
   LEDGER_KEY,
@@ -89,8 +89,8 @@ import type { Session, SessionLogOffset } from "@deepseek-ai/dsh-session";
 // lesson bus 收口：lesson-loop 的 report/pass 现在是异步落库（返回 Promise），
 // 只包一层同步 try/catch 抓不到 rejection——失败会被静默吞掉，还给宿主进程留一枚
 // 未处理拒绝。同步抛错与异步拒绝共用这一个出口（三个包的调用点降级口径一致）。
-import { settleLessonCall } from "@jayyuen666/dsh-plugin-shared/lib/lesson-bus";
-import { isRecord } from "@jayyuen666/dsh-plugin-shared/lib/record";
+import { settleLessonCall } from "@jayyuen66/dsh-plugin-shared/lib/lesson-bus";
+import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 /** 事实门教训的类别级稳定签名：lesson-loop 规则卡按
  *  该签名归并，而非按目标文件路径——与 lesson-store 的 CATEGORY_SIGNATURES

@@ -25,11 +25,11 @@
 import { z } from "zod";
 import type { SessionEvent, SessionHeader, SessionLogOffset } from "@deepseek-ai/dsh-session";
 import type { ProjectionDefinition } from "@deepseek-ai/dsh-session-projection";
-import { toolEventRowsOf } from "@jayyuen666/dsh-plugin-shared/lib/tool-events";
+import { toolEventRowsOf } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 import type {
   ToolCallRecord,
   ToolResultRecord,
-} from "@jayyuen666/dsh-plugin-shared/lib/tool-events";
+} from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 
 /** 本包投影单元的注册键（host-only：不声明 wire ⇒ 不进客户端快照）。 */
 export const LEDGER_KEY = "danger-guard.toolLedger";
