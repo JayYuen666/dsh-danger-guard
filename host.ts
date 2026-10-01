@@ -180,18 +180,24 @@ interface HostCtx {
    *  工厂签名。⚠ 官方的返回域（`SyncEffect` / `Effect`，:49-51）**不受理 `undefined`**：
    *  「这一趟没有要清理的东西」在契约里是一枚空 disposer，见 NOOP_DISPOSER。 */
   effect: Context["effect"];
-  /** 会话销毁事件（官方 session/disposed）——接线 fact-gate 会话分片及时回收。
-   *  载荷不再手抄成 `{ id?: unknown }`：它就是官方事件的第一个实参
-   *  （`session/disposed(this: Scoped<Session>, session: Session): void`，installed
-   *  `@deepseek-ai/dsh-session/lib/types/index.d.ts:51`，经 cordis `Events` 的官方增强），
-   *  故 `Parameters<Events["session/disposed"]>[0]` = 官方 `Session` 类面，本包读的那三位
-   *  （`id` / `header` / `snapshotEvents`）由 `SessionLogFace` 承接。
+  /** 宿主事件回调，本插件用到两种形状：
+   *   - `session/disposed`：接线 fact-gate 会话分片及时回收。载荷不再手抄成 `{ id?: unknown }`：
+   *     它就是官方事件的第一个实参
+   *     （`session/disposed(this: Scoped<Session>, session: Session): void`，installed
+   *     `@deepseek-ai/dsh-session/lib/types/index.d.ts:51`，经 cordis `Events` 的官方增强），
+   *     故 `Parameters<Events["session/disposed"]>[0]` = 官方 `Session` 类面，本包读的那三位
+   *     （`id` / `header` / `snapshotEvents`）由 `SessionLogFace` 承接。
+   *   - `settings/document-updated`：locale 偏好缓存的失效信号（见 localeMessages）。
    *  ⚠ 这里**不**换成 `Context["on"]`：那是全仓延后项（泛型 `on<K extends keyof Events>` 会
-   *  重写每一枚监听器签名，ctx-observe/host.ts:329-336 记着同一条理由）。 */
-  on?: (
-    event: "session/disposed",
-    listener: (session: Parameters<Events["session/disposed"]>[0]) => void,
-  ) => unknown;
+   *  重写每一枚监听器签名，ctx-observe/host.ts:329-336 记着同一条理由）。按重载逐枚点名，
+   *  新增事件时加一条签名即可，不必把整张事件表拖进来。 */
+  on?: {
+    (
+      event: "session/disposed",
+      listener: (session: Parameters<Events["session/disposed"]>[0]) => void,
+    ): unknown;
+    (event: "settings/document-updated", listener: (ns: unknown) => void): unknown;
+  };
   /** 注入子上下文（用它挂投影单元的注册与读口）。按**可选**收：cordis 只在依赖到位时
    *  才激活回调，没装 dsh-session-projection 的 profile 上这条路径整体不存在，闸门沿用
    *  回退扫描——写进 `isDangerGuardHost` 的硬前置等于把闸门下线（同 session-rescue 的口径：
@@ -402,6 +408,24 @@ function lruPut<Value>(map: Map<string, Value>, key: string, value: Value): void
   map.set(key, value);
 }
 
+/**
+ * 丢掉一个会话在两张会话键台账里的分片。键形是 `会话id|目标`（buildEvalContext 的
+ * sessKey 自带 `|` 收尾），故按 `会话id|` 前缀匹配就够：分隔符让 `s1` 吃不到 `s10|…`。
+ * 只扫这两张——`mtimes` / `rootCache` / `layersByStart` 是路径键，与会话无关。
+ * 幂等：同一会话重复 dispose 是空操作。
+ * @param sessionId 会话 id（与 buildEvalContext 同一个 stringIdOf 投影）。
+ */
+function dropSessionLedgers(sessionId: string): void {
+  const prefix = `${sessionId}|`;
+  for (const map of [mtimeBySessionPath, seenLenBySessionPath]) {
+    for (const key of map.keys()) {
+      if (key.startsWith(prefix)) {
+        map.delete(key);
+      }
+    }
+  }
+}
+
 /** tools.guard 同步谓词契约需要同步 fs 访问（stat 用于存在性/mtime 取证）。
  *  *（同步契约下异步 fs 会破坏守卫热路径，此处必须同步。名称入 node/no-sync ignores。） */
 function syncStat(targetPath: string): Stats {
@@ -509,6 +533,15 @@ interface FactLayer {
 
 /** 层存在性缓存（`起点目录|追加测试目录` → 该链上存在的层）。 */
 const layersByStart = new Map<string, FactLayer[]>();
+
+/** 卸载兜底：插件换代（配置重载/重装）时把派生台账清空，不让上一代的缓存活过这一代——
+ *  可换代时工作树已经变了，上一代的层探查结论是错的。`mtimes` / `rootCache` 不在此列：
+ *  前者按 mtime 自校、后者是纯路径→根映射，留着无副作用，交给 lruPut 兜底即可。 */
+function clearDerivedLedgers(): void {
+  mtimeBySessionPath.clear();
+  seenLenBySessionPath.clear();
+  layersByStart.clear();
+}
 
 /** 一个目录上的层探查（`existingLayersOf` 上走链的循环体）：对**尚未命中**的每一层，
  *  按层名表（test 层追加用户配置的 extraTestDirs）取第一条实际存在的目录记入 `found`。
@@ -1830,13 +1863,36 @@ export function apply(ctx: Context): void {
   // describe() 一条路（`settings.get(ns)` 已删除）：locale 偏好走它，官方 locale 条目不在
   // 组合里时找不到描述符 → value 为 undefined → 中文默认。本包自己的设置值面**不走**
   // describe()——值面由设置条目挂的读数口给（见 settingsConfig）。
+  //
+  // 偏好读一次即缓存，靠宿主推送失效：describe() 不便宜（installed dsh-settings 对**每个**
+  // 活跃条目做 schema.toJSON() + JSON.stringify 算 revision，再投影 value/base/user 三份），
+  // 而 tools.guard 是全仓最热的路径——每次 bash/edit/write 都过这道谓词。失效链：写配置
+  // → emit('app-boot/config-reload') → SettingsForms 监听它并 invalidate() → 微任务里
+  // describe() → 对 raw 变化的条目 emit('settings/document-updated', ns, revision)。
+  let cachedPreference: unknown = undefined;
+  let hasCachedPreference = false;
+  svc.on?.("settings/document-updated", (ns: unknown) => {
+    if (ns === LOCALE_SETTINGS_NAMESPACE) {
+      hasCachedPreference = false;
+    }
+  });
+
+  /** locale 条目的偏好值；未投影出来 → undefined（中文默认）。**缺席不缓存**：locale 条目
+   *  可能晚于本条目才到位，缓存一次缺席就把语言跟随永久钉死——代价只是缺席时每次判定多
+   *  一次 describe()。 */
+  const localePreferenceOf = (): unknown => {
+    if (!hasCachedPreference) {
+      const row = svc.settings.describe().find((desc) => desc.ns === LOCALE_SETTINGS_NAMESPACE);
+      if (row !== undefined) {
+        cachedPreference = row.value;
+        hasCachedPreference = true;
+      }
+    }
+    return hasCachedPreference ? cachedPreference : undefined;
+  };
+
   const localeMessages = (): DangerGuardMessages =>
-    messagesFor(
-      MESSAGES,
-      resolveLocalePreference(
-        svc.settings.describe().find((desc) => desc.ns === LOCALE_SETTINGS_NAMESPACE)?.value,
-      ),
-    );
+    messagesFor(MESSAGES, resolveLocalePreference(localePreferenceOf()));
 
   const factGate = new FactGate();
 
@@ -1852,10 +1908,17 @@ export function apply(ctx: Context): void {
     ledgerBox.value = (session) => asLedger(registry.stateOf(session, LEDGER_KEY));
   });
 
-  // 会话销毁即释放 fact-gate 会话分片（ctx-observe/lesson-loop 同用官方 session/disposed）。
+  // 会话销毁即释放该会话的全部记账：fact-gate 分片 + 两张会话键台账
+  //（ctx-observe/lesson-loop 同用官方 session/disposed）。
   // 幂等语义：同一 session id 重复 dispose 由 FactGate.dropSession 的 delete 天然幂等。
   svc.on?.("session/disposed", (sessionRaw) => {
     factGate.dropSession(sessionRaw.id);
+    dropSessionLedgers(stringIdOf(sessionRaw.id));
+  });
+
+  // 卸载兜底：换代时清空派生台账，disposer 随插件卸载跑，下一代从空表起算。
+  svc.effect((): (() => void) => (): void => {
+    clearDerivedLedgers();
   });
 
   // 判定链（bash 闸 / 密钥路径闸 / 事实门）与两路上报都已提到模块层，apply 只留接线。
