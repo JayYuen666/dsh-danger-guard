@@ -47,9 +47,17 @@ const intSchema = z.number().int().nonnegative();
  * "没有这个值"一律写成 `null`。持久缓存按 JSON 往返，而 `undefined` 键会被
  * `JSON.stringify` 整个丢掉——`z.string().optional()` 那种"必填但可为 undefined"的形状
  * 回填时必然解析失败（官方 `restore` 随即丢行，本包就永久只剩回退扫描）。
+ *
+ * `name` 是唯一一个**不留** `null` 哨兵的字段：它在 shared 侧已经是必填串——少一个可用 name
+ * 的 tool/call 由 shared 的扫描层整条滤掉、不出行（`callRecordOf` 两臂都过 `usableName`）。
+ * 官方拦不住这种事件（`validateSessionEventData` 自述不校验完整载荷，见
+ * packages/core/session/src/surface.ts），所以那道闸门只能由 shared 兜；这里再写
+ * `string | null` 等于把同一份不变量抄第二遍，两边迟早漂移，本表只负责如实搬运。
+ * 依赖面：要求解析到的 shared ≥ 0.1.2（0.1.1 的扫描层不过滤，运行时会给出 undefined，
+ * 而这里的类型已经是 string）。升 shared 后本表不必再动。
  */
 export interface LedgerCallRow {
-  name: string | null;
+  name: string;
   callId: string | null;
   arguments: Record<string, unknown>;
   badArguments: boolean;
@@ -75,7 +83,7 @@ export interface ToolLedger {
 }
 
 const callRowSchema = z.object({
-  name: z.string().nullable(),
+  name: z.string(),
   callId: z.string().nullable(),
   arguments: z.record(z.string(), z.unknown()),
   badArguments: z.boolean(),
@@ -111,7 +119,7 @@ function toolLedgerInit(): ToolLedger {
 /** 状态行 → shared 记录（`null` 还原成"没有这个值"）。 */
 function callRecordOf(row: LedgerCallRow): ToolCallRecord {
   return {
-    name: row.name ?? undefined,
+    name: row.name,
     callId: row.callId ?? undefined,
     arguments: row.arguments,
     badArguments: row.badArguments,
@@ -127,15 +135,41 @@ function resultRecordOf(row: LedgerResultRow): ToolResultRecord {
   };
 }
 
-/** shared 记录 → 状态行（`null` 形态，见 LedgerCallRow 的 JSON 往返理由）。 */
-function callRowOf(record: ToolCallRecord): LedgerCallRow {
-  return {
-    name: record.name ?? null,
-    callId: record.callId ?? null,
-    arguments: record.arguments,
-    badArguments: record.badArguments,
-    seq: record.seq,
-  };
+/**
+ * shared 记录 → 状态行（`null` 形态，见 LedgerCallRow 的 JSON 往返理由）。
+ *
+ * 缺可用 name 的记录交回 `undefined`（整条不折进台账），而不是写一行 `name: undefined`。
+ * 这不是重复 shared 的过滤，是**写侧的自卫**：本表的状态 schema 要求 name 是必填串，
+ * 一旦写进一个 undefined 行，整份投影在 `asLedger` 那里就再也解析不回来——不是少一行，
+ * 是整份台账永久作废、宿主每次判定都退回全量扫描（= 迁移前的慢路径）。官方拦不住这种事件
+ * （`validateSessionEventData` 自述不校验完整载荷）。
+ * 判据与 shared 的 `usableName` 同形：非串、或空串都算没有。
+ *
+ * 与 shared 的分工：那边在**读侧**滤（扫描层整条不出行），本表在**写侧**再兜一道。装着的
+ * 0.1.2 里 `ToolCallRecord.name` 的类型已经是 `string`，所以这一臂从 `applyEvent` 走不到
+ * （见下面的 v8 ignore）。留着它的理由是失效代价不对称：多写一行坏行 = 整份台账永久作废，
+ * 少折一行 = 对一条本就无名的事件不做记账；而编译期管不到真实载荷——宿主漂移与持久缓存
+ * 回填都能送来类型声明之外的东西。
+ *
+ * v8 ignore next -- 装着的 shared 在读侧就滤掉了这类记录 ⇒ 本臂从 applyEvent 不可达
+ * （`callRowOf` 未导出，没有直接单测入口）；它是上面那条不变量本身，不是留着的冗余分支。
+ */
+function callRowOf(record: ToolCallRecord): LedgerCallRow | undefined {
+  const { name } = record;
+  // 单一 return：本仓 lint 开了 consistent-return 且 treatUndefinedAsUnspecified，
+  // 与带值 return 混写的裸 undefined 会被判红（同 lib/record.ts 的 ownMessage）。
+  const usable = typeof name === "string" && name.length > 0;
+  /* v8 ignore next -- 装着的 shared 在读侧就滤掉了这类记录，本臂从 applyEvent 不可达；
+     它守的是「本表自己不写坏行」这条不变量，代价只有一次 typeof，见函数头注释。 */
+  return usable
+    ? {
+        name,
+        callId: record.callId ?? null,
+        arguments: record.arguments,
+        badArguments: record.badArguments,
+        seq: record.seq,
+      }
+    : undefined;
 }
 
 function resultRowOf(record: ToolResultRecord): LedgerResultRow {
@@ -163,7 +197,10 @@ function applyEvent(state: ToolLedger, event: SessionEvent): ToolLedger {
     // 非记账事件：只有长度跟着走（无 wire ⇒ 不产视图、不通知监听）。
     return { ...state, length };
   }
-  const calls = call === undefined ? state.calls : [...state.calls, callRowOf(call)];
+  // callRowOf 可能因为 name 不可用而交回 undefined（见它的注释）：那一行不折进来，但
+  // length 照走——滤掉出行 ≠ 滤掉事件位，宿主的 logSeq 基准不能因此偏移。
+  const row = call === undefined ? undefined : callRowOf(call);
+  const calls = row === undefined ? state.calls : [...state.calls, row];
   const results = result === undefined ? state.results : [...state.results, resultRowOf(result)];
   if (calls.length > LEDGER_WINDOW || results.length > LEDGER_WINDOW) {
     return { calls: [], results: [], length, dropped: true };
@@ -173,7 +210,9 @@ function applyEvent(state: ToolLedger, event: SessionEvent): ToolLedger {
 
 export const toolLedgerProjection = {
   key: LEDGER_KEY,
-  stateVersion: 1,
+  // 2 = name 去掉 null 哨兵（字段形状变了，官方 README 要求随状态字段变化递增；
+  // 版本对不上的持久行按官方 restore 判据整行丢弃 ⇒ 读侧回退全量扫描，不作废）。
+  stateVersion: 2,
   stateSchema: toolLedgerSchema,
   init: (_header: SessionHeader, _inherited: SessionLogOffset): ToolLedger => toolLedgerInit(),
   apply: (state: ToolLedger, event: SessionEvent): ToolLedger => applyEvent(state, event),

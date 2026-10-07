@@ -291,10 +291,9 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
       const denied = fire(ctx, targetA, "big-high", log, LARGE);
       assert.ok(denied !== undefined, "3000 字符 > 默认 big(2000) → high，仍要求层探查");
       assert.match(denied, /层目录/u, "拒绝文案点名缺失的层目录（不是泛泛模板）");
-      assert.ok(
-        denied.includes(stdTestDir) || denied.includes("test"),
-        "点名的正是真实存在的 test 层",
-      );
+      // 点名的必须是真实存在的 test 层目录本身——第二个析取（含 "test" 字样）会把
+      // 文案模板里的字面 "test" 也算命中，恒真、失去判别力，故只认目录路径。
+      assert.ok(denied.includes(stdTestDir), "点名的正是真实存在的 test 层");
 
       ctx.value.bigEditChars = 100_000;
       assert.equal(
@@ -333,7 +332,7 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
       );
 
       // 层证据只认**项目级作用域**的检索（path 是目标祖先且覆盖该层目录）：
-      // 只钻进层目录搜不算——那是"兄弟目录"，看不到引用面，蹭不到证据（round 9 定稿）。
+      // 只钻进层目录搜不算——那是"兄弟目录"，看不到引用面，蹭不到证据（定稿）。
       const layerOnly = [
         ...log,
         call("grep", { path: extraDir, pattern: OTHER_MOD_BASENAME }),
@@ -377,7 +376,7 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
       assert.match(denied, /层目录/u, "要求真实存在的 test 层");
     });
 
-    it("缺字段一律升档（原则③）：write 整文件覆盖取不到 diff 尺寸 → 绝不落 low", () => {
+    it("缺字段一律升档：write 整文件覆盖取不到 diff 尺寸 → 绝不落 low", () => {
       const ctx = createMockCtx();
       apply(ctx);
       const { call, ok } = makeEvents();

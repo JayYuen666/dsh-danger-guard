@@ -77,6 +77,14 @@ const lack = (
   ...over,
 });
 
+/** 一次"仅缺 read"的编辑判定并渲染拒绝文案（判别式用例的统一入口：
+ *  轮次文案是这些用例的判别信号，收在这里也让调用链不超 max-nested-calls 闸）。 */
+const denyOfLackRead = (gate: FactGate, file: string, sessionId?: unknown): string => {
+  const decision = gate.check("edit", file, sessionId, lack(["read"]));
+  assert.equal(decision.kind, "deny");
+  return denyMessage(decision);
+};
+
 /** 只换检索判据的 refs 指令文案（refs 是唯一点名检索工具名的 need）。 */
 const refsLine = (policy: RefSearchPolicy | undefined, why: NeedWhy = "never"): string => {
   const gapCtx: FactGapContext = {
@@ -126,8 +134,28 @@ describe("factGate：强校验状态机", () => {
     gate.check("edit", PROJECT_TARGET_FILE);
     const okEdit = pass(gate.check("edit", PROJECT_TARGET_FILE, undefined, done()));
     assert.equal(okEdit, true, "有证据 → 放行");
-    const okWrite = pass(gate.check("write", PROJECT_TARGET_FILE, undefined, done()));
-    assert.equal(okWrite, true, "write/edit 共享记忆");
+  });
+
+  it("拒绝计数按文件共享、不按工具名分片：edit 计过的 write 续算到第 2 轮", () => {
+    // 黑盒判别：若记忆按工具名分片，write 这次会是"首次拒绝"（headFirst），
+    // /第 2 轮/ 断言当场红——这是"共享"真正可观察的行为面。
+    const first = gate.check("edit", PROJECT_TARGET_FILE, undefined, lack(["read"]));
+    assert.equal(first.kind, "deny");
+    const second = gate.check("write", PROJECT_TARGET_FILE, undefined, lack(["read"]));
+    assert.equal(second.kind, "deny");
+    assert.match(denyMessage(second), /第 2 轮/u, "换写类工具计数续算，不另起分片");
+  });
+
+  it("配额放行按文件共享：edit 熬满配额后 write 免证据放行", () => {
+    // 默认 maxDenies=2：deny → deny → 第 3 次配额放行；随后换工具名不再重拦。
+    gate.check("edit", PROJECT_TARGET_FILE, undefined, lack(["read"]));
+    gate.check("edit", PROJECT_TARGET_FILE, undefined, lack(["read"]));
+    assert.equal(gate.check("edit", PROJECT_TARGET_FILE, undefined, lack(["read"])).kind, "quota");
+    assert.equal(
+      gate.check("write", PROJECT_TARGET_FILE).kind,
+      "allow",
+      "配额按文件共享，不按工具名分片",
+    );
   });
 
   it('重试时仍无证据 → 继续拒绝（不再"拦一次即放行"）', () => {
@@ -234,15 +262,25 @@ describe("factGate：SKIP 面收紧", () => {
 });
 
 describe("factGate：容量与并发安全", () => {
-  it("记忆的文件数有上限（防超长会话内存膨胀），按插入序（FIFO）淘汰最旧", () => {
-    const gate = new FactGate({ maxFiles: 3 });
-    for (let i = 0; i < 5; i += 1) {
-      gate.check("edit", `/w/f${i}.ts`);
+  it("记忆的文件数有上限（防超长会话内存膨胀），真 LRU：命中即续命，最久未用先淘汰", () => {
+    // 黑盒判别（LRU vs FIFO 的分叉点）：f0 命中一次后，新文件挤入淘汰的必须是
+    // f1/f2（最久未用）而不是 f0。若实现退回"按插入序淘汰"，f0 的 /第 3 轮/ 断言会红。
+    // maxDenies 抬到 5：让 f0 的三次拒绝都落在拒绝路径内，不提前触发配额放行。
+    const gate = new FactGate({ maxFiles: 3, maxDenies: 5 });
+    for (let i = 0; i < 3; i += 1) {
+      gate.check("edit", `/w/f${i}.ts`, undefined, lack(["read"]));
     }
-    // f0、f1 被淘汰：再次编辑会重新触发事实门（重新取证）
-    assert.equal(gate.check("edit", "/w/f0.ts").kind, "deny", "淘汰后重新编辑应重新过门");
-    const okRecent = pass(gate.check("edit", "/w/f4.ts", undefined, done()));
-    assert.equal(okRecent, true, "最近的文件仍在记忆中");
+    // 命中 f0 → 续命（位次刷到最新）
+    gate.check("edit", "/w/f0.ts", undefined, lack(["read"]));
+    // 挤入两个新文件：容量 3，被挤掉的应是 f1、f2
+    gate.check("edit", "/w/f3.ts", undefined, lack(["read"]));
+    gate.check("edit", "/w/f4.ts", undefined, lack(["read"]));
+    // f0 的计数还在（此前 deny 过 2 次）→ 第 3 轮
+    assert.match(denyOfLackRead(gate, "/w/f0.ts"), /第 3 轮/u, "命中续命的文件没被挤掉");
+    // f1 已被挤掉 → 从首拒重新计数
+    assert.doesNotMatch(denyOfLackRead(gate, "/w/f1.ts"), /第 2 轮/u, "最久未用的文件已被淘汰");
+    // 淘汰即重新过门：f1 重新计入第 1 轮后，第 2 次无证据就是第 2 轮
+    assert.match(denyOfLackRead(gate, "/w/f1.ts"), /第 2 轮/u);
   });
 
   it("check 不抛错（防御式）", () => {
@@ -284,10 +322,14 @@ describe("b9：会话隔离（状态按 session 分片）", () => {
   });
 
   it("无 sessionId 的调用共享默认分片（向后兼容）", () => {
+    // 黑盒判别：默认分片若不存在（每次调用各记各的），第二次会退回首拒而不是第 2 轮。
     const gate = new FactGate();
-    assert.equal(gate.check("edit", "/w/a.ts").kind, "deny");
-    const okLater = pass(gate.check("edit", "/w/a.ts", undefined, done()));
-    assert.equal(okLater, true);
+    assert.equal(gate.check("edit", "/w/a.ts", undefined, lack(["read"])).kind, "deny");
+    assert.match(
+      denyOfLackRead(gate, "/w/a.ts"),
+      /第 2 轮/u,
+      "无 id 的调用落在同一默认分片，计数连续",
+    );
   });
 });
 
@@ -297,8 +339,14 @@ describe("str_replace_editor 并存编辑器过事实门", () => {
     assert.equal(gate.check("str_replace_editor", SHARED_TARGET_FILE).kind, "deny", "首次写拦");
     const okOnce = pass(gate.check("str_replace_editor", SHARED_TARGET_FILE, undefined, done()));
     assert.equal(okOnce, true, "取证后放行");
-    const okEdit = pass(gate.check("edit", SHARED_TARGET_FILE, undefined, done()));
-    assert.equal(okEdit, true, "edit/write/str_replace_editor 共享同一文件记忆");
+    // "共享记忆"的黑盒判别：str_replace_editor 计过的 edit 续算轮次——
+    // 若记忆按工具名分片，edit 这次会是首次拒绝，/第 2 轮/ 断言当场红。
+    assert.equal(gate.check("edit", SHARED_TARGET_FILE, undefined, lack(["read"])).kind, "deny");
+    assert.match(
+      denyOfLackRead(gate, SHARED_TARGET_FILE),
+      /第 2 轮/u,
+      "edit/write/str_replace_editor 共享同一文件记忆",
+    );
   });
 
   it("view（只读）不进事实门：host 侧不传路径", () => {
@@ -442,11 +490,12 @@ describe("factGate：会话键与会话分片容量", () => {
   it("非字符串 session id（number/bigint/boolean）都能成分片键", () => {
     // host 传的是 `exec.agent.session.id`（真实契约是 SessionId 字符串），但 PTC/旧宿主
     // 可能给出数字键——keyOf 必须对任意原始类型稳定，否则不同会话串进同一分片。
+    // 黑盒判别：同键两次 → 第 2 轮（记忆连续）；异键 → 首拒（没串片）。
     const gate = new FactGate();
-    assert.equal(gate.check("edit", "/w/k.ts", 7).kind, "deny");
-    assert.equal(gate.check("edit", "/w/k.ts", 10n).kind, "deny", "bigint 会话另起分片");
-    assert.equal(gate.check("edit", "/w/k.ts", true).kind, "deny", "boolean 会话另起分片");
-    assert.equal(gate.check("edit", "/w/k.ts", 7, done()).kind, "allow", "数字键会话记忆连续");
+    assert.equal(gate.check("edit", "/w/k.ts", 7, lack(["read"])).kind, "deny");
+    assert.match(denyOfLackRead(gate, "/w/k.ts", 7), /第 2 轮/u, "数字键会话记忆连续");
+    assert.doesNotMatch(denyOfLackRead(gate, "/w/k.ts", 10n), /第 2 轮/u, "bigint 会话另起分片");
+    assert.doesNotMatch(denyOfLackRead(gate, "/w/k.ts", true), /第 2 轮/u, "boolean 会话另起分片");
   });
 
   it("dropSession 对默认分片（无 id）是 no-op——默认分片只能靠 LRU/reset 回收", () => {

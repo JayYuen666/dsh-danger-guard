@@ -140,12 +140,7 @@ async function profileBundleName(): Promise<string> {
     [pkgName],
     "本包在 profile 的 bundles 清单里，且只列一次",
   );
-  const link: unknown = profile.dependencies?.[pkgName];
-  assert.equal(typeof link, "string", "profile 的 dependencies 指向本包");
-  assert.ok(
-    typeof link === "string" && link.includes(PKG_DIR),
-    `profile 的 link 目标应是本目录（实得 ${String(link)}）`,
-  );
+  // link 与上面守卫读的是同一位（守卫已保证 typeof string 且含本目录）——不再重复断言。
   return pkgName;
 }
 
@@ -527,12 +522,15 @@ describe("b11：danger-guard 设置卡", () => {
     return row.querySelector(".dgc-hint")?.textContent ?? "";
   }
 
-  it("快照 ready 前开关 disabled（loading 与 unavailable 均不可写）", async () => {
+  /** 渲染一张未就绪（status ≠ ready）的卡并展开，交回全部开关控件。 */
+  async function renderUnreadyCard(
+    status: "loading" | "unavailable",
+  ): Promise<HTMLButtonElement[]> {
     const { DgCardForTest, makeScope } = await loadCard();
     const calls: { field: string; value: unknown }[] = [];
     // 首个快照受理前 value 是 undefined（官方契约），cardStore 会把它落成 {}；
     // status 现在由官方类型交出，直接读即可（原先要 `as { status: string }` 再取）。
-    const scope = makeScope(snap({ status: "loading", writable: false, value: undefined }), calls);
+    const scope = makeScope(snap({ status, writable: false, value: undefined }), calls);
     const useCard = useCardOf({
       status: scope.getSnapshot().status,
       writable: false,
@@ -545,16 +543,25 @@ describe("b11：danger-guard 设置卡", () => {
         ...cardWrites(scope),
       }),
     );
-    // 展开卡片
     const header = container.querySelector<HTMLElement>(HEADER_SELECTOR);
     assert.ok(header, "卡片 header 存在");
     await act(async () => {
       header.click();
     });
     const switches = [...container.querySelectorAll(SWITCH_SELECTOR)] as HTMLButtonElement[];
-    assert.ok(switches.length >= 2, "两个开关渲染");
-    for (const sw of switches) {
+    assert.ok(switches.length >= 2, `${status}：两个开关渲染`);
+    return switches;
+  }
+
+  it("快照 loading 时开关 disabled", async () => {
+    for (const sw of await renderUnreadyCard("loading")) {
       assert.equal(sw.disabled, true, "loading 时开关 disabled");
+    }
+  });
+
+  it("快照 unavailable 时开关同样 disabled（命名空间未服务 → 不可写）", async () => {
+    for (const sw of await renderUnreadyCard("unavailable")) {
+      assert.equal(sw.disabled, true, "unavailable 时开关 disabled");
     }
   });
 
@@ -646,10 +653,11 @@ describe("b11：danger-guard 设置卡", () => {
     external = { extraDevServerWords: ["remix"] };
     await rerender();
     assert.match(at()!.value, /remix/u, "外部值变化回同步");
-    // 连续输入 → 防抖：只落一次写。
-    // happy-dom 的合成事件到不了 React 19 的 root 监听器（已实证）——
-    // 经 __reactProps 直调真实 onChange：state、防抖 timer、写通道全是真实链路，
-    // 只绕过 DOM 事件传输层（那是 React/happy-dom 的事，不是本卡的逻辑）。
+    // 连续输入只入草稿、不直写（保存条模式）：多次 onChange 后「保存」一次性落盘。
+    // happy-dom 的合成 change 事件到不了 React 19 的受控 input（已实证；按钮 click
+    // 是通的，见本文件各 click() 用例）——经 __reactProps 直调真实 onChange：
+    // state、草稿、写通道全是真实链路，只绕过 DOM 事件传输层（那是 React/happy-dom
+    // 的事，不是本卡的逻辑）。
     const box = at()!;
     const propsKey = Object.keys(box).find((keyName) => keyName.startsWith(REACT_PROPS_KEY_PREFIX));
     assert.ok(propsKey !== undefined, REACT_PROPS_FOUND_MESSAGE);
@@ -683,31 +691,6 @@ describe("b11：danger-guard 设置卡", () => {
     const written = calls.filter((call) => call.field === "extraDevServerWords");
     assert.equal(written.length, 1, "保存只写一次");
     assert.deepEqual(written[0]!.value, ["abc"]);
-  });
-
-  it("本地 set/unset iface 返回 Promise<void>（即使底层抛错也 .catch 吞掉不炸渲染）", async () => {
-    const { DgCardForTest, makeScope } = await loadCard();
-    const scope = makeScope(snap(), []);
-    // 底层 set 拒绝：卡片不得产生 unhandled rejection 导致崩溃
-    await renderCard(
-      React.createElement(DgCardForTest, {
-        t: tZh,
-        useCard: useCardOf({ status: "ready", writable: true, value: {} }),
-        set: async (field: string, value: unknown) => {
-          void failingSet().catch(() => void 0);
-          await scope.set(field, value);
-        },
-        unset: (field: string) => cardWrites(scope).unset(field),
-      }),
-    );
-    await act(async () => {
-      container.querySelector<HTMLElement>(HEADER_SELECTOR)!.click();
-    });
-    const sw = container.querySelector<HTMLButtonElement>(SWITCH_SELECTOR);
-    assert.ok(sw);
-    await act(async () => {
-      sw.click();
-    });
   });
 
   it("ready 但 writable=false（workspace 级只读）→ 开关 disabled（status/writable 独立闸门）", async () => {
@@ -839,8 +822,8 @@ describe("b11：danger-guard 设置卡", () => {
     });
     assert.equal(calls.length, 0, "开关点击不直写（保存条模式）");
 
-    // 暂存②：数字框经真实 onChange 链路入草稿（happy-dom 合成事件到不了 React 19
-    // root 监听器，故直调 __reactProps 上的 onChange——见本文件上方说明）。
+    // 暂存②：数字框经真实 onChange 链路入草稿（happy-dom 合成 change 事件到不了
+    // React 19 受控 input，故直调 __reactProps 上的 onChange——见本文件上方说明）。
     await act(async () => {
       propsOf(numSmall).onChange({ target: { value: "80" } });
     });

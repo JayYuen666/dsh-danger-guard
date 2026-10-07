@@ -48,10 +48,13 @@ export interface DangerGuardMessages {
   readonly pipeShell: string;
   /** 长驻开发服务器。 */
   readonly devServer: string;
-  /** 嵌套 shell `-c` 体**未被检查** → 需用户确认。 */
+  /** 执行面里那条命令没被检查到（嵌套 shell 的 `-c` 体、解释器的代码串、超出长度上限的输入）
+   *  → 需用户确认。 */
   readonly nestedShellUnconfirmed: string;
   /** 编辑目标是密钥/凭据文件。 */
   readonly secretPath: string;
+  /** 编辑目标长到没法判（超出可判定长度上限）→ 需用户确认。 */
+  readonly opaqueTarget: string;
   // ── 事实强制门（lib/fact-gate.ts + host.ts 的缺项 hint）─────────────────
   /** 证据不可判定 → 交互式确认。 */
   readonly indeterminate: string;
@@ -131,14 +134,19 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "在 Agent 会话内会挂死当前回合或占住后台。请改用一次性命令（build/check/test），" +
       "确需长驻服务时请先与用户确认并由用户在独立终端启动。",
     nestedShellUnconfirmed:
-      "[danger-guard] 嵌套 shell 的 `-c` 命令体未被检查：引号不闭合导致体被截断，" +
-      "或套娃层数超出下钻上限（超界的部分根本没进到判定里）。" +
+      "[danger-guard] 这条命令真正要执行的那段内容**未被检查**：嵌套 shell 的 `-c` 体因引号不闭合被" +
+      "截断、套娃层数超出下钻上限（嵌套 `-c` 与 `$( )` 命令替换各自有一道层数界）、段头是取代码串再" +
+      "执行的解释器（python -c / node -e / perl -e 等，语言层的动作不在命令词法面上）、" +
+      "或命令长度超出可判定上限。" +
       "这不是「已确认危险」也不是「已确认安全」——请勿原样重试，" +
-      "把这条命令贴给用户、由用户显式确认后再执行；" +
-      '或改写成单层、引号闭合的形态（如 bash -c "rm -rf ./build"）后重试。',
+      "把它贴给用户、由用户显式确认后再执行；" +
+      '或改写成单层、引号闭合、直白可读的形态（如 bash -c "rm -rf ./build"）后重试。',
     secretPath:
       "[danger-guard] 编辑目标是密钥/凭据文件（.ssh、私钥、证书、密钥库）。" +
       "凭据面不由模型直接改动；确需变更请让用户在终端手动操作。",
+    opaqueTarget:
+      "[danger-guard] 编辑目标的路径长到无法判定（超出可判定长度上限），既没确认为凭据文件、" +
+      "也没确认不是。请勿原样重试，把目标路径贴给用户确认；或改用正常的短路径。",
     indeterminate:
       "[fact-gate] 无法自动验证取证（本会话历史不可得）。若确无法取证，请向用户确认是否放行本次编辑；" +
       "用户同意放行可在设置卡临时关闭「编辑事实门」，编辑完成后再开启。此路径不消耗放行次数。",
@@ -211,15 +219,22 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "command instead (build/check/test); when a long-running server really is needed, have the " +
       "user start it in their own terminal.",
     nestedShellUnconfirmed:
-      "[danger-guard] The `-c` body of this nested shell was never inspected: unbalanced quotes " +
-      "truncated it, or the nesting went past the drill-down limit (the overflow never reached " +
-      "the checks at all). This is neither 'confirmed dangerous' nor 'confirmed safe' — do not " +
-      "retry it verbatim. Paste the command to the user and run it only after they explicitly " +
-      'confirm; or rewrite it as one quote-balanced layer (e.g. bash -c "rm -rf ./build") and retry.',
+      "[danger-guard] The part this command actually executes was never inspected: the `-c` body " +
+      "of a nested shell was truncated by unbalanced quotes, the nesting went past the drill-down " +
+      "limit (nested `-c` bodies and `$( )` substitutions each carry their own depth cap), the " +
+      "segment head is an interpreter that runs a code string (python -c / node -e / " +
+      "perl -e, … — what that language does is not visible at the command-lexer level), or the " +
+      "command is longer than the judgable limit. This is neither 'confirmed dangerous' nor " +
+      "'confirmed safe' — do not retry it verbatim. Paste it to the user and run it only after " +
+      'they explicitly confirm; or rewrite it as one plain, quote-balanced layer (e.g. bash -c "rm -rf ./build") and retry.',
     secretPath:
       "[danger-guard] The edit target is a secret/credential file (.ssh, private keys, " +
       "certificates, keystores). Credentials are not edited by the model; when one really must " +
       "change, have the user do it by hand in a terminal.",
+    opaqueTarget:
+      "[danger-guard] The edit target path is too long to judge (past the judgable length limit): " +
+      "it is neither confirmed nor cleared as a credential file. Do not retry it verbatim — paste " +
+      "the path to the user to confirm, or use a normal short path.",
     indeterminate:
       "[fact-gate] Evidence cannot be verified automatically (this session's history is " +
       "unavailable). If gathering it really is impossible, ask the user whether to allow this " +

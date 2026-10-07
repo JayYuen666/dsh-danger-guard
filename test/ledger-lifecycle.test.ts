@@ -9,7 +9,7 @@
 // 一条 fiber 才会跑到 disposer，手写 mock 的 effects 数组验不了这条链。
 import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -17,6 +17,8 @@ import { Context } from "@deepseek-ai/cordis";
 import plugin, { BUILTIN_BASE } from "../host.ts";
 import type { Config } from "../host.ts";
 import { SETTINGS_READER } from "../lib/settings-schema.ts";
+import { call, result, unrelated } from "./fixtures/events.ts";
+import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 
 /** 事实门的拒绝理由统一带此前缀：用例据此判定「闸门确实在判」，而不是静默放行。 */
 const FACT_GATE_MARK = /fact-gate/u;
@@ -88,20 +90,55 @@ describe("派生台账的生命周期", () => {
     );
   }
 
-  describe("会话销毁按会话键回收", () => {
-    it("只清掉本会话的分片，前缀相同的另一个会话不受影响", async () => {
-      const ctx = await mount();
-      // 两个会话 id 故意互为前缀（s1 / s10）：sessKey 自带 `|` 收尾，
-      // 少那个分隔符就会把 s10 的记账连坐删掉。
-      assert.match(editOn("s1"), FACT_GATE_MARK, "s1 首次编辑被拦（无取证）");
-      assert.match(editOn("s10"), FACT_GATE_MARK, "s10 首次编辑被拦");
+  /** 带自定义事件流的 edit 调用（放行时返回 undefined——与 editOn 的 "" 区分开）。 */
+  function editWithLog(sessionId: string, log: readonly SessionEvent[]): string | undefined {
+    assert.ok(predicate, "guard 谓词已挂载（mount 之后才该调用）");
+    return predicate({
+      name: "edit",
+      arguments: { file_path: target },
+      agent: { session: { id: sessionId, header: { cwd: root }, snapshotEvents: () => log } },
+    });
+  }
 
+  describe("会话销毁按会话键回收", () => {
+    it("只清掉本会话的分片：s1 销毁不连坐 s10 的会话键基线", async () => {
+      // 黑盒判别：s10 的 seenLen/mtime 基线是否被 s1 的销毁连坐清掉，唯一可观察面是
+      // 「外部改动基准取哪一位」。首评日志 4 位（基线=4）；复评日志 6 位、新 read 的
+      // 结果位在 5——基线在位时 5 > 4，read 仍算数 → 放行；基线被清（前缀少 `|` 的
+      // 连坐）时基准退到当前日志末尾 6，5 > 6 不成立 → 判"被会话外改过" → 拒绝。
+      const ctx = await mount();
+      const readArgs = JSON.stringify({ file_path: target });
+      const grepArgs = JSON.stringify({ pattern: "policy-mod", path: root });
+      await utimes(target, 1_000_000_000, 1_000_000_000);
+      const log1: SessionEvent[] = [
+        call("r1", "read", readArgs),
+        result("r1"),
+        call("g1", "grep", grepArgs),
+        result("g1"),
+      ];
+      assert.equal(editWithLog("s10", log1), undefined, "首评取证齐 → 放行（同时写下 s10 基线）");
+      assert.match(editOn("s1"), FACT_GATE_MARK, "s1 首次编辑被拦（无取证）");
+
+      await utimes(target, 2_000_000_000, 2_000_000_000);
       ctx.emit(SESSION_DISPOSED, { id: "s1" } as never);
 
-      // 两个会话都还在正常判定链上：清台账不该让闸门失声，也不该让另一会话崩。
-      assert.match(editOn("s1"), FACT_GATE_MARK, "s1 销毁后重新过门（基线已清，按首拒走）");
-      assert.match(editOn("s10"), FACT_GATE_MARK, "s10 的记账没被连坐删掉");
-
+      // s10 复评（必须在 s1 的冒烟之前：s1 的再评估会把全局 mtimes 基线刷到 T2，
+      // 全局兜底会把"基线是否还在"的差异整个抹平——那是这个用例的判别窗口）。
+      // 基线在位时外部改动基准=4，重读调用位 5 > 4 → 放行；
+      // 基线被连坐清掉（前缀少 `|`）时基准退到当前日志末尾 7 → 5 > 7 不成立 → 拒绝。
+      const log2: SessionEvent[] = [
+        ...log1,
+        unrelated(),
+        call("r2", "read", readArgs),
+        result("r2"),
+      ];
+      assert.equal(
+        editWithLog("s10", log2),
+        undefined,
+        "s10 的会话键基线没被 s1 的销毁连坐清掉（外部改动基准仍是自己的台账位）",
+      );
+      // s1 自己的闸门照常。
+      assert.match(editOn("s1"), FACT_GATE_MARK, "s1 销毁后闸门照常（分片已清，重新过门）");
       await ctx.fiber.dispose();
     });
 
@@ -110,7 +147,10 @@ describe("派生台账的生命周期", () => {
       assert.match(editOn("s-dup"), FACT_GATE_MARK, "首拒");
       ctx.emit(SESSION_DISPOSED, { id: "s-dup" } as never);
       ctx.emit(SESSION_DISPOSED, { id: "s-dup" } as never);
-      assert.match(editOn("s-dup"), FACT_GATE_MARK, "重复销毁后闸门照常");
+      // 分片已清：重新从首拒计数——第二次 dispose 既没有二次伤害（闸门照常），
+      // 也没有把计数保留下来（那才是"清错了"的信号）。
+      assert.doesNotMatch(editOn("s-dup"), /第 2 轮/u, "重复销毁后从首拒重新计数");
+      assert.match(editOn("s-dup"), /第 2 轮/u, "计数随后正常连续（幂等的正向对照）");
       await ctx.fiber.dispose();
     });
   });
@@ -123,7 +163,7 @@ describe("派生台账的生命周期", () => {
       assert.doesNotMatch(editOn("s-unload"), TEST_LAYER_GAP, "磁盘上本就没有 test 层");
 
       await mkdir(testDir, { recursive: true });
-      // 同一代内磁盘变了，层缓存仍持上一轮的结论 → 新层漏掉（这正是缓存本来的取舍）。
+      // 同一代内磁盘变了，层缓存仍持上一次探查的结论 → 新层漏掉（这正是缓存本来的取舍）。
       assert.doesNotMatch(editOn("s-unload"), TEST_LAYER_GAP, "同代内层缓存不重探（取舍，非缺陷）");
       await first.fiber.dispose();
 

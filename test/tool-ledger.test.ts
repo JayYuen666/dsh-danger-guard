@@ -230,28 +230,41 @@ describe("投影台账 ≡ scanToolEvents", () => {
     assert.equal(ledger.length, 7, "非记账事件照样占一位");
   });
 
-  it("坏事件一律跳过，两侧口径同源", () => {
+  it("坏事件一律跳过；缺 name 的调用不出行，两侧读法仍逐字同值", () => {
     push(
-      // 缺 name 与 callId 的调用：shared 记 name=undefined，danger-guard 侧不记账
+      // 缺 name 的调用：name 是分桶键，官方又拦不住这种事件
+      // （validateSessionEventData 自述不校验完整载荷），所以它必须在某处被滤掉。
       badEvent({ type: "tool/call", data: { arguments: "{}" } }),
+      // name 是空串：同样算不可用（与缺字段同形）
+      badEvent({ type: "tool/call", data: { name: "", callId: "c0" } }),
       // data 非对象
       badEvent({ type: "tool/call", data: "nope" }),
       // 未知事件类型
       badEvent({ type: "whatever", data: {} }),
-      // arguments 非法 JSON：badArguments 两侧同真
+      // arguments 非法 JSON：badArguments 为真
       call("c9", "read", "{not json"),
       // result 缺 message
       badEvent({ type: "tool/result", data: {} }),
     );
-    const ledger = assertSameLedger();
-    // 只有两条 tool/call 出行：缺 name/callId 的那条以 null 占位（两侧同读，不是谁漏记），
-    // data 非对象与未知类型整条丢弃；坏 JSON 参数仍出行，但 badArguments 为真。
-    assert.deepEqual(ledger.calls, [
-      { name: null, callId: null, arguments: {}, badArguments: false, seq: 0 },
-      { name: "read", callId: "c9", arguments: {}, badArguments: true, seq: 3 },
+    // 这条**走 assertSameLedger**：shared 在读侧滤掉缺 name 的调用，本表写侧过同一道判据，
+    // 两边都滤 ⇒ 折叠台账与全量扫描在这一类坏事件上仍然逐字同值（这才是要钉的不变式：
+    // 判定侧不必区分两条读法）。0.1.2 之前 shared 不过滤、两侧会差两行，那时只能钉
+    // 「折叠台账逐字相同」；现在依赖锁到 ^0.1.2，真降版会让这条直接红。
+    // assertSameLedger 内的 `assert.ok` 已经钉住"完整折叠不该作废"——缺 name 的行若把
+    // 整份台账判成作废，就是写侧 name 判据失守。
+    const usable = assertSameLedger();
+    // 只有一条 tool/call 出行：缺 name / 空 name / data 非对象 / 未知类型四条都整条丢弃，
+    // 坏 JSON 参数仍出行（内容不可信但工具名可信，新鲜度判据仍要用它），badArguments 为真。
+    assert.deepEqual(usable.calls, [
+      { name: "read", callId: "c9", arguments: {}, badArguments: true, seq: 4 },
     ]);
     // 缺 message 的 result 仍是一行"成功"，callId 为 null（配对键不可信）。
-    assert.deepEqual(ledger.results, [{ callId: null, isError: false, seq: 4 }]);
+    assert.deepEqual(usable.results, [{ callId: null, isError: false, seq: 5 }]);
+    // 被滤掉的事件照样占事件位：length 走的是 logSeq 基准，不能因为不出行就少走一位——
+    // 否则宿主的"日志有没有长过台账"判断会整体偏移一位。
+    assert.equal(usable.length, 6, "滤掉出行 ≠ 滤掉事件位");
+    // 判定的实际输入（callsOf）与两条读法同形状，且这里只有那一行可读。
+    assert.deepEqual(callsOf(usable), usable.calls);
   });
 
   it("无 callId 的极旧契约调用（扫描器记 callId=undefined，host 侧造 nc:<seq> 键）", () => {
@@ -395,9 +408,50 @@ describe("stateOf 回填与单元形状", () => {
     assert.equal(callsOf(state)[0]?.callId, undefined, "读回 shared 记录时还原成 undefined");
   });
 
+  it("旧版（stateVersion 1，name 允许 null）的持久行判为不可采信 ⇒ 回退全量扫描", () => {
+    // 升级兼容面：老用户磁盘上躺着 name: null 的行。判据交给 zod（name 现在必填串），
+    // 整份台账作废、读侧交回 undefined，host 回退全量扫描 = 迁移前的行为——宁可多扫一次，
+    // 也不能让一份形状对不上的旧表参与新鲜度判定。
+    assert.equal(
+      asLedger({
+        calls: [{ name: null, callId: null, arguments: {}, badArguments: false, seq: 0 }],
+        results: [],
+        length: 1,
+        dropped: false,
+      }),
+      undefined,
+      "旧的 null 形状不得被当成可信台账",
+    );
+    // 缺席（键干脆没有）同样判不过：JSON 往返丢键与写 null 是两种坏法，都得被拦住。
+    const missingKey = {
+      calls: [{ callId: null, arguments: {}, badArguments: false, seq: 0 }],
+      results: [],
+      length: 1,
+      dropped: false,
+    };
+    assert.equal(asLedger(missingKey), undefined);
+    // 非字符串的 name（数字/对象）同样判不过——类型面被绕过时 zod 才是最后一道闸。
+    for (const name of [7, {}, [], true]) {
+      assert.equal(
+        asLedger({
+          calls: [{ name, callId: null, arguments: {}, badArguments: false, seq: 0 }],
+          results: [],
+          length: 1,
+          dropped: false,
+        }),
+        undefined,
+        `name=${JSON.stringify(name)} 不得被采信`,
+      );
+    }
+  });
+
   it("注册键、stateVersion 与 host-only 形状", () => {
     assert.equal(toolLedgerProjection.key, LEDGER_KEY);
-    assert.equal(toolLedgerProjection.stateVersion, 1);
+    assert.equal(
+      toolLedgerProjection.stateVersion,
+      2,
+      "name 去 null 哨兵 = 状态字段变了，官方要求递增",
+    );
     assert.equal("wire" in toolLedgerProjection, false, "host-only：不进客户端快照");
     const first = call("c1", "read", "{}");
     const stepped = toolLedgerProjection.apply(

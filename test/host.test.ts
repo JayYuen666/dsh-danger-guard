@@ -2,6 +2,9 @@
 import { afterEach, describe, it, beforeEach, vi } from "vitest";
 import assert from "node:assert/strict";
 import os from "node:os";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, symlink, writeFile, utimes, rm } from "node:fs/promises";
+import path from "node:path";
 import plugin, { BUILTIN_BASE, ConfigSchema, SETTINGS_NS } from "../host.ts";
 import type { Config } from "../host.ts";
 import settingsPlugin from "../settings-host.ts";
@@ -301,10 +304,11 @@ describe("danger-guard host 接线", () => {
     assert.equal(Object.hasOwn(plugin, "Config"), false, "拦截条目必须没有 Config 键");
   });
 
-  it("0.1.6 的 base 逐项落成 schema 默认值（enabled/factGate 开、词表空）", () => {
+  it("base 逐项落成 schema 默认值（enabled/factGate/judgeStats 开、词表空）", () => {
     assert.deepEqual(resolvedRow({}), {
       enabled: true,
       factGateEnabled: true,
+      judgeStats: true,
       maxDenies: 2,
       strictMode: false,
       smallEditChars: 200,
@@ -318,7 +322,7 @@ describe("danger-guard host 接线", () => {
     });
   });
 
-  it("volatile 投影：宿主为本条目投影出的可编辑字段集恰为这十二项", () => {
+  it("volatile 投影：宿主为本条目投影出的可编辑字段集恰为这十三项", () => {
     // 少一项 → 那项写不进（`is not volatile`）；一项都没有 → describe() 整条跳过、
     // 卡片页消失（settings/index.ts:308-309、:386）。
     assert.deepEqual(volatileMarkedFields(ConfigSchema).toSorted(), [
@@ -329,6 +333,7 @@ describe("danger-guard host 接线", () => {
       "extraSecretPatterns",
       "extraTestDirs",
       "factGateEnabled",
+      "judgeStats",
       "maxDenies",
       "refSearchStrictTools",
       "refSearchTools",
@@ -434,7 +439,7 @@ describe("danger-guard host 接线", () => {
     assert.ok(blocked !== undefined, "危险命令不受影响");
   });
 
-  it("词表配置接线：extraDevServerWords / extraSecretPatterns 经 settings 生效（v6）", () => {
+  it("词表配置接线：extraDevServerWords / extraSecretPatterns 经 settings 生效", () => {
     ctx.value.extraDevServerWords = ["turbopack"];
     ctx.value.extraDevRunArgs = ["preview"];
     ctx.value.extraSecretPatterns = ["secrets/"];
@@ -529,7 +534,7 @@ describe("danger-guard host 接线", () => {
     // 只 read 未 grep → 证据不全，继续拒
     const readOnlyLog = [call("read", { file_path: target }), ok()];
     assert.ok(ctx.guardInstalled!.fn(withLog(readOnlyLog)) !== undefined, "仅 read 仍拒");
-    // read + grep（两者均需**成功回填** result；缺陷①：未回填/失败的检索不算证据）
+    // read + grep（两者均需**成功回填** result；未回填/失败的检索不算证据）
     const log = [
       call("read", { file_path: target }),
       ok(),
@@ -572,11 +577,11 @@ describe("danger-guard host 接线", () => {
     assert.equal(ctx.guardInstalled!.fn(withLog(full)), undefined, "PTC read+grep 后放行");
   });
 
-  it("新鲜度接线：自己连续编辑同一文件不再反复过门（round 13 定稿）", () => {
+  it("新鲜度接线：自己连续编辑同一文件不再反复过门（定稿）", () => {
     const target = "/w/proj/src/fresh.ts";
     const { call, ok } = makeEvents();
     const withLog = makeWithLog(target, "fr");
-    // read + grep 完成（两者均需**成功回填** result；缺陷①：未回填的检索不算证据）
+    // read + grep 完成（两者均需**成功回填** result；未回填的检索不算证据）
     const full = [
       call("read", { file_path: target }),
       ok(),
@@ -644,19 +649,6 @@ describe("danger-guard host 接线", () => {
       disposer();
     }
     assert.equal(ctx.guardInstalled, null);
-  });
-
-  it("effect 清理重置事实门记忆（下轮重新取证）", () => {
-    ctx.guardInstalled!.fn({ name: "edit", arguments: { file_path: EDIT_TARGET_PATH } });
-    for (const disposer of ctx.effects) {
-      disposer();
-    }
-    // 重新挂载（模拟新会话）后同文件再次被拦
-    const ctx2 = createMockCtx();
-    applyPlugin(ctx2);
-    const gi = ctx2.guardInstalled;
-    assert.ok(gi, "重新挂载后 guard 就位");
-    assert.ok(gi.fn({ name: "edit", arguments: { file_path: EDIT_TARGET_PATH } }) !== undefined);
   });
 });
 
@@ -770,11 +762,75 @@ describe("危险面闸门的入参防御（非字符串 / 非对象参数）", (
     );
   });
 
-  it("read 等无路径工具不参与密钥面/事实门", () => {
+  it("密钥面按**键形**认目标：只读工具翻凭据也拒，事实门仍只盯写类工具", () => {
+    // 本轮定的口径：工具名不构成豁免（名字会随 provider/版本漂移，猜名字等于静默失效），
+    // 只要参数里声明了路径键就进密钥面判定。
+    assert.match(
+      ctx.guardInstalled!.fn({
+        name: "read",
+        arguments: { file_path: "/w/proj/.ssh/id_rsa" },
+      }) ?? "",
+      /密钥|凭据/u,
+      "只读工具读凭据也拦",
+    );
+    // 事实门**不**跟着放宽：给只读工具要求"先读后写"是自相矛盾的死锁
     assert.equal(
-      ctx.guardInstalled!.fn({ name: "read", arguments: { file_path: "/w/proj/.ssh/id_rsa" } }),
+      ctx.guardInstalled!.fn({ name: "read", arguments: { file_path: "/w/proj/main.rs" } }),
       undefined,
-      "只读工具可以读密钥（编辑才拦）",
+      "只读 + 非凭据路径：两道门都不出声",
+    );
+    // 没有路径键的调用（bash 的参数是 command）不进编辑面
+    assert.equal(ctx.guardInstalled!.fn({ name: "bash", arguments: { command: "ls" } }), undefined);
+  });
+});
+
+describe("宿主 realpath 参与密钥面：软链不再是出路", () => {
+  let dir: string;
+  let realHome: string;
+  let link: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), "dgc-realpath-"));
+    realHome = path.join(dir, "real");
+    link = path.join(dir, "link");
+    await mkdir(path.join(realHome, ".ssh"), { recursive: true });
+    await mkdir(link, { recursive: true });
+    await writeFile(path.join(realHome, ".ssh", "id_rsa"), "k\n");
+    await symlink(path.join(realHome, ".ssh"), path.join(link, "ssh"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("声明路径无害、解析后落在 .ssh 目录内 ⇒ 拦（写新文件那一形也要解析到祖先）", () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const target = path.join(link, "ssh", "authorized_keys");
+    assert.equal(existsSync(target), false, "测试前提：目标文件还不存在");
+    assert.match(
+      ctx.guardInstalled!.fn({
+        name: "edit",
+        arguments: { file_path: target },
+      }) ?? "",
+      /密钥|凭据/u,
+    );
+  });
+
+  it("同一条路径没被解析出来时（祖先也全不存在）退回声明形判定，不放行也不谎称凭据", () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const target = path.join(dir, "nope", "deeper", "notes.md");
+    assert.equal(
+      ctx.guardInstalled!.fn({ name: "edit", arguments: { file_path: target } }),
+      undefined,
+      "声明形无害 ⇒ 放行（解析缺席只是少看软链面）",
+    );
+    assert.match(
+      ctx.guardInstalled!.fn({
+        name: "edit",
+        arguments: { file_path: path.join(dir, "nope", "x", ".ssh", "id_rsa") },
+      }) ?? "",
+      /密钥|凭据/u,
+      "声明形自己就是凭据路径时，解析成不成功都要拦",
     );
   });
 });
@@ -1089,6 +1145,32 @@ describe("设置读取的防御面（值面不合型时运行路径自己收敛�
     assert.equal(warns.filter((line) => line.includes("非字符串")).length, 1, "脏数组一次性告警");
   });
 
+  it("扩展密钥模式非法：加载期校验点名报错，且同一模式只报一次", () => {
+    // 静默跳过非法模式 = 用户以为这条保护生效了。判定链与这里用的是同一个
+    // `partitionSecretPatterns`，所以"报出来的"与"实际没生效的"必然同集合。
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const warns: string[] = [];
+    const original = console.warn;
+    console.warn = (first?: unknown): void => {
+      if (typeof first === "string") {
+        warns.push(first);
+      }
+    };
+    try {
+      poke(ctx.value, "extraSecretPatterns", ["(", String.raw`\p{Bad}`]);
+      ctx.guardInstalled!.fn(editOn("/w/proj/src/patterns.ts", [], "patterns"));
+      // 同一批脏模式再判一次：不刷屏
+      ctx.guardInstalled!.fn(editOn("/w/proj/src/patterns2.ts", [], "patterns-2"));
+    } finally {
+      console.warn = original;
+    }
+    const named = warns.filter((line) => line.includes("extraSecretPatterns 无效"));
+    assert.equal(named.length, 2, "两条非法模式各报一次");
+    // 断言的是每条告警都写明"没生效"（every 没有消息参数，故比较长度做哨兵）
+    assert.equal(named.filter((line) => line.includes("未生效")).length, named.length);
+  });
+
   it("词表整项不是数组：条件展开走「不传该键」= 内置词表，绝不降级成放行", () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
@@ -1172,21 +1254,185 @@ describe("装配失败与降级（闸门绝不能因宿主面缺失而消失）"
 /** 小改参数（不触签名、非高风险路径）。 */
 const SMALL_ARGS = { old_string: "const a = 1", new_string: "const b = 2" };
 
-describe("台账容量：四张表都在 LEDGER_CAP 处按插入序淘汰", () => {
-  it("超过 200 个目标后最旧条目被挤出，长驻进程不会无界增长", () => {
+describe("台账容量：路径/会话键台账都在 LEDGER_CAP 处按插入序淘汰", () => {
+  it("超过 200 个目标后最旧基线被挤出：mtime 跳变的『外部改动』判定随之复位", async () => {
+    // 黑盒判别：淘汰是否真发生，唯一可观察的行为面是"外部改动判定"。
+    // a.ts 先建基线 → mtime 跳变 → 第二评报『本会话之外』（对照组：基线在位）；
+    // 洪灌 240 个目标把五张台账逐个触顶挤出 a.ts 的基线 → 第三评必须回落『首见』
+    // 读法。若 lruPut 的容量淘汰被整个删掉，第三评仍会命中 /本会话之外/ 而红。
     const ctx = createMockCtx();
     applyPlugin(ctx);
-    // mtimes / mtimeBySessionPath / seenLenBySessionPath / rootCache / layersByStart
-    // 五张表都以"目标"为轴，逐个新目标写一遍即可全部触顶并淘汰。
-    for (let idx = 0; idx < 240; idx += 1) {
-      const target = `/w/proj/src/gen/f${idx}/ledger-entry.ts`;
-      ctx.guardInstalled!.fn(editOn(target, [], `cap-${idx}`, SMALL_ARGS));
+    const dir = await mkdtemp(path.join(os.tmpdir(), "dgc-lru-"));
+    try {
+      const file = path.join(dir, "a.ts");
+      await writeFile(file, "export const a = 1;\n");
+      await utimes(file, 1_000_000_000, 1_000_000_000);
+      ctx.guardInstalled!.fn(editOn(file, [], "cap", SMALL_ARGS));
+      await utimes(file, 2_000_000_000, 2_000_000_000);
+      const second = ctx.guardInstalled!.fn(editOn(file, [], "cap", SMALL_ARGS));
+      assert.ok(second !== undefined);
+      assert.match(second, /本会话之外/u, "对照组：基线在位时跳变被判外部改动");
+      for (let idx = 0; idx < 240; idx += 1) {
+        ctx.guardInstalled!.fn(
+          editOn(`/w/proj/src/gen/f${idx}/x.ts`, [], `cap-${idx}`, SMALL_ARGS),
+        );
+      }
+      const again = ctx.guardInstalled!.fn(editOn(file, [], "cap", SMALL_ARGS));
+      assert.ok(again !== undefined, "淘汰后重新过门（不是崩溃、不是免检）");
+      assert.doesNotMatch(again, /本会话之外/u, "基线已被 LRU 挤出：回落首见读法");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
-    // 淘汰后再回到第 1 个目标：会话基线已被挤出 → 仍按"首拒"走（不给配额放行）
-    const first = "/w/proj/src/gen/f0/ledger-entry.ts";
-    const again = ctx.guardInstalled!.fn(editOn(first, [], "cap-0", SMALL_ARGS));
-    assert.ok(again !== undefined, "被淘汰的目标重新过门（不是崩溃、不是免检）");
-    assert.match(again, /fact-gate/u);
+  });
+});
+
+describe("重装不携带上一代记忆（门按实例持有，不是模块级单例）", () => {
+  it("重新 apply 后同文件回到首拒", () => {
+    // 黑盒判别：先在同一实例上凑出"第 2 轮"（对照组，证明计数真的在工作），
+    // 重新 apply 后同文件必须回到首拒——若 FactGate 退化成模块级单例，
+    // 这里的 doesNotMatch 会当场红。对照组用带会话的 exec：无 agent 时证据
+    // 不可判定，重试按契约走交互确认（indeterminate），计数不推进。
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const gi = ctx.guardInstalled!;
+    const exec = editOn(EDIT_TARGET_PATH, [], "sess");
+    assert.match(String(gi.fn(exec)), /编辑前先取证/u, "首拒：行动清单头");
+    assert.match(String(gi.fn(exec)), /第 2 轮/u, "同实例计数连续（对照组）");
+    for (const disposer of ctx.effects) {
+      disposer();
+    }
+    const ctx2 = createMockCtx();
+    applyPlugin(ctx2);
+    const gi2 = ctx2.guardInstalled;
+    assert.ok(gi2, "重新挂载后 guard 就位");
+    const again = gi2.fn(editOn(EDIT_TARGET_PATH, [], "sess"));
+    assert.ok(again !== undefined, "同文件再次被拦（不是崩溃、不是免检）");
+    assert.doesNotMatch(again, /第 2 轮/u, "新实例从首拒开始：上一代记忆没有泄漏");
+  });
+});
+
+/** 真实临时文件 + 一份"改动前 read+引用探查"的完整取证日志（mtime 显式钉在 T1）。 */
+async function makeTarget(): Promise<{
+  dir: string;
+  file: string;
+  log: SessionEvent[];
+}> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "dgc-readbase-"));
+  const file = path.join(dir, "a.ts");
+  await writeFile(file, "export const a = 1;\n");
+  await utimes(file, 1_000_000_000, 1_000_000_000);
+  const log: SessionEvent[] = [
+    fxCall("r1", "read", JSON.stringify({ file_path: file })),
+    fxResult("r1"),
+    fxCall("g1", "grep", JSON.stringify({ pattern: "a.ts", path: dir })),
+    fxResult("g1"),
+  ];
+  return { dir, file, log };
+}
+
+const readExec = (file: string, dir: string): Record<string, unknown> => ({
+  name: "read",
+  arguments: { file_path: file },
+  agent: { session: { id: "sess-C", header: { cwd: dir }, snapshotEvents: () => [] } },
+});
+
+describe("read 时点基线：外部改动检测的首次评估盲区闭合", () => {
+  it("read 之后、首次编辑评估之前被会话外改动 → 首次评估即判外部改动（修复前是盲区放行）", async () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const { dir, file, log } = await makeTarget();
+    try {
+      // read 的 guard 时点记账（基线 = T1）；read 本身永不被拦。
+      assert.equal(ctx.guardInstalled!.fn(readExec(file, dir)), undefined, "read 照常放行");
+      // 会话外改动
+      await utimes(file, 2_000_000_000, 2_000_000_000);
+      const verdict = ctx.guardInstalled!.fn(editOn(file, log, "sess-C", {}, dir));
+      assert.ok(verdict !== undefined);
+      assert.match(verdict, /本会话之外/u, "改动前的旧 read 不再当免检金牌");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("常规路径零成本：read 后无外部改动 → 取证齐备直接放行", async () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const { dir, file, log } = await makeTarget();
+    try {
+      assert.equal(ctx.guardInstalled!.fn(readExec(file, dir)), undefined);
+      assert.equal(
+        ctx.guardInstalled!.fn(editOn(file, log, "sess-C", {}, dir)),
+        undefined,
+        "无外部改动时基线记账不引入任何额外拒绝",
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("全局基线被别的会话刷掉也掩蔽不了：会话自己的 read 基线存活", async () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const { dir, file, log } = await makeTarget();
+    try {
+      assert.equal(ctx.guardInstalled!.fn(readExec(file, dir)), undefined);
+      await utimes(file, 2_000_000_000, 2_000_000_000);
+      // 会话 D 在改动后评估（空日志）→ 全局 mtimes 被刷成 T2——
+      // 修复前这会把 C 的盲区检测整个抹掉；C 现在靠自己的 read 基线检出。
+      ctx.guardInstalled!.fn(editOn(file, [], "sess-D", {}, dir));
+      const verdict = ctx.guardInstalled!.fn(editOn(file, log, "sess-C", {}, dir));
+      assert.ok(verdict !== undefined);
+      assert.match(verdict, /本会话之外/u, "会话基线不被全局兜底的刷新掩蔽");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("view（str_replace_editor 只读面）同样建立读时基线", async () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const { dir, file } = await makeTarget();
+    try {
+      const viewExec: Record<string, unknown> = {
+        name: "str_replace_editor",
+        arguments: { command: "view", path: file },
+        agent: { session: { id: "sess-C", header: { cwd: dir }, snapshotEvents: () => [] } },
+      };
+      assert.equal(ctx.guardInstalled!.fn(viewExec), undefined, "view 照常放行");
+      await utimes(file, 2_000_000_000, 2_000_000_000);
+      // 取证日志里的 read 证据换成 view（host 侧 view ≡ read 证据）
+      const log: SessionEvent[] = [
+        fxCall("v1", "str_replace_editor", JSON.stringify({ command: "view", path: file })),
+        fxResult("v1"),
+        fxCall("g1", "grep", JSON.stringify({ pattern: "a.ts", path: dir })),
+        fxResult("g1"),
+      ];
+      const verdict = ctx.guardInstalled!.fn(editOn(file, log, "sess-C", {}, dir));
+      assert.ok(verdict !== undefined);
+      assert.match(verdict, /本会话之外/u, "view 的读时基线同样闭合盲区");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("read 的畸形载荷不炸记账：无 path / 无 header.cwd 都安全跳过", () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    assert.doesNotThrow(() => {
+      // 无目标路径 → 不记账
+      ctx.guardInstalled!.fn({ name: "read", arguments: {} });
+      // 无 header.cwd → 按 resolveTarget 的无 cwd 口径记账，不抛错
+      ctx.guardInstalled!.fn({
+        name: "read",
+        arguments: { file_path: "/w/x.ts" },
+        agent: { session: { id: "s" } },
+      });
+      ctx.guardInstalled!.fn({
+        name: "str_replace_editor",
+        arguments: { command: "view", path: "/w/x.ts" },
+        agent: { session: { id: "s" } },
+      });
+    });
   });
 });
 

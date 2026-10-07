@@ -40,6 +40,9 @@ export interface UiMessages {
   /** 事实门开关 hint（占位 tools = 生效的检索工具名单）。 */
   readonly factGateLabel: string;
   readonly factGateHint: string;
+  /** 耗时采集开关（滚动摘要 + judge-cost pass 样本）。 */
+  readonly statsLabel: string;
+  readonly statsHint: string;
   readonly maxDeniesLabel: string;
   readonly maxDeniesHint: string;
   readonly strictLabel: string;
@@ -138,6 +141,11 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     factGateLabel: "首次编辑事实门（gateguard）",
     factGateHint:
       "每个文件首次编辑前强制取证：先成功 read 目标，再做项目级引用检索（计入取证的检索工具：{tools}），按写面风险分档补 test/e2e/docs 层探查。强校验：持续拒绝到取证齐备为止",
+    statsLabel: "判定耗时采集",
+    statsHint:
+      "把每次判定的耗时与输入规模攒成一行滚动摘要（每 200 次一条，只进宿主日志），并在装了 " +
+      "lesson-loop 时随 `judge-cost` 各发一条 pass——样本只有面名/毫秒/字符数，**不含命令原文与路径**。" +
+      "用途是给「输入长度上限该不该调」拿真实分布；关掉只是不再看分布，判定一字不变",
     maxDeniesLabel: "放行次数（强校验防死锁）",
     maxDeniesHint:
       "连续无证据拒绝 maxDenies 次后放行并警告（1-5，默认 2）。证据判定不可行时走交互式确认，不消耗此次数",
@@ -163,7 +171,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     devRunArgsHint: "追加到内置参数（dev/watch/serve/start/…），逗号分隔",
     secretLabel: "额外密钥路径模式",
     secretHint:
-      "追加到内置正则（.ssh/私钥/证书/…）。每行一条正则片段（可含逗号，按行分隔不会被切碎）",
+      "追加到内置正则（.ssh/私钥/证书/…）。每行一条正则片段（可含逗号，按行分隔不会被切碎）。加载期逐条编译：编不过或超长的会点名告警『本条未生效』，不静默放行",
     secretPlaceholder: "/id_dsa$|\\.p12$/i（每行一条，可含逗号）",
   },
   en: {
@@ -184,6 +192,13 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     factGateLabel: "First-edit fact gate (gateguard)",
     factGateHint:
       "Before the first edit of a file, evidence is forced: read the target successfully, then run a project-level reference search (counted search tools: {tools}), and probe the test/e2e/docs layers according to the write's risk tier. Strict: the edit stays denied until the evidence is complete",
+    statsLabel: "Judge-cost sampling",
+    statsHint:
+      "Folds each verdict's duration and input size into one rolling summary line (every 200 verdicts, " +
+      "host log only); with lesson-loop installed it also sends one `judge-cost` pass per verdict - the " +
+      "sample carries face / milliseconds / character count only, **never the command text or a path**. " +
+      "It exists so the question 'should the input length cap move' gets answered from a real " +
+      "distribution; switching it off hides the numbers and changes no verdict",
     maxDeniesLabel: "Release quota (deadlock guard for strict mode)",
     maxDeniesHint:
       "After maxDenies consecutive evidence-less denials the edit is allowed with a warning (1-5, default 2). When evidence cannot be determined the gate asks the user instead, which does not consume this quota",
@@ -212,7 +227,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
       "Appended to the built-in arguments (dev/watch/serve/start/...), comma separated",
     secretLabel: "Extra secret path patterns",
     secretHint:
-      "Appended to the built-in regex (.ssh / private keys / certificates / ...). One regex fragment per line - commas survive because lines are the separator",
+      "Appended to the built-in regex (.ssh / private keys / certificates / ...). One regex fragment per line - commas survive because lines are the separator. Each pattern is compiled at load time; one that fails to compile or is over-long is named in a warning as not in effect, never silently allowed through",
     secretPlaceholder: "/id_dsa$|\\.p12$/i (one per line, commas allowed)",
   },
 };

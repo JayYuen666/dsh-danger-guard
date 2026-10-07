@@ -1,4 +1,4 @@
-# danger-guard（2026-09-03）：危险命令物理拦截 + 首次编辑事实强制门。
+# danger-guard：危险命令物理拦截 + 首次编辑事实强制门。
 # ECC（MIT, github.com/affaan-m/ECC）机制移植：
 #   1) git 钩子绕过（--no-verify / core.hooksPath）拦截；
 #   2) rm -rf 灾难目标（~ / / .. $HOME）拦截，项目内相对路径放行；
@@ -10,7 +10,7 @@
 # 全部挂 ctx.tools.guard（同步谓词，拒绝=模型收到 Error: <指令> 的可行动反馈）。
 # 设置卡：enabled + factGateEnabled 双开关。
 #
-# 组合包层（2026-09-05 bundle 化）：本文件由 package.json 的 dsh.bundle.patch
+# 组合包层（bundle 化）：本文件由 package.json 的 dsh.bundle.patch
 # 指向，随 `dsh plugin --profile web add/remove ./plugins/danger-guard` 维护。
 # 行按裸包名引用本包（client-modules 只扫描裸包名条目的 dsh.client 声明）。
 # 注意 pnpm ≥12.3.0：12.0.0 的 add 本地目录有 #14437 bug。

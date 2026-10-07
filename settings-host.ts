@@ -36,11 +36,20 @@ export interface SettingsReader {
  *  擦除，产物里仍是裸说明符，由宿主提供实现）。 */
 interface SettingsHostCtx {
   settings: SettingsService;
-  effect: (factory: () => (() => void) | undefined, label?: string) => void;
+  /** 官方效应面（`interface Context extends Pick<Fiber, 'effect'>`，installed
+   *  `@deepseek-ai/cordis/lib/types/fiber.d.ts:8`；返回域 `SyncEffect`/`Effect`
+   *  **不受理 `undefined`**，见 host.ts 的 NOOP_DISPOSER 注释）。此前这里是手抄镜像
+   *  `(factory: () => (() => void) | undefined, label?) => void`——比官方宽出 undefined
+   *  一档，是 0.1.6→0.1.7 迁移的遗漏：host.ts 同期已改绑官方并记下同一处分歧，这里补齐。
+   *  下面两支工厂都返回官方 `() => void` 形状的 disposer，运行时行为逐字不变。 */
+  effect: Context["effect"];
   /** configure 的 owner 必须是**本条目**的 fiber；provide 挂在这里、由拦截半跨条目读。
    *  取官方 `Fiber` 而非 `unknown`：手抄成 unknown 时 :81 传什么都编译得过。 */
   fiber: Fiber;
-  provide: (name: string, value: unknown) => () => void;
+  /** 官方 provide（installed `@deepseek-ai/cordis/lib/types/reflect.d.ts:41/:43`）：
+   *  服务名在 Context 命名面之外时落 `(name: string, value?: any): () => void` 兜底臂，
+   *  返回恰是撤册 disposer——与手抄版 `(name, value) => () => void` 逐字同形，按官方成员收。 */
+  provide: Context["provide"];
 }
 
 /** 设置条目的服务面守卫：只探它真正调用的那几件（configure / provide / effect / fiber）。

@@ -45,6 +45,8 @@ export const BUILTIN_BASE: Config = {
   enabled: true,
   // 事实门独立开关：不想要首次编辑强制取证时关掉（默认开）。
   factGateEnabled: true,
+  // 判定耗时采集（长度上限要按真实分布调，而分布只能从真实调用里来）。默认开。
+  judgeStats: true,
   maxDenies: DEFAULT_MAX_DENIES,
   strictMode: false,
   smallEditChars: DEFAULT_SMALL_EDIT_CHARS,
@@ -62,6 +64,9 @@ export const BUILTIN_BASE: Config = {
 export interface Config {
   enabled: boolean;
   factGateEnabled: boolean;
+  /** 是否把每次判定的耗时与输入规模采样出去（滚动摘要 + lesson-loop 的 `judge-cost` pass）。
+   *  关掉只是不再看分布，判定本身一字不变；长度上限该不该调，靠的就是这一格的真实分布。 */
+  judgeStats: boolean;
   /** 连续无证据拒绝多少次后放行 + 警告（强校验防死锁；设置卡可调，默认 2）。 */
   maxDenies: number;
   /** 严格模式：忽略分档，每个代码文件首次编辑都走全探查（read+refs+所有存在层）。 */
@@ -91,6 +96,7 @@ export interface Config {
 export interface ConfigRefs {
   enabled: Volatile<boolean>;
   factGateEnabled: Volatile<boolean>;
+  judgeStats: Volatile<boolean>;
   maxDenies: Volatile<number>;
   strictMode: Volatile<boolean>;
   smallEditChars: Volatile<number>;
@@ -112,6 +118,7 @@ export function snapshot(config: ConfigRefs): Config {
   return {
     enabled: config.enabled.get(),
     factGateEnabled: config.factGateEnabled.get(),
+    judgeStats: config.judgeStats.get(),
     maxDenies: config.maxDenies.get(),
     strictMode: config.strictMode.get(),
     smallEditChars: config.smallEditChars.get(),
@@ -134,6 +141,7 @@ export function snapshot(config: ConfigRefs): Config {
 export const ConfigSchema = Schema.object({
   enabled: Schema.boolean().default(BUILTIN_BASE.enabled).volatile(),
   factGateEnabled: Schema.boolean().default(BUILTIN_BASE.factGateEnabled).volatile(),
+  judgeStats: Schema.boolean().default(BUILTIN_BASE.judgeStats).volatile(),
   maxDenies: Schema.natural().min(1).max(5).default(BUILTIN_BASE.maxDenies).volatile(),
   strictMode: Schema.boolean().default(BUILTIN_BASE.strictMode).volatile(),
   smallEditChars: Schema.natural().min(1).default(BUILTIN_BASE.smallEditChars).volatile(),

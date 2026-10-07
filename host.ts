@@ -2,8 +2,9 @@
 //
 // 两个防线都挂 ctx.tools.guard（同步谓词，返回字符串即拒绝）：
 //   1. bashDanger  — ECC block-no-verify / dev-server-block / curl|sh / rm -rf 移植
-//   2. editDanger  — 密钥/凭据路径编辑拦截（edit/write + str_replace_editor，
-//     view 只读不拦；两套编辑器并存，漏掉后者即成旁路面）
+//   2. editDanger  — 密钥/凭据路径拦截：目标按**键形**认（file_path/path/notebook_path…），
+//     不按工具名认（工具名随 provider 与版本漂移，猜名字等于静默失效）；只读动词跳过。
+//     宿主另把 realpath 解析形一起送进判定，软链面因此也可见（TOCTOU 只是收窄，未消除）。
 //   3. FactGate    — gateguard 事实强制门（ECC A/B +2.25 分实证机制）
 // 宿主拒绝路径已核实：guardReason → tool result "Error: <理由>" isError:true，
 // 模型收到可行动的指令而非静默失败。
@@ -21,7 +22,7 @@
 // （等于每包各持一份官方实现）。其余 @deepseek-ai/* 一律 type-only。
 
 import path from "node:path";
-import { statSync, readFileSync } from "node:fs";
+import { statSync, readFileSync, realpathSync } from "node:fs";
 import type { Stats } from "node:fs";
 import type { Context, Events } from "@deepseek-ai/cordis";
 // 官方工具契约（type-only）：`ctx.tools` 的服务面与 guard 谓词收到的执行面都直接从
@@ -33,7 +34,13 @@ import type { SettingsForms } from "@deepseek-ai/dsh-settings";
 // 本文件只读那个条目挂出的读数口（见 settingsConfig）。
 import { BUILTIN_BASE, SETTINGS_READER } from "./lib/settings-schema.ts";
 import type { Config } from "./lib/settings-schema.ts";
-import { bashDanger, editDanger, editTargetPath } from "./lib/danger-rules.ts";
+import {
+  bashDanger,
+  declaredTargets,
+  editDanger,
+  editTargetPath,
+  partitionSecretPatterns,
+} from "./lib/danger-rules.ts";
 import type { BashDenialKey, BashDangerOptions, EditDangerOptions } from "./lib/danger-rules.ts";
 import {
   FactGate,
@@ -86,15 +93,18 @@ import type { ToolLedger } from "./lib/tool-ledger.ts";
 // `SessionLogOffset` 是品牌数，`brandNumber` 是它唯一的合法构造口（见文件头）。
 import { brandNumber } from "@deepseek-ai/dsh-brand";
 import type { Session, SessionLogOffset } from "@deepseek-ai/dsh-session";
-// lesson bus 收口：lesson-loop 的 report/pass 现在是异步落库（返回 Promise），
+// lesson bus 收口：lesson-loop 的 report/pass 以异步落库（返回 Promise），
 // 只包一层同步 try/catch 抓不到 rejection——失败会被静默吞掉，还给宿主进程留一枚
 // 未处理拒绝。同步抛错与异步拒绝共用这一个出口（三个包的调用点降级口径一致）。
 import { settleLessonCall } from "@jayyuen66/dsh-plugin-shared/lib/lesson-bus";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 /** 事实门教训的类别级稳定签名：lesson-loop 规则卡按
- *  该签名归并，而非按目标文件路径——与 lesson-store 的 CATEGORY_SIGNATURES
- *  ["factgate-deny"] 保持同值。target 路径在上报 evidence 里，不丢信息。 */
+ *  该签名归并，而非按目标文件路径——值须与 lesson-store 的类别级稳定签名表保持同源
+ *  （`dsh-lesson-loop/lib/rule-signature.ts` 的 `CATEGORY_SIGNATURES["factgate-deny"]`
+ *  = "edit-before-factgate"；lesson-loop 写入侧经 `stableSignatureFor` 折叠
+ *  （lesson-store.ts report 路径），本包上报原文即可）。target 路径在上报 evidence 里，
+ *  不丢信息。 */
 const FACTGATE_SIGNATURE = "edit-before-factgate";
 
 /** 嵌套 shell `-c` 体**未被检查**（引号不闭合 / 超出下钻上限）的类别级稳定签名。
@@ -102,6 +112,10 @@ const FACTGATE_SIGNATURE = "edit-before-factgate";
  *  「认不准就先找人确认」，后者教的是「换掉那个危险形态」。用命令原文当前者的签名，
  *  只会把同一条教训按套娃长度碎成无数张卡（每次输入都不重复，永远攒不到 armed）。 */
 const NESTED_UNCONFIRMED_SIGNATURE = "bash-nested-shell-unconfirmed";
+
+/** 成本样本的上报类别：每次判定一条 pass，载荷只有面名/耗时/输入长度三枚数值。
+ *  开关联动 `judgeStats`（默认开），关掉就一条都不出域。 */
+const JUDGE_COST_CATEGORY = "judge-cost";
 
 /** 官方 `ToolExecution.agent` 去掉可选后的 `Agent`。本包**未**声明 `@deepseek-ai/dsh-agent`
  *  依赖，故经官方成员索引访问取到它，而不 import 类名（zvec-grep/lib/routing.ts:40 同策）。 */
@@ -311,6 +325,18 @@ const strArray = (value: unknown): string[] | undefined => {
   return out;
 };
 
+/** 非法/超长的扩展密钥模式：**加载期就校验**（判定链走的是同一个谓词），并且点名报出来——
+ *  静默跳过等于让用户以为这条保护已经生效。按模式字面去重，否则每次编辑判定都刷同一条日志。 */
+const rejectedPatternsLogged = new Set<string>();
+function reportRejectedPatterns(patterns: readonly string[]): void {
+  for (const pattern of partitionSecretPatterns(patterns).rejected) {
+    if (!rejectedPatternsLogged.has(pattern)) {
+      rejectedPatternsLogged.add(pattern);
+      console.warn(`[danger-guard] extraSecretPatterns 无效，本条未生效: ${pattern}`);
+    }
+  }
+}
+
 /**
  * 设置面（schema / 内置默认 / 命名空间）在 `lib/settings-schema.ts` 单源，本文件只是转发
  * 给既有导入方（test/*、client 侧的字段清单）继续用 `from "../host.ts"` 这一条路径。
@@ -502,7 +528,7 @@ function projectRootOf(targetN: string, cwd: string | undefined): string {
 }
 
 /**
- * 波及面层目录（round 9「机械探查 + 文字声明双轨」的机械半轨）。
+ * 波及面层目录（「机械探查 + 文字声明双轨」的机械半轨）。
  * 层**存在**才要求探查——不存在由 fs 判定直接豁免，比让模型 grep 一次空目录便宜且
  * 零作弊面；存在的层要求至少一次**可归因**动作落在其中（符号级结论仍归文字声明）。
  */
@@ -559,7 +585,7 @@ function probeLayersAt(dir: string, found: Map<FactNeed, string>, extraTestDirs:
 }
 
 /**
- * 目标文件所属包链上**实际存在**的层（round 9 机械半轨的存在性判定）。
+ * 目标文件所属包链上**实际存在**的层（机械半轨的存在性判定）。
  * 从目标父目录一路向上到项目根逐级找层名——monorepo 里 `packages/foo/test/` 才是
  * 该文件的真实测试层，只在项目根找会漏。层不存在 → 直接豁免（不必让模型 grep 空目录
  * 自证"没有"）。缓存键含 extraTestDirs：词表变化时旧缓存必须失效。
@@ -610,7 +636,7 @@ const RISKY_PATH_RE =
   /(?:^|\/)(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|npm-shrinkwrap\.json|bun\.lockb?|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|pyproject\.toml|poetry\.lock|uv\.lock|requirements\.txt|setup\.py|tsconfig[^/]*\.json|vite\.config\.[cm]?[jt]s|webpack\.config\.[cm]?js|cordis\.(?:ya?ml|json)|Makefile|Dockerfile|docker-compose\.ya?ml|\.env(?:\.[\w-]+)?$|schema\.sql)$/u;
 
 /**
- * 取证档位（round 11 定稿：按写面风险分档，配 strictMode 回到"每文件全探查"）。
+ * 取证档位（定稿：按写面风险分档，配 strictMode 回到"每文件全探查"）。
  * 升档用**三元信号**而非只看大小——`package.json` 改一个版本号是"写面极小、爆炸半径
  * 最大"的典型，单靠 size 会把它放进最低档。
  */
@@ -631,7 +657,7 @@ interface RiskFacts {
 }
 
 /**
- * 定档。缺信息一律**升档**（③）：宁可多要一次探查，不可少要。
+ * 定档。缺信息一律**升档**：宁可多要一次探查，不可少要。
  *   high：新建 / 大段重写 / 触及导出签名 / 高风险路径（manifest·lockfile·装配）/ strictMode
  *   low ：小改且不触及签名且非高风险路径（只要 read）
  *   mid ：其余（read + 项目级引用探查）
@@ -717,7 +743,7 @@ function settingsConfig(svc: HostCtx): Config {
 }
 
 /**
- * 从一次写调用提取风险事实。缺信息一律留 undefined → tierOf 保守升档（③）：
+ * 从一次写调用提取风险事实。缺信息一律留 undefined → tierOf 保守升档：
  * write 是整文件覆盖（无"改动面"可言）、str_replace_editor 是 edits 数组，两者都
  * 算不出可靠 diff 尺寸，宁可多要取证。
  * `sigChanged` 是"写面小但波及大"的主要机器信号：改一行 `export const TIMEOUT`
@@ -737,7 +763,7 @@ function riskFactsOf(
     const newS = typeof args["new_string"] === "string" ? args["new_string"] : undefined;
     // **字段缺失 ≠ 改动很小**：取不到就留 undefined → tierOf 保守升档。旧写法用 ''
     // 兜底使长度算成 0，`0 <= smallChars` 会把"信息缺失"直接降到最低档（只要 read），
-    // 恰好把原则③「缺信息一律要更多」反过来——被自家接线测试抓到。
+    // 恰好把「缺信息一律要更多」反过来——被自家接线测试抓到。
     if (oldS !== undefined && newS !== undefined) {
       contentChars = oldS.length + newS.length;
     }
@@ -856,25 +882,26 @@ function writeTextOf(toolName: WriteToolName, a: Record<string, unknown>): strin
  * 完全基于客观动作（会话日志 tool/call + tool/result），不采信模型自述：
  * ECC 实证 LLM 自评无效，但"被迫去查"这个动作本身改变输出质量。
  *
- *  1. **新鲜度只认外部改动**（round 13 定稿）：模型自己连续编辑同一目标**不再反复
+ *  1. **新鲜度只认外部改动**（定稿）：模型自己连续编辑同一目标**不再反复
  *     过门**——edit 的返回本身就带着改动后的内容，再逼一次 read 是纯仪式。故基准
  *     `staleBase` 只在"确属外部改动"时才抬升，否则为 -1（任何一次成功 read 即满足）。
  *     本次编辑的 tool/call 虽已在日志（appendToolCall 先于 dispatch），但其结果未
  *     回填 → 不入任何统计 → 不会自我否证。引用证据同样不失效（谁引用它不由本文件决定）。
- *  2. **引用探查必须项目级**（缺陷②）：搜文件自身只算内容探查，看不到"谁引用它"；
+ *  2. **引用探查必须项目级**：搜文件自身只算内容探查，看不到"谁引用它"；
  *     故 path 必须是目标的祖先目录，且 pattern/query 命中文件名或足够长的词干。
  *     签名比对两侧同形归一（见 flattenSig），否则正则转义会误判"未取证"。
- *  3. **失败调用不算证据**（缺陷①）：grep 路径打错报错 ≠ 做过探查；被门禁拒掉的编辑
+ *  3. **失败调用不算证据**：grep 路径打错报错 ≠ 做过探查；被门禁拒掉的编辑
  *     也不算（它同样不推进 lastEditSeq，而 lastEditSeq 用于第 4 条的归因）。
- *  4. **外部改动识别**（缺陷③ + 第 1 项修复）：mtime 比上次评估更晚**且**该跳变无法
- *     被本会话解释时才算 external。归因两步——(a) 那次成功编辑的**结果事件位**不早于
+ *  4. **外部改动识别**（与第 1 项配套）：mtime 比上次评估更晚**且**该跳变无法
+ *     被本会话解释时才算 external。基线在**两处**建立——read/view 的 guard 时点
+ *     （recordReadObservation，闭合"首次评估盲区"）与编辑评估时点；归因两步——(a) 那次成功编辑的**结果事件位**不早于
  *     跳变位；(b) **内容自证**：当时写进去的文本此刻仍在文件中。文本不在了说明自己
  *     那份已被覆盖 → 判外部（保守方向）。旧实现拿 tool/call 下标比长度：call 早已在
  *     日志里，必然更小 → 自有编辑被恒判"外部改动"（实测连番冤枉我自己）。
- *  5. **新建豁免**（C3/C4）：write/create 且目标 fs 不存在 → 免 read 要求。
+ *  5. **新建豁免**：write/create 且目标 fs 不存在 → 免 read 要求。
  *     不解析报错文本（"报错也算数"会给假证据开门）；edit 打在不存在的文件上本就
  *     会失败，不需要门禁假装那算取证。
- *  6. **逐层波及面**（round 9 机械半轨）：test/e2e/docs 由 fs 探测存在性——不存在即
+ *  6. **逐层波及面**（机械半轨）：test/e2e/docs 由 fs 探测存在性——不存在即
  *     豁免；存在则要求一次**可归因**的检索（path 落在该层目录内 且 签名命中本文件）。
  *     只要求"在该层发生过任何动作"会被无关 read 白嫖，故收紧到可归因。
  */
@@ -966,7 +993,7 @@ const relOf = (ctx: EvalCtx, targetPath: string): string =>
     ? targetPath.slice(ctx.cwd.length + 1)
     : targetPath;
 
-/** 路径归一化：相对路径按会话 cwd 解析（C5 同款——模型常报相对路径）。 */
+/** 路径归一化：相对路径按会话 cwd 解析（模型常报相对路径）。 */
 const resolveTarget = (value: string, cwd: string | undefined): string =>
   cwd !== undefined && !path.isAbsolute(value) ? path.resolve(cwd, value) : value;
 
@@ -1082,17 +1109,20 @@ function rememberScopeHitInto(
  *  的形态），不是宿主事件形状的第二份抄本 —— 抄官方形状的那一份已经删了（原 FactEvent），
  *  事件流一律按 shared 的官方 SessionEvent 判别联合读。
  *
- *  四个字段**全部**从 shared 的 `ToolCallRecord`（shared/lib/tool-events.ts:30-48）取形，
- *  本文件不再各自重述：
+ *  四个字段**全部**从 shared 的 `ToolCallRecord`（`@jayyuen66/dsh-plugin-shared/lib/tool-events`）
+ *  取形，本文件不再各自重述：
  *  - `callId` / `seq` 直接 `Pick`。台账键**故意不是**官方 `ToolCallId` / `SessionSeq`：
  *    shared 的 `usableCallId` 把空串归一为 `undefined`，空 callId 因此永远冒充不了一枚键
- *    （shared :80-88 记着这条理由）；`seq` 是**入参数组的切片下标**，shared :43-47 明写
- *    它不是官方 `SessionSeq`（消费方按窗口切片读流，切片下标才是它们的游标语义）。
- *  - `name` 取 `NonNullable<ToolCallRecord["name"]>`：shared 交回 `string | undefined`，
- *    本文件在 `call.name !== undefined` 之后才构造台账行（见 scanToolCalls），故收窄一位。
+ *    （理由记在 shared 的 `usableCallId` 注释里）；`seq` 是**入参数组的切片下标**，shared 在
+ *    `ToolCallRecord["seq"]` 的注释里明写它不是官方 `SessionSeq`（消费方按窗口切片读流，
+ *    切片下标才是它们的游标语义）。
+ *  - `name` 直接取 `ToolCallRecord["name"]`：shared 侧已收窄为必选 `string`（官方两个事件
+ *    分支都这么声明，见 shared 的 `lib/tool-events.ts`）。原先这里得写 `NonNullable<>`、并在
+ *    scanToolCalls 里先判一次 `call.name !== undefined`，只因为 shared 把一个从不做运行时
+ *    校验的字段放成了可空——那道判空恒真，白白逼消费方多写一道。
  *  - `a` 即 `ToolCallRecord["arguments"]`（已解析的 `Record<string, unknown>`）。 */
 type ToolCall = Pick<ToolCallRecord, "callId" | "seq"> & {
-  name: NonNullable<ToolCallRecord["name"]>;
+  name: ToolCallRecord["name"];
   a: ToolCallRecord["arguments"];
 };
 
@@ -1110,6 +1140,42 @@ function callPathOf(name: string, a: Record<string, unknown>): string | undefine
   }
   const candidate = name === "str_replace_editor" ? a["path"] : (a["file_path"] ?? a["path"]);
   return typeof candidate === "string" && candidate.length > 0 ? candidate : undefined;
+}
+
+/**
+ * read/view 的**读时基线**：外部改动检测靠 mtime 差分，差分需要一个先验观测点。评估侧
+ * （evidenceFor）只在编辑判定时写基线 ⇒ 每个新会话对每个文件的**首次评估**存在盲区：
+ * read 之后、首次编辑之前的外部改动没有任何可比基线，改动前的旧 read 直接过门
+ * （三场景探针实测：无任何基线 ALLOW / 改动前有他会话基线 DENY / 改动后基线被他会话
+ * 的评估刷掉 ALLOW）。guard 对 read/view 调用同样在跑（同步谓词，且 read 不可能被
+ * 三条防线拒绝）——借这一步把基线前移到 read 时点：改动发生在 read 之后必被检出；
+ * 常规路径（无外部改动）只多一次 statSync，判定零变化。非 read/view 的调用在此直接
+ * 返回（写类与 bash 等其余工具的基线由编辑评估自己建立）。
+ * 残余窗口（明记）：这里记录的是 **guard 时点**的 mtime，早于 read 真正执行——两刻之间
+ * 的改动会被判"外部"（多要求一次重读），方向保守。门禁关闭（enabled=false）时不记账，
+ * 与其余判定同口径；重开后首个 read 重建基线。
+ */
+function recordReadObservation(
+  name: string,
+  session: SessionLogFace | undefined,
+  args: Record<string, unknown>,
+): void {
+  if (name !== "read" && !(name === "str_replace_editor" && args["command"] === "view")) {
+    return;
+  }
+  const target = callPathOf(name, args);
+  if (target === undefined) {
+    return;
+  }
+  // 键形与评估侧（buildEvalContext）逐字同源：同一 cwd 归一、同一 sessKey 前缀，
+  // 否则 read 时写的基线编辑评估时读不到。
+  const cwdRaw = session?.header?.cwd;
+  const cwd = typeof cwdRaw === "string" && cwdRaw.length > 0 ? cwdRaw : undefined;
+  const targetN = resolveTarget(target, cwd);
+  const { mtimeMs } = presenceOf(targetN);
+  const lenKey = `${stringIdOf(session?.id)}|${targetN}`;
+  lruPut(mtimes, targetN, mtimeMs);
+  lruPut(mtimeBySessionPath, lenKey, mtimeMs);
 }
 
 /** 写/读型调用记账：read 与 str_replace_editor 的 view 记 readCalls，其余按写登记。 */
@@ -1208,7 +1274,7 @@ function scanToolCalls(ctx: EvalCtx, layers: FactLayer[]): CallLedger {
   };
   const { calls } = ctx;
   for (const call of calls) {
-    if (call.name !== undefined && !call.badArguments) {
+    if (!call.badArguments) {
       applyToolCall(ctx, ledger, layers, {
         name: call.name,
         a: call.arguments,
@@ -1464,7 +1530,7 @@ function assembleGaps(ctx: EvalCtx, input: GapInput): FactEvidenceInput {
  *      strict-relative 口径（默认 zg_search）：起点取 root，签名取 query/queries/fts/vector，
  *        除 basename 外还可凭目标的相对路径片段（≥"目录/basename"）命中，防 index.ts 撞名顶包。
  *    第三方包注册的检索工具（rg_search…）要成为凭证，列进名单即可，口径二选一。
- *  - 路径按会话 cwd 归一化后比较（resolve；C5 同款——模型常报相对路径）。
+ *  - 路径按会话 cwd 归一化后比较（resolve——模型常报相对路径）。
  *  - determinate=false：会话历史不可得 → 交互式确认（首拒仍先给行动清单）。
  *
  * 主流程（拆分自原单一 98-complexity 大函数）：buildEvalContext 构造只读环境，
@@ -1507,7 +1573,7 @@ function evidenceFor(
   const externalEditSeq = external ? (seenLenBySessionPath.get(lenKey) ?? ctx.logSeq) : -1;
   lruPut(seenLenBySessionPath, lenKey, ctx.logSeq);
 
-  // 波及面层（round 9 机械半轨）：fs 探测该文件所属包链上**实际存在**的层。
+  // 波及面层（机械半轨）：fs 探测该文件所属包链上**实际存在**的层。
   // 不存在的层直接豁免——不必让模型去 grep 空目录自证"这里没有测试"。
   const projectRoot = projectRootOf(ctx.targetN, ctx.cwd);
   const layers = existingLayersOf(ctx.targetN, projectRoot, gating.extraTestDirs);
@@ -1537,7 +1603,7 @@ function evidenceFor(
   // header.cwd 缺失时相对路径按进程 cwd 解析）不等于"新文件"——把读不到的文件当新的，
   // 等于让权限问题替模型免掉 read，是这道豁免最不该失守的方向。
   const newFile = presence === "absent" && creatable;
-  // 档位（round 11）：缺省一律 **high**——缺信息要更多取证，不要更少。
+  // 档位：缺省一律 **high**——缺信息要更多取证，不要更少。
   //   low  只要 read（小改、不触签名、非高风险路径）
   //   mid  read + 项目级引用探查
   //   high 再加所有**实际存在**的层（不存在的层已被 fs 探测豁免，不进要求集）
@@ -1567,31 +1633,167 @@ interface BashDenial {
   key: BashDenialKey;
 }
 
-/** bash 危险命令闸（git 绕过 / rm -rf / curl|sh / dev server）；非 bash/pwsh 或无危险 → undefined。
- *  shell 方言按**工具身份**给：`pwsh` 调用点知道这段源由 PowerShell 读，于是 Windows 字形轨道
- *  在该调用点参与判定（POSIX 宿主上跑 PowerShell Core 时 `os.platform()` 不是 win32，而
- *  `Remove-Item -Recurse -Force C:\Windows` 删的确实是那个树）。`bash` 调用点保持 POSIX 读法，
- *  「非 Windows 宿主上轨道退出」的结论一字不动 —— 方言不从字形反推，猜字形就是
- *  此前 over-block 的来源。 */
-function bashDenialOf(
+/** 一次判定的产出：结论（undefined = 放行）+ 这轮判定的成本样本（耗时/输入规模）。
+ *  样本与结论分开带：放行也要有耗时，否则"长度上限该不该调"永远只有被拦的样本。 */
+interface BashJudge {
+  denial: BashDenial | undefined;
+  cost: JudgeCost;
+}
+
+/** 密钥面的同形产出（结论是一句当前语言的拒绝理由，不是规则键）。 */
+interface SecretJudge {
+  reason: string | undefined;
+  cost: JudgeCost;
+}
+
+/** 单次判定的耗时告警线：超过就立刻出声。参照点是实测数据——1MB 命令最坏 ~336ms、
+ *  30 万字符深套 ~64ms、正常输入在 µs~ms 级。 */
+const SLOW_JUDGE_MS = 100;
+/** 滚动摘要的窗口：攒够这么多次判定就发一条摘要并清零（看的是"最近这一段"的分布）。 */
+const STATS_WINDOW_CALLS = 200;
+/** 耗时分档上界（ms）。 */
+const MS_EDGES = [1, 5, 25, SLOW_JUDGE_MS];
+/** 输入规模分档上界（字符）：常见命令量级一路到长度上限附近。 */
+const LEN_EDGES = [256, 4096, 65_536, 262_144];
+
+/** 一次判定的成本样本（哪个面、多久、多大的输入）。 */
+interface JudgeCost {
+  face: string;
+  ms: number;
+  length: number;
+}
+
+/** 每个面各自一窗样本。上限就是 `STATS_WINDOW_CALLS` 条/面——不是无界历史。 */
+const samplesByFace = new Map<string, JudgeCost[]>();
+
+/** 落档计数：按升序上界数组给出各档样本数（末档是"最后一条上界之上"）。
+ *  下界用游标推进而不是按下标取前一项——那样每处下标都要补一道永远走不到的兜底。 */
+function bucketText(
+  costs: readonly JudgeCost[],
+  edges: readonly number[],
+  pick: (cost: JudgeCost) => number,
+  unit: string,
+): string {
+  const parts: string[] = [];
+  let lower = 0;
+  for (const edge of edges) {
+    const from = lower;
+    parts.push(
+      `<${edge}${unit}=${costs.filter((cost) => pick(cost) >= from && pick(cost) < edge).length}`,
+    );
+    lower = edge;
+  }
+  parts.push(`>=${lower}${unit}=${costs.filter((cost) => pick(cost) >= lower).length}`);
+  return parts.join(" ");
+}
+
+/** 记一次判定的成本：慢判定立刻出声，其余进滚动窗口，攒满一窗发一条摘要并清零。
+ *  **导出只为可测**：阈值与窗口撞的是计数与墙钟，用"造一条真要跑 100ms 的输入 / 跑满 200 次
+ *  真实判定"去测会让 CI 随时钟与调用顺序抖动，而这两条判断本身与输入内容无关。 */
+export function noteJudgeCost(cost: JudgeCost): void {
+  const { face, ms, length } = cost;
+  if (ms >= SLOW_JUDGE_MS) {
+    console.warn(`[danger-guard] slow judge (${face}): ${ms.toFixed(1)}ms, input ${length} chars`);
+  }
+  const window = [...(samplesByFace.get(face) ?? []), cost];
+  if (window.length < STATS_WINDOW_CALLS) {
+    samplesByFace.set(face, window);
+    return;
+  }
+  samplesByFace.set(face, []);
+  const maxMs = Math.max(...window.map((item) => item.ms));
+  const maxLen = Math.max(...window.map((item) => item.length));
+  console.info(
+    `[danger-guard] judge stats (${face}): calls=${window.length} ` +
+      `ms[${bucketText(window, MS_EDGES, (item) => item.ms, "ms")}] ` +
+      `maxMs=${maxMs.toFixed(1)} ` +
+      `len[${bucketText(window, LEN_EDGES, (item) => item.length, "")}] maxLen=${maxLen}`,
+  );
+}
+
+/** 没跑过判定 = 零长度样本（非 bash 调用的 bash 面、无路径键调用的密钥面）不发。 */
+const isJudged = (cost: JudgeCost): boolean => cost.length > 0;
+
+/** `fs.realpathSync` 的"解析不了就没有这一形"包装：ENOENT/EACCES/循环链接都只表示解析不出来。 */
+function tryRealpath(absolute: string): string | undefined {
+  let result: string | undefined;
+  try {
+    result = realpathSync(absolute);
+  } catch {
+    result = undefined;
+  }
+  return result;
+}
+
+/**
+ * 目标的**真实路径**：整条解析失败时（新建文件是常态，realpath 在目标不存在时必 ENOENT）
+ * 退到最深存在的祖先目录，再把剩余段接回去——于是「项目根是指向别处的软链」与
+ * 「`~/.ssh/authorized_keys` 是指向别处的符号链接」都能露形。
+ * 一段都解析不出来 ⇒ undefined：缺席这一形只是没看到软链面，声明形照判（不是放行）。
+ * 深度由路径段数给出（每轮至少去掉一段），循环必然终止。
+ */
+function realpathOf(target: string, cwd: string | undefined): string | undefined {
+  const missing: string[] = [];
+  let current = path.resolve(cwd ?? process.cwd(), target);
+  let result: string | undefined;
+  while (result === undefined && current.length > 1) {
+    const real = tryRealpath(current);
+    if (real === undefined) {
+      missing.unshift(path.basename(current));
+      current = path.dirname(current);
+    } else {
+      result = path.join(real, ...missing);
+    }
+  }
+  return result;
+}
+
+/** 声明目标的解析形表（`声明原文 → 真实路径`）。lib 侧不 import `node:fs`：解析留在宿主这层，
+ *  判定仍是纯函数——这也让"解析这一步出过错"不可能被算进判定结论里。 */
+function resolvedFormsOf(
+  targets: readonly string[],
+  cwd: string | undefined,
+): Record<string, string> {
+  const forms: Record<string, string> = {};
+  for (const target of targets) {
+    const real = realpathOf(target, cwd);
+    if (real !== undefined) {
+      forms[target] = real;
+    }
+  }
+  return forms;
+}
+
+/** bash 危险命令闸（git 绕过 / rm -rf / curl|sh / dev server）；非 bash/pwsh 或无危险 ⇒
+ *  `denial` 为 undefined。shell 方言按**工具身份**给：`pwsh` 调用点知道这段源由 PowerShell 读，
+ *  于是 Windows 字形轨道在该调用点参与判定（POSIX 宿主上跑 PowerShell Core 时 `os.platform()`
+ *  不是 win32，而 `Remove-Item -Recurse -Force C:\Windows` 删的确实是那个树）。`bash` 调用点
+ *  保持 POSIX 读法，「非 Windows 宿主上轨道退出」的结论一字不动 —— 方言不从字形反推，
+ *  猜字形就是此前 over-block 的来源。 */
+function bashJudgeOf(
   name: string,
   args: Record<string, unknown>,
   opts: BashDangerOptions | undefined,
-): BashDenial | undefined {
-  let result: BashDenial | undefined;
+): BashJudge {
+  let denial: BashDenial | undefined;
+  // 非 bash/pwsh 的调用在这一面没有判定发生 ⇒ 零长度样本（采样处据此不发）。
+  const cost: JudgeCost = { face: "bash", ms: 0, length: 0 };
   if (name === "bash" || name === "pwsh") {
     const { command } = args;
     if (typeof command === "string") {
+      const startedAt = performance.now();
       const key = bashDanger(command, {
         ...opts,
         shellDialect: name === "pwsh" ? "windows" : "posix",
       });
+      cost.ms = performance.now() - startedAt;
+      cost.length = command.length;
       if (key !== undefined) {
-        result = { command, key };
+        denial = { command, key };
       }
     }
   }
-  return result;
+  return { denial, cost };
 }
 
 /** 事实门单次判定的产出（由 guard 回调翻译成 return/report）。 */
@@ -1738,6 +1940,7 @@ function reportPass(
   exec: GuardExecution,
   category: string,
   signature: string,
+  cost?: JudgeCost,
 ): void {
   const busRaw: unknown = wiring.svc.get?.("lessonLoop");
   const bus = isLessonLoopReporter(busRaw) ? busRaw : undefined;
@@ -1753,11 +1956,30 @@ function reportPass(
         cwd: exec.agent?.session?.header?.cwd,
         sessionId: exec.agent?.session?.id,
         signature,
+        // 成本样本只带三枚数值（哪个面、多久、多长输入）——不带命令原文、不带路径。
+        ...(cost === undefined
+          ? {}
+          : { face: cost.face, judgeMs: Math.round(cost.ms), judgeLength: cost.length }),
       }),
     (reason) => {
       console.warn("[danger-guard] lessonLoop pass failed:", reason);
     },
   );
+}
+
+/** 一次判定的采样出口：本地滚动统计始终记，出域那一格（pass 载荷）由 `judgeStats` 决定。 */
+function sampleJudge(
+  cost: JudgeCost,
+  collect: boolean,
+  wiring: GuardWiring,
+  exec: GuardExecution,
+): void {
+  if (isJudged(cost)) {
+    noteJudgeCost(cost);
+    if (collect) {
+      reportPass(wiring, exec, JUDGE_COST_CATEGORY, cost.face, cost);
+    }
+  }
 }
 
 /** 事实强制门单层判定 → 拒绝理由（含 pass 信号上报）。单 return + 浅嵌套
@@ -1801,39 +2023,66 @@ function factGateDenyOf(
   return deny;
 }
 
-/** 密钥/凭据路径编辑闸 → 拒绝理由（含上报）。目标路径只取一次，判定与上报同一个键。
- *  词表配置在函数内现算（只依赖 rt.cfg），这样入参仍是五位、不必为 editOpts 再占一位。 */
-function secretDenyOf(
+/** 密钥/凭据路径编辑闸 → 拒绝理由 + 这轮判定的成本样本（含上报）。目标路径只取一次，
+ *  判定与上报同一个键。词表配置在函数内现算（只依赖 rt.cfg），这样入参仍是五位、
+ *  不必为 editOpts 再占一位。 */
+function secretJudgeOf(
   wiring: GuardWiring,
   exec: GuardExecution,
   rt: GuardRuntime,
   name: string,
   args: Record<string, unknown>,
-): string | undefined {
+): SecretJudge {
   const { messages, cfg } = rt;
   // 密钥词表也在函数内现读：strArray 兜住未经 schema 校验的值面，与调用点那两处同一口径。
   const secretPatterns = strArray(cfg.extraSecretPatterns);
-  const editOpts: EditDangerOptions =
-    secretPatterns === undefined ? {} : { extraSecretPatterns: secretPatterns };
-  const target = editTargetPath(name, args);
+  // 相对目标按会话 cwd 解析（与事实门用的 resolveTarget 同源）：模型给 `.ssh/config` 这种
+  // 相对路径时，判据要看到它落地后的样子，而不是只判输入字符串的字面形状。
+  // `SessionHeader.cwd` 官方即 `readonly cwd?: string`，所以要这道类型守卫（同事实门那处）。
+  const cwdRaw = exec.agent?.session?.header?.cwd;
+  const cwd = typeof cwdRaw === "string" && cwdRaw.length > 0 ? cwdRaw : undefined;
+  // 目标由**键形**认（`declaredTargets`），不按工具名认——代价与理由写在
+  // lib/danger-rules.ts 的 TARGET_PATH_KEYS 注释与 README「已知边界」里。
+  const targets = declaredTargets(args);
+  const editOpts: EditDangerOptions = {
+    ...(secretPatterns === undefined ? {} : { extraSecretPatterns: secretPatterns }),
+    ...(cwd === undefined ? {} : { cwd }),
+  };
+  if (targets.length > 0) {
+    // 解析形只在真要判目标时才取（每枚目标至多一串 realpath，热路径上没有无谓 I/O）。
+    editOpts.resolvedPaths = resolvedFormsOf(targets, cwd);
+  }
+  if (secretPatterns !== undefined) {
+    reportRejectedPatterns(secretPatterns);
+  }
   let reason: string | undefined;
-  if (target !== null) {
-    // 判定走 lib 的单一谓词 editDanger（"归一化路径 → 判密钥面"那两步就是它的本体），本函数不再
-    // 抄第二份；上面那次 editTargetPath 只为本函数留下**上报签名**——判定与上报仍是同一个键。
-    const denial = editDanger(name, args, editOpts);
+  const cost: JudgeCost = { face: "secret", ms: 0, length: 0 };
+  if (targets.length > 0) {
+    // 判定走 lib 的单一谓词 editDanger（"取目标 → 判密钥面"就是它的本体），本函数不再抄第二份；
+    // 它回给的 `target` 同时是**上报签名**，判定与上报仍是同一个键。
+    const startedAt = performance.now();
+    const denial = editDanger(args, editOpts);
+    cost.ms = performance.now() - startedAt;
+    cost.length = targets.join("|").length;
     if (denial !== undefined) {
-      // 规则键 → 当前语言的拒绝理由；`messages[denial]` 的取值类型让"加了规则没写文案"
+      // 规则键 → 当前语言的拒绝理由；`messages[key]` 的取值类型让"加了规则没写文案"
       // 停在编译期，而不是运行时把 undefined 回给模型。
-      reason = messages[denial];
+      reason = messages[denial.key];
+      const real = editOpts.resolvedPaths?.[denial.target];
       reportDeny(wiring, exec, {
         category: "secret-path",
-        signature: target,
+        signature: denial.target,
         detail: reason,
-        evidence: { tool: name },
+        // 解析形一起进上报：被拦的是"声明路径"还是"它背后的那棵树"，看教训时要有这一格。
+        evidence: {
+          tool: name,
+          judgeMs: Math.round(cost.ms),
+          ...(real === undefined ? {} : { resolvedPath: real }),
+        },
       });
     }
   }
-  return reason;
+  return { reason, cost };
 }
 
 /**
@@ -1956,18 +2205,27 @@ export function apply(ctx: Context): void {
         ...(devRunArgs === undefined ? {} : { extraDevRunArgs: devRunArgs }),
       };
 
+      // read/view 的读时基线（首次评估盲区闭合，见 recordReadObservation）：
+      // 无条件调用、函数内部按工具面自筛——read 永远不会被拦，记账先行不影响任何判定。
+      recordReadObservation(name, exec.agent?.session, args);
+
       // 1) bash 危险命令（git 绕过 / rm -rf 灾难 / curl|sh / dev server）。
       // pwsh 与 bash 共用同一套规则，另在调用点声明 shell 方言（bashDenialOf）：pwsh 名下
       // Remove-Item / ri / rd / del 这些整树删除命令词与 Windows 字形目标都判得到。
-      // 仍未覆盖：**包装词那一类**（段头是另一个解释器/包装器）——`cmd.exe /c rd /s /q …`、
-      // `cmd /c …`（去 `.exe`）、`pwsh -c "…"`、`powershell -Command "…"` 四种活拼法同判放行，
-      // 补的是同一层（跳包装词 = 新增命令词面），故按类登记、按类各钉一条现状用例。
+      // 仍未覆盖：**cmd 当段头那一类**——`cmd.exe /c rd /s /q …`、`cmd /c …`（去 `.exe`）与
+      // 带路径前缀的三种拼法同判放行（引号/转义规则差得太远，按类登记、按类各钉一条现状用例）。
+      // **PowerShell 家族已收**：`pwsh`/`powershell`（含 `.exe`、任意大小写）的 `-c`/`-Command`
+      // 体在下钻时强制开 Windows 轨道，`-File`/`-EncodedCommand` 归"看不见"→ 需确认。
       // 以及 pwsh 在 POSIX 宿主上真去删一个叫 `C:\Windows` 的相对目录
       // 这种罕见写法（方言带来的过拦，代价已写在 danger-rules 的 shellDialect 注释里）。
-      const bashDenial = bashDenialOf(name, args, bashOpts);
+      const judge = bashJudgeOf(name, args, bashOpts);
+      sampleJudge(judge.cost, rt.cfg.judgeStats, wiring, exec);
+      const bashDenial = judge.denial;
       if (bashDenial === undefined) {
         // 2) 密钥/凭据路径编辑
-        const editDeny = secretDenyOf(wiring, exec, rt, name, args);
+        const secret = secretJudgeOf(wiring, exec, rt, name, args);
+        sampleJudge(secret.cost, rt.cfg.judgeStats, wiring, exec);
+        const editDeny = secret.reason;
         // 3) 事实强制门（强校验：持续拒绝到取证齐备为止）。目标路径经 editTargetPath
         //    归一化：edit/write 取 file_path ?? path，str_replace_editor 取 path（view 只读
         //    不过门）——与取证记账（callPathOf）同一个键形，模型照做的动作才记得上。
@@ -1986,7 +2244,13 @@ export function apply(ctx: Context): void {
           category: "dangerous-bash",
           signature: unconfirmed ? NESTED_UNCONFIRMED_SIGNATURE : command,
           detail: deny,
-          evidence: { tool: name, needsUserConfirmation: unconfirmed },
+          evidence: {
+            tool: name,
+            needsUserConfirmation: unconfirmed,
+            // 耗时与输入规模一起发：长度上限该不该调，看的是这两枚的真实分布。
+            judgeMs: Math.round(judge.cost.ms),
+            judgeLength: judge.cost.length,
+          },
         });
       }
     }
@@ -1996,7 +2260,8 @@ export function apply(ctx: Context): void {
   if (dispose !== undefined) {
     svc.effect(() => dispose, "danger-guard: tools.guard");
   }
-  // 会话隔离靠 FactGate 内部按 session 分片（seen: Map<sessionId, Set<file>>），不是靠 reset()。
+  // 会话隔离靠 FactGate 内部按 session 分片（sessions: Map<会话键, {pending, released}>，
+  // 见 lib/fact-gate.ts），不是靠 reset()。
   // 此 effect 仅在 apply 时对全新 gate 做一次清空（幂等 no-op），保留只为插件重装时状态归零。
   // 工厂**必须**交回一枚 disposer：官方 `Context["effect"]` 的返回域不收 `undefined`
   // （见 NOOP_DISPOSER 的注释——那是本次改绑官方后新撞出来的分歧，按官方补齐，语义不变）。

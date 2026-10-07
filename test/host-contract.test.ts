@@ -9,9 +9,12 @@
 //   6. 总线 report/pass 异步落库（返回 rejected Promise）时失败同样可见——
 //      旧代码只有同步 catch，异步失败既不留日志又给进程留一枚未处理拒绝。
 import { describe, it } from "vitest";
+import os from "node:os";
+import path from "node:path";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
-import plugin, { BUILTIN_BASE } from "../host.ts";
+import plugin, { BUILTIN_BASE, noteJudgeCost } from "../host.ts";
 import type { Config } from "../host.ts";
 import { SETTINGS_READER } from "../lib/settings-schema.ts";
 import { MESSAGES } from "../lib/messages.ts";
@@ -84,7 +87,7 @@ interface MockCtx {
   bus: LessonLoopSpy;
   guardInstalled: GuardCall | null;
   effects: (() => void)[];
-  disposedHandlers: ((session: { id?: unknown }) => void)[];
+  disposedHandlers: Map<string, ((session: { id?: unknown }) => void)[]>;
 }
 
 /** guard 谓词的执行参数类型（抽取 `extends (exec: infer Exec)` 的推断，改名避开 id-length）。 */
@@ -136,7 +139,7 @@ function createMockCtx(bus: LessonLoopSpy = {}, value?: Partial<Config>): MockCt
   const ctx: MockCtx = {
     guardInstalled: null,
     effects: [],
-    disposedHandlers: [],
+    disposedHandlers: new Map(),
     value: { ...DEFAULT_CTX_VALUE, ...value },
     bus,
     tools: {
@@ -166,12 +169,18 @@ function createMockCtx(bus: LessonLoopSpy = {}, value?: Partial<Config>): MockCt
     }
     return name === "lessonLoop" ? ctx.bus : undefined;
   };
-  ctx.on = (_event, listener) => {
-    ctx.disposedHandlers.push(listener);
+  // 按事件名路由（真实 cordis 的 emit 语义）：此前把所有监听器塞进同一个数组，
+  // "会话销毁"组用例会把 locale 失效监听器也一起喂到——今天无害，但 mock 的分发
+  // 语义与真实链路不符，宿主将来对其他事件载荷做处理时这批用例测的就不是真实路由。
+  ctx.on = (event, listener) => {
+    const list = ctx.disposedHandlers.get(event) ?? [];
+    list.push(listener);
+    ctx.disposedHandlers.set(event, list);
     return () => {
-      const i = ctx.disposedHandlers.indexOf(listener);
+      const current = ctx.disposedHandlers.get(event) ?? [];
+      const i = current.indexOf(listener);
       if (i !== -1) {
-        ctx.disposedHandlers.splice(i, 1);
+        current.splice(i, 1);
       }
     };
   };
@@ -180,6 +189,13 @@ function createMockCtx(bus: LessonLoopSpy = {}, value?: Partial<Config>): MockCt
 
 function applyPlugin(ctx: MockCtx): void {
   plugin.apply(ctx as never);
+}
+
+/** 触发 session/disposed（按事件名路由，与真实 cordis 的 emit 语义一致）。 */
+function emitDisposed(ctx: MockCtx, id: string): void {
+  for (const handler of ctx.disposedHandlers.get("session/disposed") ?? []) {
+    handler({ id });
+  }
 }
 
 const bashExec: GuardExecParam = {
@@ -299,20 +315,6 @@ describe("lessonLoop 总线降级（守卫热路径绝不因总线故障失败�
     assert.deepEqual(probe.reasons, [], "rejection 必须被接住：漏出去会污染整个宿主进程");
   });
 
-  it("pass 抛错 → fact-gate 拒绝/放行路径不受影响", () => {
-    const ctx = createMockCtx({
-      pass: () => {
-        throw new Error("pass bus down");
-      },
-    });
-    applyPlugin(ctx);
-    // 有事件流（空日志）→ 证据可判定 → 走正常配额/收敛路径，不被 pass 抛错干扰。
-    assert.doesNotThrow(() => {
-      const first = ctx.guardInstalled!.fn(editExecWithEvents("s-pass"));
-      assert.equal(typeof first, "string");
-    });
-  });
-
   it("总线正常 → report 载荷契约（category/signature/evidence）", () => {
     const reports: unknown[] = [];
     const ctx = createMockCtx({
@@ -378,17 +380,15 @@ describe("bash 闸的两种结论在总线侧必须可分辨（拦 vs 认不准�
   });
 });
 
-describe("session/disposed 释放 fact-gate 会话分片（2026-09-18 接线）", () => {
+describe("session/disposed 释放 fact-gate 会话分片", () => {
   it("会话销毁后同 id 重建 → 从首拒重新开始（分片已清）", () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     // 会话 s-a 首次编辑被拒（记录 denials=1）
     const result = ctx.guardInstalled!.fn(editExecWithEvents("s-a"));
     assert.equal(typeof result, "string");
-    // 触发 session/disposed
-    for (const handler of ctx.disposedHandlers) {
-      handler({ id: "s-a" });
-    }
+    // 触发 session/disposed（按事件名路由，只喂销毁监听器）
+    emitDisposed(ctx, "s-a");
     // 同 id 重建：连续无证据拒绝应重新从 1 计数（而非直接配额放行）。
     // 契约：释放后第一次拒绝仍是普通拒绝（message 含「取证」），不是配额放行。
     const r2 = ctx.guardInstalled!.fn(editExecWithEvents("s-a"));
@@ -403,9 +403,7 @@ describe("session/disposed 释放 fact-gate 会话分片（2026-09-18 接线）"
     ctx.guardInstalled!.fn(editExecWithEvents("s-b"));
     ctx.guardInstalled!.fn(editExecWithEvents("s-b"));
     // 销毁其它会话 s-x
-    for (const handler of ctx.disposedHandlers) {
-      handler({ id: "s-x" });
-    }
+    emitDisposed(ctx, "s-x");
     // s-b 第三次无证据拒绝 → 达配额放行（undefined；说明 s-b 分片仍计数到 3 > maxDenies=2）
     const res = ctx.guardInstalled!.fn(editExecWithEvents("s-b"));
     assert.equal(res, undefined);
@@ -421,9 +419,7 @@ describe("session/disposed 释放 fact-gate 会话分片（2026-09-18 接线）"
     const second = ctx.guardInstalled!.fn(editExecNoEvents("s-d"));
     assert.equal(second, INDETERMINATE_MESSAGE);
     // dispose 清分片 → 重建后从首拒重新开始（非 indeterminate、非配额）
-    for (const handler of ctx.disposedHandlers) {
-      handler({ id: "s-d" });
-    }
+    emitDisposed(ctx, "s-d");
     const rebuilt = ctx.guardInstalled!.fn(editExecNoEvents("s-d"));
     assert.equal(typeof rebuilt, "string");
     assert.notEqual(rebuilt, INDETERMINATE_MESSAGE);
@@ -433,12 +429,8 @@ describe("session/disposed 释放 fact-gate 会话分片（2026-09-18 接线）"
     const ctx = createMockCtx();
     applyPlugin(ctx);
     assert.doesNotThrow(() => {
-      for (const handler of ctx.disposedHandlers) {
-        handler({ id: "s-c" });
-      }
-      for (const handler of ctx.disposedHandlers) {
-        handler({ id: "s-c" });
-      }
+      emitDisposed(ctx, "s-c");
+      emitDisposed(ctx, "s-c");
     });
   });
 });
@@ -462,7 +454,7 @@ describe("enabled=false 时守卫完全静默（含总线与分片零副作用�
   });
 });
 
-describe("设置面故障时闸门必须 fail closed（2026-09-19 审计 / 2026-09-23 bulkhead 重做）", () => {
+describe("设置面故障时闸门必须 fail closed（bulkhead 隔舱后）", () => {
   // 0.1.6 的形态：settings.register 在注册期求值合并段，手改坏的持久段（maxDenies: 0）
   // 让它抛错；apply 捕获后以 BUILTIN_BASE 再注册一次，闸门继续拦。
   // 0.1.7 迁移第一版把这段删了，改成"严格 Config 挂在本条目上、由 cordis 校验"——结果
@@ -518,6 +510,11 @@ describe("设置面故障时闸门必须 fail closed（2026-09-19 审计 / 2026-
   });
 });
 
+/** 只取事实门那一类的 pass 信号：`judge-cost` 样本每次判定都发一条，不参与这几条契约。 */
+function factgatePasses(passes: readonly unknown[]): unknown[] {
+  return passes.filter((item) => (item as { category?: string }).category === "factgate-deny");
+}
+
 describe("pass 信号上报的完整契约（总线同时提供 report/pass）", () => {
   it("取证通过 → bus.pass 被调用一次，载荷含 category/signature", () => {
     const passes: unknown[] = [];
@@ -536,8 +533,12 @@ describe("pass 信号上报的完整契约（总线同时提供 report/pass）",
     const id = "s-pass-ok";
     ctx.guardInstalled!.fn(editExecWithEvents(id));
     assert.equal(ctx.guardInstalled!.fn(editExecWithEvidence(id)), undefined, "取证齐备 → 放行");
-    assert.equal(passes.length, 1, "放行 = 规则被遵守 → pass 信号");
-    const payload = passes[0] as { category: string; signature: string; sessionId: unknown };
+    assert.equal(factgatePasses(passes).length, 1, "放行 = 规则被遵守 → pass 信号");
+    const payload = factgatePasses(passes)[0] as {
+      category: string;
+      signature: string;
+      sessionId: unknown;
+    };
     assert.equal(payload.category, "factgate-deny");
     assert.equal(payload.signature, "edit-before-factgate");
     assert.equal(payload.sessionId, id);
@@ -548,8 +549,10 @@ describe("pass 信号上报的完整契约（总线同时提供 report/pass）",
     const passes: unknown[] = [];
     const ctx = createMockCtx({
       report: () => ({}),
-      pass: () => {
-        passes.push("called");
+      pass: (input) => {
+        // 收载荷而不是收 "called"：`judge-cost` 样本也走这一条 pass 通道，
+        // 按类别筛才判得清"事实门那一条 pass 到底发了没有"。
+        passes.push(input);
         throw new Error("pass bus down");
       },
     });
@@ -565,7 +568,7 @@ describe("pass 信号上报的完整契约（总线同时提供 report/pass）",
     } finally {
       logs.restore();
     }
-    assert.equal(passes.length, 1, "确实走到了 pass 调用");
+    assert.equal(factgatePasses(passes).length, 1, "确实走到了 pass 调用");
     assert.ok(
       logs.lines.some(
         (line) => line.includes("lessonLoop pass failed:") && line.includes("Error: pass bus down"),
@@ -577,7 +580,7 @@ describe("pass 信号上报的完整契约（总线同时提供 report/pass）",
     ctx.guardInstalled!.fn(editExecWithEvents(other));
     ctx.guardInstalled!.fn(editExecWithEvents(other));
     assert.equal(ctx.guardInstalled!.fn(editExecWithEvents(other)), undefined, "达配额放行");
-    assert.equal(passes.length, 1, "配额放行不追加 pass 信号");
+    assert.equal(factgatePasses(passes).length, 1, "配额放行不追加 pass 信号");
   });
 
   it("pass 返回 rejected Promise → 放行路径不受影响，且不产生未处理拒绝", async () => {
@@ -606,7 +609,7 @@ describe("pass 信号上报的完整契约（总线同时提供 report/pass）",
       logs.restore();
       probe.stop();
     }
-    assert.equal(passes.length, 1, "确实走到了 pass 调用");
+    assert.equal(factgatePasses(passes).length, 1, "确实走到了 pass 调用");
     assert.ok(
       logs.lines.some(
         (line) =>
@@ -622,5 +625,125 @@ describe("pass 信号上报的完整契约（总线同时提供 report/pass）",
     ctx.get = () => ({});
     applyPlugin(ctx);
     assert.equal(typeof ctx.guardInstalled!.fn(bashExec), "string");
+  });
+});
+
+describe("判定耗时与解析形随上报一起发（长度上限要按真实分布调）", () => {
+  it("bash 拒绝载荷带 judgeMs / judgeLength", () => {
+    const { ctx, reports } = reportSpy();
+    applyPlugin(ctx);
+    ctx.guardInstalled!.fn(bashExec);
+    const rep = reports[0] as ReportPayload;
+    assert.equal(typeof rep.evidence["judgeMs"], "number", "没有耗时就无法判断上限该不该调");
+    assert.equal(rep.evidence["judgeLength"], "rm -rf /".length, "签名就是这条命令，长度要能对上");
+  });
+
+  it("密钥面载荷带 judgeMs；解析不出真实路径时不带 resolvedPath", () => {
+    const { ctx, reports } = reportSpy();
+    applyPlugin(ctx);
+    const reason = ctx.guardInstalled!.fn({
+      name: "read",
+      arguments: { file_path: "/w/proj/.ssh/id_rsa" },
+      agent: { session: { id: "s-1", header: { cwd: "/w/proj" } } },
+    });
+    assert.equal(typeof reason, "string", "键形口径下只读工具翻凭据也拦");
+    const rep = reports[0] as ReportPayload;
+    assert.equal(rep.category, "secret-path");
+    assert.equal(typeof rep.evidence["judgeMs"], "number");
+    assert.equal(rep.evidence["resolvedPath"], undefined, "祖先全不存在 ⇒ 没有这一形");
+  });
+
+  it("目标确实存在时解析形一起发出（看教训时要知道被拦的是哪棵树）", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "dgc-contract-"));
+    try {
+      await mkdir(path.join(dir, ".ssh"), { recursive: true });
+      const { ctx, reports } = reportSpy();
+      applyPlugin(ctx);
+      ctx.guardInstalled!.fn({
+        name: "write",
+        arguments: { file_path: path.join(dir, ".ssh", "id_rsa") },
+        agent: { session: { id: "s-1", header: { cwd: dir } } },
+      });
+      const rep = reports[0] as ReportPayload;
+      assert.equal(typeof rep.evidence["resolvedPath"], "string");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("慢判定：到线才出声（阈值撞墙钟，故直接喂数而不是造一条 100ms 的输入）", () => {
+    const logs = warnCapture();
+    try {
+      noteJudgeCost({ face: "bash", ms: 99.9, length: 10 });
+      assert.deepEqual(logs.lines, [], "未到线不出声，否则告警会淹掉真实分布");
+      noteJudgeCost({ face: "edit", ms: 100, length: 4096 });
+      const line = logs.lines.join("\n");
+      assert.equal(logs.lines.length, 1);
+      assert.ok(line.includes("slow judge"));
+      assert.ok(line.includes("(edit)"), "出声要说是哪一面慢的");
+      assert.ok(line.includes("4096"), "输入规模一起给，才知道上限该往哪调");
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it("滚动摘要：攒满一窗才发一条，分档与最大值都在行里，发完清零", () => {
+    const infos: string[] = [];
+    const original = console.info;
+    console.info = (...args: unknown[]): void => {
+      infos.push(args.map(String).join(" "));
+    };
+    try {
+      for (let i = 0; i < 199; i += 1) {
+        noteJudgeCost({ face: "windowed", ms: i % 3, length: i * 10 });
+      }
+      assert.deepEqual(infos, [], "不满一窗不发条，否则摘要本身就是噪声");
+      noteJudgeCost({ face: "windowed", ms: 250, length: 300_000 });
+      assert.equal(infos.length, 1);
+      const line = infos.join("");
+      assert.ok(line.includes("judge stats (windowed): calls=200"));
+      assert.ok(line.includes(">=100ms=1"), "慢的那一条要落在末档");
+      assert.ok(line.includes("<1ms=67"));
+      assert.ok(line.includes("maxMs=250.0"));
+      assert.ok(line.includes(">=262144=1"), "长度末档同样要有牙");
+      assert.ok(line.includes("maxLen=300000"));
+      noteJudgeCost({ face: "windowed", ms: 1, length: 1 });
+      assert.equal(infos.length, 1, "清零后是滚动窗口，不是累计历史");
+    } finally {
+      console.info = original;
+    }
+  });
+
+  it("judge-cost 的 pass 只在采集开时发，载荷里没有命令原文也没有路径", () => {
+    const passes: unknown[] = [];
+    const ctx = createMockCtx({
+      report: () => ({}),
+      pass: (input) => {
+        passes.push(input);
+        return {};
+      },
+    });
+    applyPlugin(ctx);
+    ctx.value = { ...ctx.value, judgeStats: true };
+    ctx.guardInstalled!.fn(bashExec);
+    const costs = passes.filter(
+      (item) => (item as Record<string, unknown>)["category"] === "judge-cost",
+    );
+    assert.equal(costs.length, 1, "一次 bash 判定一条样本");
+    const cost = costs[0] as Record<string, unknown>;
+    assert.equal(cost["signature"], "bash", "签名是面名，不是命令");
+    assert.equal(typeof cost["judgeMs"], "number");
+    assert.equal(cost["judgeLength"], "rm -rf /".length);
+    assert.ok(!JSON.stringify(cost).includes("rm -rf /"), "命令原文不出域");
+    passes.length = 0;
+    ctx.value = { ...ctx.value, judgeStats: false };
+    ctx.guardInstalled!.fn(bashExec);
+    assert.equal(
+      passes.filter((item) => (item as Record<string, unknown>)["category"] === "judge-cost")
+        .length,
+      0,
+      "关掉采集就一条都不出域（拦截本身不受影响）",
+    );
+    assert.equal(typeof ctx.guardInstalled!.fn(bashExec), "string", "关掉采集不改拦截结论");
   });
 });

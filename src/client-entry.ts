@@ -194,7 +194,7 @@ interface ListInputRowProps {
   onChange: (field: string, list: string[]) => void;
 }
 
-/** 词表/模式输入行：设置数组 ↔ UI 串（v6 词表可配置）。
+/** 词表/模式输入行：设置数组 ↔ UI 串（词表可配置）。
  *  保存条模式：本行只上报草稿（onChange），写入统一由「保存」触发——
  *  旧实现的 300ms 防抖直写 + 卸载 flush 整体移除。 */
 function ListInputRow(props: ListInputRowProps): ReactNode {
@@ -474,6 +474,16 @@ function gateRows(rc: RowCtx): ReactNode[] {
       setField("factGateEnabled", eff("factGateEnabled") === false);
     },
   });
+  const rowJudgeStats = createElement(ToggleRow, {
+    label: t("statsLabel"),
+    hint: t("statsHint"),
+    field: "judgeStats",
+    checked: eff("judgeStats") !== false,
+    disabled: !writable,
+    onToggle: () => {
+      setField("judgeStats", eff("judgeStats") === false);
+    },
+  });
   const rowMaxDenies = createElement(NumberInputRow, {
     label: t("maxDeniesLabel"),
     hint: t("maxDeniesHint"),
@@ -523,7 +533,7 @@ function gateRows(rc: RowCtx): ReactNode[] {
       setField("bigEditChars", num);
     },
   });
-  return [rowEnabled, rowFactGate, rowMaxDenies, rowStrict, rowSmall, rowBig];
+  return [rowEnabled, rowFactGate, rowJudgeStats, rowMaxDenies, rowStrict, rowSmall, rowBig];
 }
 
 /** 名单/词表族（引用取证两份名单、测试目录、两份 dev 词表、密钥路径正则）。 */

@@ -51,10 +51,11 @@ function createSettingsCtx(): {
     settings: {
       configure(presentation, owner) {
         configured.push({ presentation, owner: owner ?? {} });
+        // disposer 的契约是「调用即清理」：直接清 configured。此前写成"再往 disposers
+        // 里塞一层闭包"，靠测试遍历时边遍历边追加的意外才清到——替身自己先违约，
+        // 断言的绿色就不由被测行为保证了。
         return (): void => {
-          disposers.push(() => {
-            configured.length = 0;
-          });
+          configured.length = 0;
         };
       },
     },
@@ -134,9 +135,13 @@ describe("danger-guard 设置条目（settings-host.ts）", () => {
   it("effect 的 disposer 收全：卸载时撤读数口、也撤页面策略", () => {
     settingsPlugin.apply(harness.ctx as never, refsFrom(live));
     assert.equal(harness.disposers.length, 2, "读数口 + 页面策略两条 effect");
+    // 遍历前记长度、遍历后断言不变：disposer 的调用不得再往册子里追加（否则
+    // "清理"就是靠遍历语义的巧合兑现的——替身违约时这条断言当场红）。
+    const disposerCount = harness.disposers.length;
     for (const disposer of harness.disposers) {
       disposer();
     }
+    assert.equal(harness.disposers.length, disposerCount, "disposer 调用不得追加新条目");
     assert.equal(harness.provided.length, 0, "不留上一份读数的幽灵");
     assert.equal(harness.configured.length, 0, "页面策略随 fiber 回收");
   });

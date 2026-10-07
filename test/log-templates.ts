@@ -4,6 +4,8 @@
 // （node/no-sync 等）不该为了测试脚手架开口子，且模板漂移应当是一次显式的改动。
 export const LOG_TEMPLATES: readonly string[] = [
   "[danger-guard] fact-gate:",
+  "[danger-guard] judge stats (",
+  "[danger-guard] slow judge (",
   "[danger-guard] lessonLoop pass failed:",
   "[danger-guard] lessonLoop report failed:",
   "[danger-guard] save failed:",
