@@ -2,6 +2,34 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.2-rc
+
+宿主生态与工具链升到当前发布线，并把判据的目录基准换到宿主 0.2.1-alpha.2 的那枚服务上。**判定规则、拦截面与默认配置未改**，改的是"跟谁对齐"。
+
+### Changed
+
+- `@deepseek-ai/dsh-*` 家族与 peer 的 `@deepseek-ai/dsh` 从 `0.2.1-alpha.1` 升到 `0.2.1-alpha.2`（devDependencies、peerDependencies、`pnpm-workspace.yaml` 的 `overrides`、`engines.dsh` 四处同值——`test/publish-manifest.test.ts` 要求它们与 peer 逐项相等）。`@deepseek-ai/cordis` `4.0.5-alpha.1` 与 `@deepseek-ai/schemastery` `3.18.5-alpha.1` **不动**：那是 alpha.2 自己钉的那两枚（`~4.0.5-alpha.1` / `~3.18.5-alpha.1`），registry 上没有更新的 alpha。
+- `@jayyuen66/dsh-plugin-shared` `^0.1.2` → `^0.1.4`。这一枚是本轮升级里唯一改变**发布物形状**的：0.1.2 把 `@deepseek-ai/dsh-tools` / `dsh-session` 等宿主包列在自己的 `dependencies` 里，消费方 profile（`nodeLinker: hoisted` + `autoInstallPeers: false`）于是会物化出第二份宿主类型面——正是 `test/publish-manifest.test.ts` 那条"不进 dependencies"门禁的理由，只是它此前管不到依赖树的下一层。0.1.3 把它们挪进 `peerDependencies`，`dsh-danger-guard@0.1.1` 在真实宿主上装出的 `cosmokit`/`dsh-brand`/`schemastery` 三枚真实目录到此不再出现；0.1.4 再把那几枚 peer 从 `0.2.1-alpha.1` 钉到 `0.2.1-alpha.2`，与本包同版本，依赖树里最后一处 `alpha.1` 需求随之清零（profile 内 `pnpm peers check` 实测：剩下的只有"宿主运行期才提供、本包刻意不安装"的 missing peer 提示，版本一律对得上）。
+  ⇒ 因此 0.1.1 那份"传递引入约 30 枚包，本包改不动"的记录已经过期：改得动，且改的方式就是升级这枚依赖。
+- 工具链（`pnpm-workspace.yaml` 的 `catalog`）跟到发布线：`@types/node` 26.6.3→26.6.5、`@vitest/coverage-v8` 与 `vitest` 5.0.2→5.0.3、`happy-dom` 20.14.5→20.14.6、`jsdom` 30.1.1→30.1.2、`oxfmt` 0.71.0→0.72.0、`oxlint` 1.86.0→1.87.0、`oxlint-tsgolint` 7.0.2003→7.0.2004、`rolldown` 1.2.11→1.2.13、`vite` 8.3.1→8.3.4。`typescript` 7.0.2、`react`/`@types/react*` 19.3.0、`zod` 4.6.5 已是发布线，未动。
+
+### Fixed
+
+- **相对目标的目录基准跟着宿主走**。`SessionHeader.cwd` 从 alpha.2 起只是创建期快照（官方定性：dsh-session `src/index.ts:533` "detached, deep-frozen creation metadata"），活目录搬到 `ctx.workingDirectory`，宿主 bash 也改读它（tool-bash `src/index.ts:487`）。本包原先五处直接读 `header.cwd`（事实门取证、读时基线、密钥面 realpath、deny/pass 上报），升级后与宿主各用一枚：会话 `cd` 之后 `<当前目录>/.ssh/config` 这类密钥路径会按 `<创建期目录>/.ssh/config` 判——该拦的拦不住。现在五处统一到 `effectiveCwdOf()`：服务在场且交出非空串即用，否则退回 `header.cwd`（没装 `dsh-working-directory` 的 profile 行为不变，闸门不下线）；`GuardRuntime.cwd` 每趟调用算一次，读时基线与评估侧因此共享同一枚值。
+- 两份 README 里"宿主版本只是记录、尚无门禁"的说法与实测不符：`evaluatePluginCompatibility` 从 0.1.7-rc 就在装插件时比对**每一枚** `@deepseek-ai/dsh*` peer，不符即 `dsh: installation rejected`，出路是 `dsh plugin allow-version … --accept-risk`。已按实测改写，并补上"精确钉 = 高于本下限的宿主同样需要授权"这条推论。
+
+### Added
+
+- `test/host-contract.test.ts` 六条工作目录契约用例：密钥面吃当前目录（并用"服务缺席即放行"作反向对照）、服务缺席退回 `header.cwd`、四类坏形状（空串 / 非字符串 / 没有 `get` / `get` 不是函数）一律退回且不抛错、会话不可得时不读服务、事实门在当前目录下与绝对路径取证同键、上报载荷的 `cwd` 跟到当前目录。覆盖率仍为四项 100%。
+- 真机回归口径写进两份 README：对 `dsh 0.2.1-alpha.2` 实测 `dsh plugin --profile web add <tarball>` → 3 枚包、profile 下无 `@deepseek-ai/` 目录、`--dump-config` 出现 `danger-guard` 与 `danger-guard-settings` 两条、web profile 启动无 fiber 报错；另以一枚故意把 peer 写成 `@deepseek-ai/dsh: 0.1.0` 的探针包验证门禁真的拒绝安装并回滚。
+
+### Not changed, deliberately
+
+- **不给 `working_directory` / `worktree_create` 新增拦截规则**。前者只改目录、不写文件，而判据现在跟着目录走；后者属 experimental bundle，不在 `dsh-base`。它们的参数键 `cd` 也不在 `TARGET_PATH_KEYS` 里，密钥面不会把它误当写目标判。
+- **`inject` 不加 `workingDirectory`**。与 `sessionProjections` 同一条理由：可选读面一旦写进插件级 `inject`，没装那个 bundle 的 profile 会整条闸门下线。
+- **`ctx.sessionProjections.register()` 的返回物仍不接**。alpha.2 起它交回一枚 Cordis disposer，可以 yield 进 `ctx.effect()`；本包的注册落在注入子 fiber 上、随其回收，行为未变，不在本轮顺手改形。
+- **台账不做逐条目录定标**。相对取证仍按评估时那枚目录重新归一（新增边界 ⑪），要收掉它得把 `working-directory/change` 折进 `lib/tool-ledger.ts`、给每条记录盖上当时所在目录——那是台账形状的改变，不属于一次依赖升级。
+
 ## 0.1.1
 
 发布形态整改：入口面补齐类型声明、归属声明随包发出、发布流水线加固。**判定逻辑、拦截面与默认配置均未改动**——所有变更都在「装出去之后」那一侧。

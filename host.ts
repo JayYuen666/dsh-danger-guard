@@ -17,9 +17,11 @@
 // `typescript/no-unsafe-type-assertion` 禁止用 `as` 硬造——唯一合法的送法就是官方自己的
 // `brandNumber`（dsh-brand/lib/types/index.d.ts:34）。它是 dsh-brand 的恒等函数，且该包
 // 自述「不拥有任何具体域值，也不保留任何运行时身份或可变状态，独立安装的副本产出可互换的
-// 值」），所以把 dsh-brand 落在 **dependencies**、产物留裸说明符：
-// 官方自述它不保留运行时身份，且放 devDependencies 会被 rolldown 把函数体内联进 host.js
-// （等于每包各持一份官方实现）。其余 @deepseek-ai/* 一律 type-only。
+// 值」），所以把 dsh-brand 落在 **peerDependencies**（并同步进 devDependencies 供本仓编译）、产物留裸说明符：
+// 官方自述它不保留运行时身份，而只写 devDependencies（不进 peer）会被 rolldown 把函数体内联
+// 进 host.js（等于每包各持一份官方实现）；写进 dependencies 更糟——消费方 profile 是 hoisted
+// 安装，它会物化成第二份真实目录，见 test/publish-manifest.test.ts 的那条门禁。
+// 其余 @deepseek-ai/* 一律 type-only。
 
 import path from "node:path";
 import { statSync, readFileSync, realpathSync } from "node:fs";
@@ -266,6 +268,25 @@ function isLessonLoopReporter(value: unknown): value is LessonLoopReporter {
   return typeof report === "function" && (pass === undefined || typeof pass === "function");
 }
 
+/** 官方工作目录服务的最小读面（`WorkingDirectoryService.get(session: Session): string`，
+ *  `@deepseek-ai/dsh-working-directory` src/index.ts:122-124——同步、不做 fs I/O，
+ *  所以能在 `ToolGuard` 这道同步谓词里读）。
+ *  ⚠ 官方收的是名义类 `Session`，本包的会话面是 `SessionLogFace` 投影（理由见它自己的注释），
+ *  两者在类型上对接不上，故入参按投影面写、返回按 `unknown` 收，形状由 `effectiveCwdOf`
+ *  现判——与 `readSessionLog` 里那道 `Array.isArray` 是同一条纪律。 */
+interface WorkingDirectoryFace {
+  get?: (session: SessionLogFace) => unknown;
+}
+
+/** 工作目录服务在场守卫：不是记录 ⇒ 没有服务；`get` 存在但不是函数 ⇒ 也不认
+ *  （`get` 缺席留给人值守卫 `raw.get?.()`，两种缺席都退回创建期目录）。 */
+function isWorkingDirectory(value: unknown): value is WorkingDirectoryFace {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return value["get"] === undefined || typeof value["get"] === "function";
+}
+
 /** unknown → 稳定字符串键：原始类型转成 String，其余给 ""（会话键只需能区分即可，
  *  避免 no-base-to-string 对任意对象 String() 的默认序列化）。 */
 function stringIdOf(value: unknown): string {
@@ -364,10 +385,12 @@ export type { Config } from "./lib/settings-schema.ts";
  * 三位一律 `Partial`：官方把 `header`/`snapshotEvents` 记成必选成员（:110-117 还写明
  * "a minimal header is synthesized … so `session.header` is always present"），但那句承诺
  * 说的是**宿主自己 `new` 出来的 Session**。本面收的是跨进程边界送来的宿主对象——在位与否
- * 只能运行时判（`buildEvalContext` 里读出的 `typeof reader === "function"`、`session.header?.cwd`）。
- * 官方类型描述宿主**承诺**什么，守卫负责宿主**交付**什么，两者并存。
- * `SessionHeader.cwd` 官方即 `readonly cwd?: string`（types.d.ts:69），故
- * `typeof cwdRaw === "string"` 那道守卫在迁移前后都仍然必要（空串另算：长度判定保留）。
+ * 只能运行时判（`buildEvalContext` 里读出的 `typeof reader === "function"`、`effectiveCwdOf`
+ * 里对 `session.header?.cwd` 的取值）。官方类型描述宿主**承诺**什么，守卫负责宿主**交付**
+ * 什么，两者并存。
+ * `SessionHeader.cwd` 官方即 `readonly cwd?: string`（types.ts:104-105），且从 0.2.1-alpha.2
+ * 起语义收窄成**创建期**快照（活目录在 `ctx.workingDirectory`，见 `effectiveCwdOf`），
+ * 故 `typeof cwdRaw === "string"` 那道守卫在迁移前后都仍然必要（空串另算：长度判定保留）。
  *
  * ⚠ 官方已把 `snapshotEvents` 标为 `@deprecated`（"new calls are prohibited"，:186-187）：
  * 如今这条读只剩**回退**用途——取证台账的主路径是 `ctx.sessionProjections` 上注册的
@@ -993,9 +1016,37 @@ const relOf = (ctx: EvalCtx, targetPath: string): string =>
     ? targetPath.slice(ctx.cwd.length + 1)
     : targetPath;
 
+/** 非空字符串读数：`undefined` / 空串 / 非字符串一律按"这一项没有"处理（cwd 只认非空串，
+ *  空串解析出来的路径会把相对目标顶到根上，比缺失更危险）。 */
+const nonEmptyStr = (value: unknown): string | undefined =>
+  typeof value === "string" && value.length > 0 ? value : undefined;
+
 /** 路径归一化：相对路径按会话 cwd 解析（模型常报相对路径）。 */
 const resolveTarget = (value: string, cwd: string | undefined): string =>
   cwd !== undefined && !path.isAbsolute(value) ? path.resolve(cwd, value) : value;
+
+/** 会话**当前**的工作目录。
+ *
+ *  `SessionHeader.cwd` 从宿主 0.2.1-alpha.2 起只是**创建期**快照（官方注释
+ *  "Absolute working directory the session was created in"，dsh-session types.ts:104-105；
+ *  同文件 :533 把 header 整体定性为 detached creation metadata），活目录搬到了
+ *  `ctx.workingDirectory`：宿主侧 bash 已改读它（tool-bash src/index.ts:487
+ *  `await ctx.workingDirectory.ensure(exec.agent, exec.signal)`），换目录由
+ *  `working_directory` 工具与该服务的 `set` 提交（src/index.ts:160-172）。
+ *  于是"继续读 header.cwd"不是风格问题而是判据错位：会话 `cd` 之后，相对目标会被
+ *  归一到**旧**目录，`<当前目录>/.ssh/config` 这枚密钥路径会按
+ *  `<建会话目录>/.ssh/config` 去判——该拦的拦不住；反向也有，`presenceOf`/`realpathOf`
+ *  会 stat 到另一条路径上，把没读过的文件当成已读或反之。
+ *  取法次序：服务在场且给出非空串 ⇒ 用它；否则退回 `header.cwd`（没换过目录的会话
+ *  两者同值，宿主没装那个 bundle 时这是唯一读数）。整趟 guard 调用只算一次（见
+ *  `GuardRuntime.cwd`），上报侧另算的那次落在拒绝/通过这种低频路径上。 */
+function effectiveCwdOf(svc: HostCtx, session: SessionLogFace | undefined): string | undefined {
+  const raw: unknown = svc.get?.("workingDirectory");
+  if (session === undefined || !isWorkingDirectory(raw)) {
+    return nonEmptyStr(session?.header?.cwd);
+  }
+  return nonEmptyStr(raw.get?.(session)) ?? nonEmptyStr(session.header?.cwd);
+}
 
 /**
  * 回退扫描的全量日志读（只在投影不可用时走到这里）。
@@ -1040,19 +1091,23 @@ function ledgerRows(
   return evs === undefined ? undefined : { ...scanToolEvents(evs), logSeq: evs.length };
 }
 
-/** 构造只读评估环境；会话不可得/两条读法都拿不到台账 → undefined（复用 undeterminable 保守输入）。 */
+/** 构造只读评估环境；会话不可得/两条读法都拿不到台账 → undefined（复用 undeterminable 保守输入）。
+ *  `cwd` 由调用方（guard 回调经 `GuardRuntime.cwd`）传进来，不在这里现取：读时基线
+ *  （`recordReadObservation`）与评估侧必须吃**同一枚**目录值，键形才逐字同源。 */
 function buildEvalContext(
   session: SessionLogFace | undefined,
   target: string,
-  refPolicy: RefSearchPolicy,
-  messages: DangerGuardMessages,
-  readLedger: LedgerReader | undefined,
+  gating: {
+    cwd: string | undefined;
+    refPolicy: RefSearchPolicy;
+    messages: DangerGuardMessages;
+    ledger: LedgerReader | undefined;
+  },
 ): EvalCtx | undefined {
   let result: EvalCtx | undefined;
-  const rows = session === undefined ? undefined : ledgerRows(session, readLedger);
+  const rows = session === undefined ? undefined : ledgerRows(session, gating.ledger);
   if (session !== undefined && rows !== undefined) {
-    const cwdRaw = session.header?.cwd;
-    const cwd = typeof cwdRaw === "string" && cwdRaw.length > 0 ? cwdRaw : undefined;
+    const { cwd } = gating;
     const norm = (value: unknown): string | undefined =>
       typeof value === "string" && value.length > 0 ? resolveTarget(value, cwd) : undefined;
     const targetN = resolveTarget(target, cwd);
@@ -1065,8 +1120,8 @@ function buildEvalContext(
       base,
       stems: buildStems(base),
       norm,
-      refPolicy,
-      messages,
+      refPolicy: gating.refPolicy,
+      messages: gating.messages,
     };
   }
   return result;
@@ -1139,7 +1194,7 @@ function callPathOf(name: string, a: Record<string, unknown>): string | undefine
     return gatePath;
   }
   const candidate = name === "str_replace_editor" ? a["path"] : (a["file_path"] ?? a["path"]);
-  return typeof candidate === "string" && candidate.length > 0 ? candidate : undefined;
+  return nonEmptyStr(candidate);
 }
 
 /**
@@ -1159,6 +1214,7 @@ function recordReadObservation(
   name: string,
   session: SessionLogFace | undefined,
   args: Record<string, unknown>,
+  cwd: string | undefined,
 ): void {
   if (name !== "read" && !(name === "str_replace_editor" && args["command"] === "view")) {
     return;
@@ -1168,9 +1224,9 @@ function recordReadObservation(
     return;
   }
   // 键形与评估侧（buildEvalContext）逐字同源：同一 cwd 归一、同一 sessKey 前缀，
-  // 否则 read 时写的基线编辑评估时读不到。
-  const cwdRaw = session?.header?.cwd;
-  const cwd = typeof cwdRaw === "string" && cwdRaw.length > 0 ? cwdRaw : undefined;
+  // 否则 read 时写的基线编辑评估时读不到。cwd 由 guard 回调那**同一趟**调用算好传来
+  // （`GuardRuntime.cwd`），不在这里再读一遍会话面——两处各自现取，中间夹一次 `cd`
+  // 就会把基线写到另一个键上。
   const targetN = resolveTarget(target, cwd);
   const { mtimeMs } = presenceOf(targetN);
   const lenKey = `${stringIdOf(session?.id)}|${targetN}`;
@@ -1547,13 +1603,15 @@ function evidenceFor(
   gating: {
     tier: FactTier;
     extraTestDirs: string[];
+    /** 会话当前工作目录（guard 每次调用算一次，见 `effectiveCwdOf`）。 */
+    cwd: string | undefined;
     refPolicy: RefSearchPolicy;
     messages: DangerGuardMessages;
     /** 台账读口（注册表缺席时为 undefined ⇒ 走回退扫描；见 lib/tool-ledger.ts）。 */
     ledger: LedgerReader | undefined;
   },
 ): FactEvidenceInput {
-  const ctx = buildEvalContext(session, target, gating.refPolicy, gating.messages, gating.ledger);
+  const ctx = buildEvalContext(session, target, gating);
   if (ctx === undefined) {
     return undeterminable(false);
   }
@@ -1599,8 +1657,8 @@ function evidenceFor(
   const staleBase = externallyChanged ? externalEditSeq : -1;
   // 新建豁免：目标**确凿不存在**（ENOENT）**且**本次调用有能力创建它（write/create）。
   // 两个条件都不能少：① 对已存在文件执行 write 是全量覆盖，恰恰最需要先 read（否则会
-  // 无声清掉没看过的内容）；② presence 为 "unknown"（EACCES/ENOTDIR/ELOOP，或会话
-  // header.cwd 缺失时相对路径按进程 cwd 解析）不等于"新文件"——把读不到的文件当新的，
+  // 无声清掉没看过的内容）；② presence 为 "unknown"（EACCES/ENOTDIR/ELOOP，或会话目录
+  // 缺失时相对路径按进程 cwd 解析）不等于"新文件"——把读不到的文件当新的，
   // 等于让权限问题替模型免掉 read，是这道豁免最不该失守的方向。
   const newFile = presence === "absent" && creatable;
   // 档位：缺省一律 **high**——缺信息要更多取证，不要更少。
@@ -1810,6 +1868,10 @@ type FactGateOutcome =
 interface GuardRuntime {
   cfg: Config;
   messages: DangerGuardMessages;
+  /** 会话**当前**工作目录（每趟 guard 调用算一次，口径见 `effectiveCwdOf`）。
+   *  放在这里而不是各判定点现取：相对目标归一化、密钥面 realpath、事实门台账键形
+   *  三处必须吃同一枚值，否则 read 时记的基线与编辑时算的键会错开。 */
+  cwd: string | undefined;
   /** 投影台账读口的装箱：`ctx.sessionProjections` 到位时由 inject 回调装上，
    *  缺席/迟到 ⇒ undefined ⇒ 每次判定走回退扫描（迁移前行为）。装箱而不是直接字段：
    *  rt 每次 guard 调用现构造（cfg/messages 都要现读），读口只在 apply 期装一次。 */
@@ -1857,6 +1919,7 @@ function evaluateFactGate(
       // extraTestDirs 同样过 strArray：值面由条目的 Config schema 保证，但降级读取
       // 保留——闸门不能因为宿主给来的形状变化而抛在判定链里。
       extraTestDirs: strArray(cfg.extraTestDirs) ?? [],
+      cwd: rt.cwd,
       refPolicy: refPolicyOf(cfg),
       messages: rt.messages,
       ledger: rt.ledger.value,
@@ -1921,7 +1984,7 @@ function reportDeny(wiring: GuardWiring, exec: GuardExecution, input: DenyReport
       bus.report({
         source: "danger-guard",
         category: input.category,
-        cwd: exec.agent?.session?.header?.cwd,
+        cwd: effectiveCwdOf(wiring.svc, exec.agent?.session),
         sessionId: exec.agent?.session?.id,
         signature: input.signature,
         detail: input.detail,
@@ -1953,7 +2016,7 @@ function reportPass(
       // 可选性要重新面对——写成方法调用才保住接收方（不借 `.call`/`.bind` 改 this）。
       bus.pass?.({
         category,
-        cwd: exec.agent?.session?.header?.cwd,
+        cwd: effectiveCwdOf(wiring.svc, exec.agent?.session),
         sessionId: exec.agent?.session?.id,
         signature,
         // 成本样本只带三枚数值（哪个面、多久、多长输入）——不带命令原文、不带路径。
@@ -2033,14 +2096,13 @@ function secretJudgeOf(
   name: string,
   args: Record<string, unknown>,
 ): SecretJudge {
-  const { messages, cfg } = rt;
+  const { messages, cfg, cwd } = rt;
   // 密钥词表也在函数内现读：strArray 兜住未经 schema 校验的值面，与调用点那两处同一口径。
   const secretPatterns = strArray(cfg.extraSecretPatterns);
   // 相对目标按会话 cwd 解析（与事实门用的 resolveTarget 同源）：模型给 `.ssh/config` 这种
   // 相对路径时，判据要看到它落地后的样子，而不是只判输入字符串的字面形状。
-  // `SessionHeader.cwd` 官方即 `readonly cwd?: string`，所以要这道类型守卫（同事实门那处）。
-  const cwdRaw = exec.agent?.session?.header?.cwd;
-  const cwd = typeof cwdRaw === "string" && cwdRaw.length > 0 ? cwdRaw : undefined;
+  // cwd 取 rt.cwd（guard 每趟调用算一次的当前工作目录，见 effectiveCwdOf）——本函数与
+  // 事实门因此共用同一枚目录基准，不会一个跟到 `cd` 之后、一个停在创建时。
   // 目标由**键形**认（`declaredTargets`），不按工具名认——代价与理由写在
   // lib/danger-rules.ts 的 TARGET_PATH_KEYS 注释与 README「已知边界」里。
   const targets = declaredTargets(args);
@@ -2188,6 +2250,10 @@ export function apply(ctx: Context): void {
     const rt: GuardRuntime = {
       cfg: settingsConfig(svc),
       messages: localeMessages(),
+      // 工作目录每趟调用取一次（服务读数本身是同步的，见 effectiveCwdOf 的注释）：
+      // 宿主 `cd` / `working_directory` 之后这里就跟到新的目录，相对目标的归一化才不会
+      // 停在会话创建时那一级。
+      cwd: effectiveCwdOf(svc, exec.agent?.session),
       ledger: ledgerBox,
     };
     let deny: string | undefined;
@@ -2207,7 +2273,7 @@ export function apply(ctx: Context): void {
 
       // read/view 的读时基线（首次评估盲区闭合，见 recordReadObservation）：
       // 无条件调用、函数内部按工具面自筛——read 永远不会被拦，记账先行不影响任何判定。
-      recordReadObservation(name, exec.agent?.session, args);
+      recordReadObservation(name, exec.agent?.session, args, rt.cwd);
 
       // 1) bash 危险命令（git 绕过 / rm -rf 灾难 / curl|sh / dev server）。
       // pwsh 与 bash 共用同一套规则，另在调用点声明 shell 方言（bashDenialOf）：pwsh 名下

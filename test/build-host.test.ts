@@ -2,9 +2,10 @@
 // 的 buildEntry 出，见 :96/:106）里跨包依赖必须保持 external 裸说明符。
 //
 // 为什么本包单独建一份：此前登记的已知缺口——danger-guard 是 9 个发布包里唯一没有
-// build-host 钉测的，它的 brandNumber 被内联进 host.js 时没人能发现。dsh-brand 移进
-// dependencies 的裁定落地之后，"说明符在、函数体不在"两件事必须一起钉：只钉前者会
-// 在有人把依赖挪回 dev 时静默放行内联产物。
+// build-host 钉测的，它的 brandNumber 被内联进 host.js 时没人能发现。dsh-brand 这类值导入
+// 必须外部化（落 peer，不进 dependencies，见 publish-manifest 的门禁）的裁定落地之后，
+// "说明符在、函数体不在"两件事必须一起钉：只钉前者会在有人把它挪出外部化名单（只留 dev）时
+// 静默放行内联产物。
 //
 // settings.js 那条反向断言（**不**含 dsh-brand）同样是钉死的：实测设置半不导入 brand，
 // 若将来把 brand 用法挪进 settings-host.ts 而不补声明，这条会红而不是静默内联。
@@ -22,7 +23,7 @@ describe("danger-guard 两份 host 产物的外部化", () => {
     const host = await buildHost();
     assert.ok(
       host.includes('from "@deepseek-ai/dsh-brand"'),
-      "dsh-brand 必须外部化（口径 A：值导入落 dependencies）",
+      "dsh-brand 必须外部化（口径 A：值导入落 peerDependencies，不进 dependencies）",
     );
     assert.ok(!/^function brandNumber\(/mu.test(host), "host.js 不得内联 brandNumber 的函数体");
     assert.ok(

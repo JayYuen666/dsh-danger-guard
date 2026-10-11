@@ -8,10 +8,13 @@
 //   5. bash 闸的两种结论（已确认危险 / `-c` 体未被检查）在上报侧可分辨。
 //   6. 总线 report/pass 异步落库（返回 rejected Promise）时失败同样可见——
 //      旧代码只有同步 catch，异步失败既不留日志又给进程留一枚未处理拒绝。
+//   7. 会话**当前**工作目录取自官方 `ctx.workingDirectory`（宿主 0.2.1-alpha.2 起
+//      `SessionHeader.cwd` 只剩创建期快照）：密钥面、事实门、上报三处都跟到 `cd` 之后；
+//      服务缺席或交出坏形状时退回 header.cwd——可选读面缺失绝不使拦截面下线。
 import { describe, it } from "vitest";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile, utimes } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
 import plugin, { BUILTIN_BASE, noteJudgeCost } from "../host.ts";
@@ -80,6 +83,10 @@ interface MockCtx {
   };
   /** 设置面读数（bulkhead 后由**设置条目**的读数口提供，见 get）。 */
   value: Config;
+  /** cordis 的可选服务读法：SETTINGS_READER = 设置条目读数口，lessonLoop = 教训总线，
+   *  workingDirectory = 官方工作目录服务（宿主 0.2.1-alpha.2 起「会话当前目录」的唯一出处）。
+   *  形状不校验（本字段就是拿来交坏形状的），缺省 = 宿主没装那个 bundle。 */
+  workingDirectory?: unknown;
   /** cordis 的可选服务读法：SETTINGS_READER = 设置条目读数口，lessonLoop = 教训总线。 */
   get?: (name: string) => unknown;
   on?: (event: string, listener: (session: { id?: unknown }) => void) => () => void;
@@ -162,10 +169,13 @@ function createMockCtx(bus: LessonLoopSpy = {}, value?: Partial<Config>): MockCt
       }
     },
   };
-  // 一个 get 同时供两件事：设置读数口（bulkhead 的值面通道）与教训总线。
+  // 一个 get 同时供三件事：设置读数口（bulkhead 的值面通道）、教训总线、工作目录服务。
   ctx.get = (name: string): unknown => {
     if (name === SETTINGS_READER) {
       return { read: (): Config => ctx.value };
+    }
+    if (name === "workingDirectory") {
+      return ctx.workingDirectory;
     }
     return name === "lessonLoop" ? ctx.bus : undefined;
   };
@@ -745,5 +755,184 @@ describe("判定耗时与解析形随上报一起发（长度上限要按真实�
       "关掉采集就一条都不出域（拦截本身不受影响）",
     );
     assert.equal(typeof ctx.guardInstalled!.fn(bashExec), "string", "关掉采集不改拦截结论");
+  });
+});
+
+// ── 会话当前工作目录（宿主 0.2.1-alpha.2：`ctx.workingDirectory`）─────────────────
+/** 「创建期目录 / 当前目录」成对夹具：
+ *  - `stale`：会话创建时的目录——`SessionHeader.cwd` 从 alpha.2 起一直报它，里面是空的；
+ *  - `live` ：`cd` 之后的当前目录，其中一条 `ssh` 软链把凭据树（`real/.ssh`）接出来。
+ *  相对目标 `ssh/authorized_keys` 在两枚基准下落到不同绝对路径，于是**同一枚调用**就能分辨
+ *  判据吃的是哪一枚目录：只读 header.cwd 的旧口径在 live 下判不到那棵树，是真实漏拦
+ *  （宿主 bash 已改读服务，tool-bash src/index.ts:487）。 */
+async function makeCwdPair(): Promise<{ root: string; stale: string; live: string }> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dgc-workdir-"));
+  const stale = path.join(root, "stale");
+  const live = path.join(root, "live");
+  const ssh = path.join(root, "real", ".ssh");
+  await mkdir(stale, { recursive: true });
+  await mkdir(live, { recursive: true });
+  await mkdir(ssh, { recursive: true });
+  await symlink(ssh, path.join(live, "ssh"));
+  return { root, stale, live };
+}
+
+/** 相对形态的编辑调用：会话只交出**创建期**目录，当前目录只能从服务读。 */
+const relEditExec = (id: string, stale: string): GuardExecParam => ({
+  name: "edit",
+  arguments: { file_path: "ssh/authorized_keys", new_string: "x\n" },
+  agent: { session: { id, header: { cwd: stale }, snapshotEvents: () => [] } },
+});
+
+describe("会话当前工作目录：判据跟到 cd 之后（ctx.workingDirectory）", () => {
+  it("密钥面吃当前目录：服务在位时软链出的凭据树露形，旧口径同一枚调用判不到", async () => {
+    const { root, stale, live } = await makeCwdPair();
+    try {
+      // 事实门关掉：本组这几条只看密钥面，别让配额轮次掺进结论。
+      const legacy = createMockCtx({}, { factGateEnabled: false });
+      applyPlugin(legacy);
+      assert.equal(
+        legacy.guardInstalled!.fn(relEditExec("wd-legacy", stale)),
+        undefined,
+        "创建期目录里没有凭据——这就是升级前那枚读法的漏拦面",
+      );
+      const ctx = createMockCtx({}, { factGateEnabled: false });
+      ctx.workingDirectory = { get: () => live };
+      applyPlugin(ctx);
+      assert.match(
+        ctx.guardInstalled!.fn(relEditExec("wd-live", stale)) ?? "",
+        /密钥|凭据/u,
+        "live/ssh 经 realpath 落到 .ssh 树内：与宿主 bash 用的是同一枚目录",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("服务缺席 ⇒ 退回创建期目录：没装 working-directory bundle 的宿主照判", async () => {
+    const { root, live } = await makeCwdPair();
+    try {
+      const ctx = createMockCtx({}, { factGateEnabled: false });
+      applyPlugin(ctx);
+      assert.match(
+        ctx.guardInstalled!.fn(relEditExec("wd-header", live)) ?? "",
+        /密钥|凭据/u,
+        "可选读面缺失只是少跟一次 cd，不是判据下线",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("服务交出坏形状一律退回创建期目录且不抛错：空串 / 非字符串 / 没有 get / get 不是函数", async () => {
+    const { root, live } = await makeCwdPair();
+    const shapes: [string, unknown][] = [
+      ["空串", { get: () => "" }],
+      ["非字符串", { get: () => 42 }],
+      ["没有 get 成员", {}],
+      ["get 不是函数", { get: "nope" }],
+    ];
+    try {
+      for (const [index, [label, shape]] of shapes.entries()) {
+        const ctx = createMockCtx({}, { factGateEnabled: false });
+        ctx.workingDirectory = shape;
+        applyPlugin(ctx);
+        assert.match(
+          ctx.guardInstalled!.fn(relEditExec(`wd-dirty-${index}`, live)) ?? "",
+          /密钥|凭据/u,
+          `服务交出${label}时退回 header.cwd，判据不跟着一起消失`,
+        );
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("会话不可得 ⇒ 不读服务也不炸：绝对路径的凭据形照判，相对 read 照常记账", () => {
+    const ctx = createMockCtx({}, { factGateEnabled: false });
+    ctx.workingDirectory = { get: () => "/w/live" };
+    applyPlugin(ctx);
+    assert.match(
+      ctx.guardInstalled!.fn({
+        name: "edit",
+        // 声明形自己就带 .ssh：解析缺席也照拦（与「软链不再是出路」那组同一口径）。
+        arguments: { file_path: "/w/live/real/.ssh/id_rsa" },
+      }) ?? "",
+      /密钥|凭据/u,
+    );
+    assert.equal(
+      ctx.guardInstalled!.fn({ name: "read", arguments: { file_path: "a.ts" } }),
+      undefined,
+      "没有会话就没有目录基准，按 resolveTarget 的无 cwd 口径走，不抛错",
+    );
+  });
+
+  it("事实门吃当前目录：cd 后读过的绝对路径与相对目标同键即放行，旧口径对不上键 ⇒ 照拒", async () => {
+    const { root, stale, live } = await makeCwdPair();
+    try {
+      const src = path.join(live, "src");
+      const file = path.join(src, "a.ts");
+      await mkdir(src, { recursive: true });
+      await writeFile(file, "export const a = 1;\n");
+      await utimes(file, 1_000_000_000, 1_000_000_000);
+      const log: SessionEvent[] = [
+        fxCall("r1", "read", JSON.stringify({ file_path: file })),
+        fxResult("r1"),
+        fxCall("g1", "grep", JSON.stringify({ path: src, pattern: "a.ts" })),
+        fxResult("g1"),
+      ];
+      // 取证记的是**绝对**当前目录下的文件，编辑调用报的是**相对**形态——
+      // 两侧必须落进同一枚键，否则模型照做也过不了门（多要一次无意义的重读）。
+      const exec = (id: string): GuardExecParam => ({
+        name: "edit",
+        arguments: { file_path: "src/a.ts", new_string: "export const a = 2;\n" },
+        agent: { session: { id, header: { cwd: stale }, snapshotEvents: () => log } },
+      });
+      const ctx = createMockCtx();
+      ctx.workingDirectory = { get: () => live };
+      applyPlugin(ctx);
+      assert.equal(ctx.guardInstalled!.fn(exec("wd-fact")), undefined, "同一枚目录 ⇒ 取证成立");
+      const legacy = createMockCtx();
+      applyPlugin(legacy);
+      assert.notEqual(
+        legacy.guardInstalled!.fn(exec("wd-fact-legacy")),
+        undefined,
+        "旧口径把目标归一到创建期目录的另一条路径上 ⇒ 事实门仍要取证",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("上报载荷的 cwd 跟到当前目录；服务缺席时退回创建期目录", () => {
+    const reports: ReportPayload[] = [];
+    const passes: Record<string, unknown>[] = [];
+    const ctx = createMockCtx({
+      report: (input) => {
+        reports.push(input as ReportPayload);
+        return {};
+      },
+      pass: (input) => {
+        passes.push(input as Record<string, unknown>);
+        return {};
+      },
+    });
+    ctx.workingDirectory = { get: () => "/w/live" };
+    applyPlugin(ctx);
+    assert.equal(typeof ctx.guardInstalled!.fn(bashExec), "string", "bash 危险命令照拦");
+    assert.equal(reports[0]?.cwd, "/w/live", "deny 上报的归因目录是当前目录");
+    ctx.value = { ...ctx.value, judgeStats: true };
+    ctx.guardInstalled!.fn(bashExec);
+    assert.equal(passes[0]?.["cwd"], "/w/live", "pass 载荷同口径（不是第二份读法）");
+    const legacyReports: ReportPayload[] = [];
+    const legacy = createMockCtx({
+      report: (input) => {
+        legacyReports.push(input as ReportPayload);
+        return {};
+      },
+    });
+    applyPlugin(legacy);
+    legacy.guardInstalled!.fn(bashExec);
+    assert.equal(legacyReports[0]?.cwd, "/w/proj", "服务缺席 ⇒ 上报退回 header.cwd");
   });
 });

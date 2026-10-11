@@ -61,6 +61,7 @@ interface Manifest {
   readonly files?: readonly string[];
   readonly publishConfig?: Record<string, unknown>;
   readonly dependencies?: Record<string, string>;
+  readonly devDependencies?: Record<string, string>;
   readonly peerDependencies?: Record<string, string>;
 }
 
@@ -370,16 +371,45 @@ describe("发布形态", () => {
   });
 });
 
+/**
+ * 宿主包在 peer 与 dev 两张表里的并集。`dependencies` 是禁区（见下面那条门禁）：peer 记录
+ * 「运行期由宿主提供」，dev 记录「本包编译与测试要用它」，两者都不会被消费方的 profile 安装。
+ * 同名键以 peer 表为准，那才是消费方环境里真正提供的那一枚。
+ * @param manifest - 解析后的 package.json
+ * @returns 宿主包名到版本区间
+ */
+function hostRanges(manifest: Manifest): Record<string, string> {
+  return { ...manifest.devDependencies, ...manifest.peerDependencies };
+}
+
 describe("宿主依赖的版本形状（升级防线）", () => {
+  it("@deepseek-ai/* 一律不进 dependencies：装出去会在宿主进程里物化第二份", async () => {
+    // 钉的是「全绿但宿主瘫痪」这一类坑，别把它当风格偏好，更别把它「恢复」回去。本插件装进
+    // 消费方 profile 的 pnpm 配置是 `nodeLinker: hoisted` 且 `autoInstallPeers: false`，所以
+    // `dependencies` 里每一枚 @deepseek-ai/* 都会被落成**真实目录**，与宿主进程已经加载的那份
+    // 并存在一起。而 `@deepseek-ai/dsh-tools` 的 TOOL_RUNTIME_SCHEDULER 是普通 Symbol（不是
+    // Symbol.for），符号身份按模块实例计算：宿主的 dsh-agent-loop 用自己那份的 Symbol 去读
+    // 由 profile 副本挂载出来的 ToolRuntime，得到 undefined，于是 `.prepare(...)` 在**每一次**
+    // 原生工具调用上抛 "Cannot read properties of undefined (reading 'prepare')"，整个 profile
+    // 的工具一起失效。构建、类型检查与本包测试在此之前全部照绿，判据只能落在 manifest 面上。
+    // 本包确有两枚宿主包是运行期值导入（host.js 导入 dsh-brand 与 schemastery，settings.js 导入
+    // schemastery），但那两枚落 peer 就够了：说明符由宿主那一份解析，peer 与 dev 都不进 profile。
+    const { manifest } = await readSurface();
+    const leaked = Object.keys(manifest.dependencies ?? {}).filter((name) =>
+      name.startsWith("@deepseek-ai/"),
+    );
+    expect(leaked, "这些宿主包会随本包装进 profile，物化出第二份实例").toStrictEqual([]);
+  });
+
   it("dsh-* 家族一律精确钉，不留任何范围算子", async () => {
     // registry 上的 dist-tag 是实测出来的陷阱：`latest` 可能指向远早于宿主 ABI 的版本。
     // 精确钉是让「不带版本地装成远古版本」这件事不可能发生的最小条件；一旦放宽成 `^`/`~`，
     // 宿主某天发新 minor 就会自动跟上去，而插件与宿主 ABI 耦合，那等于让消费方在没有测试的
-    // 情况下换掉宿主类型面。
+    // 情况下换掉宿主类型面。宿主包现居 peer 与 dev（见上面那条门禁），所以取并集来判。
     const { manifest } = await readSurface();
     // 过滤出违规项再一次性断言，而不是在循环里按条件 expect：失败时 diff 直接列出
     // 「哪个包钉成了什么」，比逐条抛错更好读。
-    const ranged = Object.entries(manifest.dependencies ?? {}).filter(
+    const ranged = Object.entries(hostRanges(manifest)).filter(
       ([name, range]) => name.startsWith("@deepseek-ai/dsh-") && !/^\d+\.\d+\.\d+-/u.test(range),
     );
     expect(ranged, "这些 dsh-* 依赖没有精确钉住版本").toStrictEqual([]);
@@ -388,12 +418,12 @@ describe("宿主依赖的版本形状（升级防线）", () => {
   it("dsh-* 全部与 peer 的 dsh 同版本（不许装出第二份宿主类型）", async () => {
     // 宿主类型面被这些包以 type-only 方式消费；同一个会话里出现两个 dsh-session 的拷贝，
     // nominal 类型（品牌串、投影状态）会开始互相不认，而那不报编译错、只报运行期
-    // 「认不出这个 callId」。同版本是让这件事不发生的最小条件。
+    // 「认不出这个 callId」。同版本是让这件事不发生的最小条件。判面同样取 peer ∪ dev。
     const { manifest } = await readSurface();
     const peer = manifest.peerDependencies?.["@deepseek-ai/dsh"];
     expect(peer, "peer 依赖缺失：宿主版本就失去基准了").toBeDefined();
     const hostVersion = (peer ?? "").replace(/^[\^~]/u, "");
-    const drifted = Object.entries(manifest.dependencies ?? {}).filter(
+    const drifted = Object.entries(hostRanges(manifest)).filter(
       ([name, range]) => name.startsWith("@deepseek-ai/dsh-") && range !== hostVersion,
     );
     expect(drifted, "这些 dsh-* 与宿主 dsh 不同版本").toStrictEqual([]);
