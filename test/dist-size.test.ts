@@ -7,11 +7,17 @@
 // 预算怎么定的：取当前实测值上浮约 25%。留这 25% 是给正常演进的——加一条规则、改一句文案
 // 不该立刻要人改预算；翻倍一定会顶穿。真需要突破时，改这些常量并写明理由。
 //
-// 明确不做的事：**不开 minify**。实测过——压缩后产物里
-// `from "@jayyuen66/dsh-plugin-shared/lib/record"` 与 `from "@deepseek-ai/schemastery"`
-// 两个说明符字符串双双消失，于是 test/build-host.test.ts 那两条「跨包依赖必须外部化」的断言
-// 会从「依赖被内联了也不报」变成恒绿：它们防的正是 isRecord / brandNumber 这类单点被就地
-// 复制多份。省下的体积不值得废掉两道真门禁，所以产物保持可读，体积改用预算盯着。
+// 三枚运行期产物开 `minify: true`（裁决见下），types/ 的声明**不**压缩：那是发布面给编辑器
+// 读的 API 文档，JSDoc 就是它的正文。
+//
+// ⚠ 更正一条曾写在**这里**的错误结论（它的影响是让本包白白多背了几百 KB）：此前记的是
+// "压缩后 `from "@jayyuen66/dsh-plugin-shared/lib/record"` 与 `from "@deepseek-ai/schemastery"`
+// 两个说明符双双消失，于是两道外部化门禁会变成恒绿"。**实测否证**：那时看到的是
+// `from"x"`（minify 去掉了空格）与 `from "x"` 的差异 —— 说明符一直在，依赖照样外部化。
+// 真正会被 minify 打瞎的是**带标识符的文本判据**（内联体的函数名会被 mangle，实测故意不外部化
+// dsh-brand 时产物里 `brandNumber` 一次都查不到），所以那两道门禁已改成**结构性判据**：
+// 看 chunk 的 `moduleIds` 里有没有依赖表的包（test/build-host.test.ts）。产物可读性不再是
+// 一条门禁（谁也不会去读装载器吃的文件），体积与"依赖没被内联"各由一道真门禁盯着。
 import { describe, it } from "vitest";
 import { strict as assert } from "node:assert";
 import { readFileSync, readdirSync } from "node:fs";
@@ -19,16 +25,32 @@ import path from "node:path";
 
 const pkgDir = path.resolve(import.meta.dirname, "..");
 
-/** 拦截半产物体积预算（实测 253,498 B）。宿主按包名载入它，这几个字节是真实装载成本。
+/** 拦截半产物体积预算（实测 309,394 B）。宿主按包名载入它，这几个字节是真实装载成本。
  *  从 191,721 一路涨上来的增量都是**改动本身**：预检 A/B 两面、检索工具在位探测、引用扫描的
- *  凭据面隔离，再加这一轮的层结论派生（第 3 项）与官方真实路径通道（第 4 项，含 lib/lru.ts
- *  与 lib/target-paths.ts 两枚新模块）——产物保持可读（不 minify），所以每条判据注释都算字节。
- *  预算按同一条规矩取实测上浮 ~4%：留够正常演进的余量，同时任何一次"塞进大表"仍会当场顶穿。 */
-const HOST_BUDGET_BYTES = 264_000;
-/** 设置半产物体积预算（实测 7,293 B）。与拦截半分属两个 bulkhead 条目，各自记账。 */
-const SETTINGS_BUDGET_BYTES = 9100;
-/** 客户端半产物体积预算（实测 30,503 B）。浏览器侧加载，按平台计账。 */
-const CLIENT_BUDGET_BYTES = 38_000;
+ *  凭据面隔离，再加层结论派生（第 3 项）与官方真实路径通道（第 4 项，含 lib/lru.ts
+ *  与 lib/target-paths.ts 两枚新模块）。
+ *  预算按同一条规矩取实测上浮 ~4%：留够正常演进的余量，同时任何一次"塞进大表"仍会当场顶穿。
+ *
+ *  本轮 +17,575 B，分两笔：
+ *   1. **出路渲染**（`Fix` 的两枚新拒绝文案中英各一份 + `renderFix` 的角色表 + `gitFacts`
+ *      记越界词与 `catastrophicRm` 过滤命中目标的逻辑）；
+ *   2. **ask 通道 + 沙箱对齐**（`RULE_TIER` 单表、严重度择优、`AskRequest` 构造、
+ *      沙箱管辖面的读与包含性判断、以及 `devServer` 那条点名 `run_in_background` 的新文案 ——
+ *      它比旧文案长一倍，而它正处在"模型知道该怎么改"这条路径上）。
+ *   3. **git 破坏族 + 基础设施族**（7 + 5 枚规则键、两族的判据表与走查面、中英各 12 条
+ *      写明出路的文案）。判据表这一轮真加了——A1/A2 就是这个目的。
+ *   4. **判定统计读数块**（D）与 **`minify: true`**：前者是行为增量，后者把 309,394 B
+ *      一次压到 86,727 B（−72%）——注释与空白此前占了产物的一半以上。
+ *  预算按同一条规矩取实测上浮 ~4%。 */
+const HOST_BUDGET_BYTES = 92_000;
+/** 设置半产物体积预算（实测 2,881 B；开 minify 前 7,293 B）。与拦截半分属两个 bulkhead
+ *  条目，各自记账。 */
+const SETTINGS_BUDGET_BYTES = 3050;
+/** 客户端半产物体积预算（实测 23,436 B；开 minify 前 38,782 B）。浏览器侧加载，按平台计账。
+ *  这一轮的两笔：**判定统计读数块**（远程读面 + 卡片读数块 + 中英各 10 条文案，+8,279 B）
+ *  与 **`minify: true`**（注释占掉的字节在这里同样是真实装载成本）。前者把 30,503 顶到
+ *  38,782、后者又把它压回 23,436 —— 两者都是行为/事实的变化，故预算跟着重定。 */
+const CLIENT_BUDGET_BYTES = 24_500;
 /** 声明入口层体积预算。types/ 整目录进 files，体积会计入 tarball。 */
 const DECLARATION_ENTRY_BUDGET_BYTES = 120_000;
 

@@ -2,3 +2,7 @@
 // 本包有两个入口：host.ts 与 settings-host.ts（build-host.mjs:96/:106），故两份产物都要能读。
 export function buildHost(): Promise<string>;
 export function buildSettings(): Promise<string>;
+/** 产物 + **打进 chunk 的模块 id 清单**：跨包外部化的门禁走它（文本判据在 minify 下会瞎，
+ *  内联体被改名 —— 详见 build-host.mjs 里 `minify: true` 那一段）。 */
+export function buildHostReport(): Promise<{ code: string; inlinedModules: string[] }>;
+export function buildSettingsReport(): Promise<{ code: string; inlinedModules: string[] }>;

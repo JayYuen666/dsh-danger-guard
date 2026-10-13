@@ -33,6 +33,9 @@ import path from "node:path";
 // 同一个模块也负责切词与结构视图——三处读法必须同源，否则"这一段里有哪些词"会随判据而变。
 import { hasUnclosedQuote, lexTokens, splitSegments, structureView } from "./command-segments.ts";
 import type { ShellToken } from "./command-segments.ts";
+import type { Fix } from "./fix.ts";
+// 出路形状住在零依赖的 ./fix.ts（为什么不在本文件：见那枚模块的头部注释）。
+export type { Fix, FixRole } from "./fix.ts";
 
 /**
  * 命中规则的标识 = lib/messages.ts 文案表的键（宿主按键取当前语言的拒绝理由，
@@ -46,12 +49,144 @@ export type BashDenialKey =
   | "rmrf"
   | "pipeShell"
   | "devServer"
-  | "nestedShellUnconfirmed";
+  | "nestedShellUnconfirmed"
+  // ── git 破坏族（A1）───────────────────────────────────────────────────────────
+  // 与沙箱**零重叠**：这些操作要么动工作区**之内**的文件（沙箱恰恰允许），
+  // 要么动远端（网络不在沙箱的 vocabulary 之内）。所以它们全是我们的判据，不让路。
+  // 全部落 `ask` 档：官方自带的 `Blast Radius` 示例 mod 对同一批命令的处置也是
+  // "量出爆炸半径 → 给用户看 → 用户拍板"，而不是一律拒。
+  /** `git reset --hard`：丢弃工作区与索引的未提交改动。 */
+  | "gitResetHard"
+  /** `git checkout -- <path>` / `git checkout .`：丢弃这些路径的工作区改动。 */
+  | "gitCheckoutDiscard"
+  /** `git restore <path>`（非 `--staged` 单用）：丢弃工作区改动。 */
+  | "gitRestoreDiscard"
+  /** `git clean -f*`（无 `-n`）：删除未跟踪文件；带 `-x` 连 gitignore 的一起删。 */
+  | "gitCleanForce"
+  /** `git stash drop` / `git stash clear`：丢掉 stash 条目（找不回）。 */
+  | "gitStashDrop"
+  /** `git branch -D`：强删分支（未合并的提交会被挂空）。 */
+  | "gitBranchDelete"
+  /** `git push -f` / `--force` / `--force-with-lease`：重写远端历史。 */
+  | "gitForcePush"
+  // ── 基础设施破坏族（A2）───────────────────────────────────────────────────────
+  // 与沙箱同样**零重叠**：它们动的是远端系统与本地之外的进程世界，而沙箱只管本机进程的
+  // 文件效应（官方原话 "Network and process visibility are outside this vocabulary"）。
+  // 全部落 `ask` 档：每一条都有正当用法（删开发环境、清 docker 缓存、发布迁移）。
+  /** `terraform destroy`：删掉 state 里的全部资源。 */
+  | "tfDestroy"
+  /** `terraform apply -auto-approve`：跳过 terraform 自己的交互确认。 */
+  | "tfAutoApprove"
+  /** `docker * prune`：删未使用的镜像/容器/卷/网络（`-a` 扩到"没在跑的"）。 */
+  | "dockerPrune"
+  /** `kubectl delete`：删集群对象（`--dry-run` 除外）。 */
+  | "kubectlDelete"
+  /** 数据库迁移命令（`manage.py migrate` / `prisma migrate` / `rails db:migrate` …）：改 schema。 */
+  | "dbMigrate";
 
 /** 密钥/凭据面的判定结论：`secretPath` = 命中凭据形态；
  *  `opaqueTarget` = 目标长到没法判（超出 MAX_JUDGED_PATH_LENGTH），与 bash 侧
  *  `nestedShellUnconfirmed` 同一个道理——看不见就不静默放行。 */
 export type EditDenialKey = "secretPath" | "opaqueTarget";
+
+/**
+ * 一条拒绝交回宿主的东西：规则键 + 可选的出路（见 `lib/fix.ts` 的 `Fix`）。
+ *
+ * 为什么 `fix` 是**结构化**的而不是一段中英 prose：本模块是语言无关的（只回规则键，
+ * 文案单源在 `lib/messages.ts`）。把话写进 lib 就等于给同一件事开第二份语言面，而两语必���。
+ * 形状本身住在那枚零依赖的 `lib/fix.ts` 里（收在那里的理由见该文件头）。
+ */
+export interface BashVerdict {
+  key: BashDenialKey;
+  /** 出口**省略键**而非写 `{ fix: undefined }`：本仓开了 exactOptionalPropertyTypes，
+   *  两者语义不同，而下游要么整段渲染要么不碰，不必在每一处都判缺席。 */
+  fix?: Fix;
+}
+
+/**
+ * 一枚规则键的**处置档** —— "检测到了什么"（`BashVerdict`）与"该拿它怎么办"是两件事，
+ * 这一枚说的是后者。
+ *
+ * - `deny`：**同步** `ctx.tools.guard` 硬拒，模型拿到 `Error: <理由>`。
+ * - `ask`：`tools/pre-execute` 返回 `{ kind: 'ask' }`，宿主经 `ApprovalService` 弹审批，
+ *   `allowed-once` 才放行（`dsh-tools` 的 `serviceAsk`）。
+ *
+ * 为什么必须是**一张表**而不是给 `BashVerdict` 加个字段：
+ * 1. `tools.guard` 是**同步**谓词，而 `ApprovalService.request()` 返回 Promise ——
+ *    需确认这一档在 guard 里**物理上做不到**，只能落在 pre-execute 瀑布上。
+ * 2. 宿主在审批放行之后**仍会再跑一次 guard**（installed dsh-tools `lib/index.js:3239`：
+ *    `decision.kind === 'allow' ? this.guardReason(exec) : decision.reason`）。于是只要
+ *    同一枚键**同时**被两档认领，用户点了"允许"之后还是会被同步 guard 拒掉 —— 审批形同虚设。
+ * 3. 这张表的类型是 `Record<BashDenialKey, RuleTier>`，两条性质由它**结构性**保证：
+ *    **加了规则键却忘了定档** = 编译错误；**一枚键同时属于两档** = 同一格塞不进两个值。
+ *    所以"硬拒集 ∩ 需确认集 = ∅"不必写一条运行时断言去比对两个投影 ——
+ *    那种断言在新增规则时是可以被绕过的（改错一处、断言跟着改错，两边一起绿）。
+ */
+export type RuleTier = "deny" | "ask";
+
+/**
+ * 规则键 → 处置档。**这是唯一的归属面**：guard 与 pre-execute 各自只认自己那一档，
+ * 两边读同一张表，因此不可能给出互相打架的结论。
+ *
+ * ⚠ 新增规则键时**必须**在这里补一格（完整性由 `Record` + tsc 强制）。补之前先问：
+ * 这条判据是"已确认危险"（`deny`，出路是改写命令）还是"需用户拍板"（`ask`，
+ * 既不是已确认危险也不是已确认安全）？—— 与 `BashDenialKey` 的分档纪律同源。
+ *
+ * ⚠ `ask` 档在**无 approval channel** 的部署（headless / CI）下**退化**为硬拒：宿主
+ * `serviceAsk` 拿到 `unavailable` 就 deny（fail-closed）。方向是刻意的 —— 危险操作在
+ * 无人可问时应当被拦下，而不是静默通过。
+ */
+/**
+ * 这些规则键的**判据面**完全落在宿主沙箱的管辖之内（"目标包不住任何可写根"时），
+ * 于是那条判据该让给沙箱 —— 它会给出官方认可的拒绝标记与 escalation 路径
+ * （`sandbox_permissions` + `justification` → 用户审批），而我们的硬拒会**掐死那条路**
+ * （guard 跑在 bash 工具之前，模型连申请的机会都没有）。
+ *
+ * ⚠ 这里只声明"**这一类判据**归沙箱管"，**实际是否让路由宿主判**：它要读
+ * `ctx.shell.sandboxMode` 与 `ctx.sandboxPolicy.resolve()`，而那两枚是部署事实，
+ * lib 侧看不到（见 host.ts 的 `sandboxDropsOf`）。两处分开是为了让"哪些判据"这个
+ * 纯事实留在语言无关、无 I/O 的这一层。
+ *
+ * 为什么只有 `rmrf`：
+ *  - `pipeShell` 的落点在工作区**之内**（下载到 workspace 是被允许的），网络又在沙箱的
+ *    vocabulary 之外（官方原话 "Network and process visibility are outside this vocabulary"）；
+ *  - `devServer` 是进程面，同样在 vocabulary 之外；
+ *  - `noVerify` 与沙箱无关。
+ */
+export const SANDBOX_COVERED: ReadonlySet<BashDenialKey> = new Set(["rmrf"]);
+
+export const RULE_TIER: Readonly<Record<BashDenialKey, RuleTier>> = {
+  // 已确认危险：命令形态本身就是错的，出路是改写命令（各有 `Fix` 或文案里的静态指示）。
+  noVerify: "deny",
+  rmrf: "deny",
+  pipeShell: "deny",
+  devServer: "deny",
+  // 认不准那一档 —— **真 `ask`**。它的文案本来就写着"把它贴给用户、由用户显式确认后再
+  // 执行"，而旧机制只是把一段话丢回给模型：**模型完全可以无视它直接重试**。改档后变成
+  // 宿主审批，模型绕不过去；无 approval channel 的部署下自动退化为硬拒（fail-closed），
+  // 与改档前的可观测行为一致（都是"这次调用不执行"）。
+  nestedShellUnconfirmed: "ask",
+  // ── git 破坏族：**全部 `ask`** ────────────────────────────────────────────────
+  // 这一族每一条都有正当用法（`git reset --hard` 是"我就要重来"、`git clean -fdx` 是
+  // "清干净重来"、`git push -f` 是 rebase 之后的正常协作），所以按本包的档位纪律它们
+  // 都属"需用户拍板"而不是"已确认危险"。官方自带的 `Blast Radius` 示例 mod 对同一批命令
+  // 的处置也是"给用户看爆炸半径、用户拍板"—— 与本档同一条思路。
+  gitResetHard: "ask",
+  gitCheckoutDiscard: "ask",
+  gitRestoreDiscard: "ask",
+  gitCleanForce: "ask",
+  gitStashDrop: "ask",
+  gitBranchDelete: "ask",
+  gitForcePush: "ask",
+  // ── 基础设施破坏族：同样全部 `ask` ───────────────────────────────────────────
+  // 删开发环境的 terraform / 清 docker 缓存 / 发布数据库迁移，都是**正当但不可逆**的操作；
+  // 判断该不该做属于用户，不属于我们。
+  tfDestroy: "ask",
+  tfAutoApprove: "ask",
+  dockerPrune: "ask",
+  kubectlDelete: "ask",
+  dbMigrate: "ask",
+};
 
 /** git 的命令词（大小写敏感：POSIX 宿主上 `GIT` 是另一个名字；`git.exe` 不判成 git，
  *  与本仓既定的保守口径一致——见测试「nO_VERIFY 前有 git 别名前缀组合」）。 */
@@ -767,11 +902,23 @@ const GIT_SHORT_VALUE_CHARS = "mFCxu";
 const HOOKS_PATH_KEY_RE = /^core\.hooksPath(?:$|=)/iu;
 const HOOKS_PATH_READ_FORMS = /^--(?:get(?:-all|-regexp)?|list|unset(?:-all)?|remove-section)$/iu;
 
-/** git 一次扫描的产出：子命令 + 两条独立结论（绕过旗标 / 钩子目录被改走）。 */
+/** git 一次扫描的产出：子命令 + 两条独立结论（绕过旗标 / 钩子目录被改走）+ 越界词本身
+ *  + **破坏性子命令判据要看的那几枚面**（旗标、位置参数、`--` 分界）。 */
 interface GitFacts {
   sub: string | undefined;
   hooksSkipped: boolean;
   hooksPath: boolean;
+  /** 触发 `hooksSkipped` 的**词面本身**（按首次出现序、去重）：出路要靠它点名，
+   *  只回一个 `true` 的话模型得自己回去逐词比对是哪一枚。 */
+  bypassWords: readonly string[];
+  /** 子命令之后见到的**长旗标原词**（`--hard` / `--force` / `--staged`…），原样保留。 */
+  longFlags: readonly string[];
+  /** 子命令之后短旗标簇里的**字母**（`-fdx` 给 `f`/`d`/`x`；`-D` 给 `D`）。 */
+  shortLetters: readonly string[];
+  /** 子命令之后的位置参数（`--` 之后的也算进来）。 */
+  positionals: readonly string[];
+  /** 见过 `--`（之后一律 pathspec 的那条界）。 */
+  sawSeparator: boolean;
 }
 
 /** 长旗标缩写：git 接受不歧义前缀（`--no-v`…`--no-verify`），缩写同样绕过钩子。 */
@@ -786,6 +933,15 @@ interface GitWalk {
   hooksSkipped: boolean;
   hooksPathKey: boolean;
   hooksReadForm: boolean;
+  /** 越界词面（见 GitFacts.bypassWords）。去重在这里做：同一枚旗标在一条命令里出现两次，
+   *  给模型列两遍只是噪音，而模型改的时候要删的是**全部**出现处。 */
+  bypassWords: string[];
+  /** 破坏性判据看的三枚面（见 GitFacts 的对应字段）。与上面几枚**同一趟走查**里记，
+   *  理由与 `bypassWords` 同源：另起一台走查两台迟早会漂。 */
+  longFlags: string[];
+  shortLetters: string[];
+  positionals: string[];
+  sawSeparator: boolean;
 }
 
 /** 第一个非旗标词就是子命令（git 的全局旗标都在它之前）。 */
@@ -797,13 +953,23 @@ const takeGitSub = (walk: GitWalk, word: string): void => {
 /** 长旗标：`--no-verify` 及其缩写是绕过；带独立取值的旗标吃掉下一词（那枚取值不是旗标）。 */
 const takeGitLong = (walk: GitWalk, word: string): void => {
   walk.hooksReadForm ||= HOOKS_PATH_READ_FORMS.test(word);
-  walk.hooksSkipped ||= isNoVerifyAbbrev(word);
+  if (isNoVerifyAbbrev(word) && !walk.bypassWords.includes(word)) {
+    walk.bypassWords.push(word);
+    walk.hooksSkipped = true;
+  }
+  // 长旗标记**原词**（破坏性判据按等值比，`--force-with-lease` 不能被 `--force` 吃掉）。
+  // `--flag=value` 的形状取等号前那一段：取值不是旗标的身份。
+  // 用 `indexOf` + `slice` 而不是 `split("=")[0] ?? word` —— 后者那枚 `??` 是**死分支**
+  //（`split` 必返回至少一个元素），只为过 `noUncheckedIndexedAccess` 而存在。
+  const equals = word.indexOf("=");
+  walk.longFlags.push(equals === -1 ? word : word.slice(0, equals));
   walk.pos += GIT_VALUE_FLAGS.has(word) ? 2 : 1;
 };
 
 /** 位置参数：`git config core.hooksPath <dir>` 的钩子目录键就长在这个位置上。 */
 const takeGitPositional = (walk: GitWalk, word: string): void => {
   walk.hooksPathKey ||= walk.sub === "config" && HOOKS_PATH_KEY_RE.test(word);
+  walk.positionals.push(word);
   walk.pos += 1;
 };
 
@@ -825,7 +991,18 @@ function takeGitCluster(walk: GitWalk, word: string): void {
   let tailValue = false;
   for (let cursor = 0; cursor < cluster.length; cursor += 1) {
     const flag = cluster.charAt(cursor);
+    // 破坏性判据按**字母**比（`-D` 与 `-d` 是两回事、`-fdx` 里 `f` 单独成判据），
+    // 故这里存字母而不是整簇 —— 与 `bypassWords` 存整簇的理由正相反：
+    // 那边要的是"删掉哪些词"，这边要的是"有没有出现某个开关"。
+    if (!walk.shortLetters.includes(flag)) {
+      walk.shortLetters.push(flag);
+    }
     if (flag === "n" && walk.sub !== undefined && SHORT_N_NO_VERIFY_SUBS.has(walk.sub)) {
+      // 点名**整枚簇**而不是 `-n`：簇里别的字母是真旗标（`-an` 的 `a` 是 stage all），
+      // 让模型删掉整枚会顺手丢掉它们。文案侧写明"或词中的对应字母"，两种读法都在。
+      if (!walk.bypassWords.includes(word)) {
+        walk.bypassWords.push(word);
+      }
       walk.hooksSkipped = true;
     }
     if (GIT_SHORT_VALUE_CHARS.includes(flag)) {
@@ -850,10 +1027,22 @@ function gitFacts(words: readonly string[]): GitFacts {
     hooksSkipped: false,
     hooksPathKey: false,
     hooksReadForm: false,
+    bypassWords: [],
+    longFlags: [],
+    shortLetters: [],
+    positionals: [],
+    sawSeparator: false,
   };
   for (;;) {
     const word = words[walk.pos];
-    if (word === undefined || word === "--") {
+    if (word === undefined) {
+      break;
+    }
+    // `--` = "之后一律 pathspec"。记下这条界**并继续收集**：`rmrf` 之外，
+    // 破坏性判据要靠"子命令之后有没有真路径"来区分 `git checkout -b x` 与 `git checkout -- x`。
+    if (word === "--") {
+      walk.sawSeparator = true;
+      walk.positionals.push(...words.slice(walk.pos + 1));
       break;
     }
     if (walk.sub === undefined && !word.startsWith("-")) {
@@ -872,21 +1061,250 @@ function gitFacts(words: readonly string[]): GitFacts {
     sub: walk.sub,
     hooksSkipped: walk.hooksSkipped,
     hooksPath: walk.hooksPathKey && !walk.hooksReadForm,
+    bypassWords: walk.bypassWords,
+    longFlags: walk.longFlags,
+    shortLetters: walk.shortLetters,
+    positionals: walk.positionals,
+    sawSeparator: walk.sawSeparator,
   };
 }
 
 /** 单段（已按候选头切好）：git 钩子绕过？绕过只在清单子命令上成立。 */
-function gitBypass(tokens: readonly ShellToken[]): BashDenialKey | undefined {
+function gitBypass(tokens: readonly ShellToken[]): BashVerdict | undefined {
   const [head] = tokens;
-  let result: BashDenialKey | undefined;
+  let result: BashVerdict | undefined;
   // `\git`/`my\git` 的头与 `git` 同判（与 rm 词表同源，同一处判据）。
   if (head !== undefined && isExactBinIn(head, GIT_BIN_NAMES)) {
-    const { sub, hooksSkipped, hooksPath } = gitFacts(tokens.map((token) => token.value));
+    const { sub, hooksSkipped, hooksPath, bypassWords } = gitFacts(
+      tokens.map((token) => token.value),
+    );
     if (hooksPath || (sub !== undefined && GIT_NO_VERIFY_SUBS.has(sub) && hooksSkipped)) {
-      result = "noVerify";
+      // 出路只给**绕过旗标**那一支：`core.hooksPath` 的机械解是删掉一个「键 值」二元组，
+      // 而键与值的词位关系（`git config core.hooksPath <dir>` 的 `<dir>` 是哪个词）
+      // 这条走查并没有记——硬造一个改法不如让模型照基础文案自己改（那条文案已写明
+      // 「先修钩子或与用户确认豁免」）。
+      result =
+        bypassWords.length > 0
+          ? { key: "noVerify", fix: { role: "bypassFlag", offending: bypassWords } }
+          : { key: "noVerify" };
     }
   }
   return result;
+}
+
+/**
+ * 单段：**破坏性 git 子命令**？与 `gitBypass` 共用同一趟走查（`gitFacts`）与同一个 git
+ * 词表入口 —— 两台走查迟早会漂，而漂的表现是"绕过拦得住、破坏看不见"。
+ *
+ * 逐子命令的判据（每条都只认**已确认会丢东西**的形态，含糊的一律不判、按已知边界登记）：
+ *  - `reset --hard`：长旗标等值。（`--soft`/`--mixed` 保留工作区，不判。）
+ *  - `checkout -- …` / `checkout .`：只认这两形。**裸 `git checkout <path>` 不判** ——
+ *    它与 `git checkout <branch>` 在词法上不可分（要知道那名字是分支还是文件得读仓库，
+ *    而本包不碰 fs）。见 README 已知边界。
+ *  - `restore <path>`：`--staged` 单用时只动索引（可重做 `git add`），不判。
+ *  - `clean -f`：带 `-n`/`--dry-run` 时 git 自己只打印，不判。
+ *  - `stash drop|clear`：`pop`/`apply`/`list`/`show` 都不丢东西，不判。
+ *  - `branch -D`：大写才强删；`-d` 在小写时 git 自己会拒绝未合并的分支，不判。
+ *  - `push -f|--force|--force-with-lease`：`--force-with-lease` 一并算（它仍然是重写远端）。
+ */
+const hasLong = (facts: GitFacts, name: string): boolean => facts.longFlags.includes(name);
+/** 短旗标簇里出现过这个字母。 */
+const hasShort = (facts: GitFacts, letter: string): boolean => facts.shortLetters.includes(letter);
+
+/** `git restore` 的**只动索引**形：`--staged` 单用时工作区不变，内容不丢（重做一次 `git add` 即回）。
+ *  `--staged` 与 `--worktree` 并存时两边都动 ⇒ 不算"只动索引"。 */
+const restoreStagedOnly = (facts: GitFacts): boolean =>
+  (hasLong(facts, "--staged") || hasShort(facts, "S")) &&
+  !hasLong(facts, "--worktree") &&
+  !hasShort(facts, "W");
+
+/** `git clean` 的**真删**形：有 force（短 `f` 或长 `--force`）且没有 dry-run。
+ *  `-n` 赢过 `-f`（git 只打印清单），`--dry-run` 同理。 */
+const cleanForces = (facts: GitFacts): boolean =>
+  (hasShort(facts, "f") || hasLong(facts, "--force")) &&
+  !hasShort(facts, "n") &&
+  !hasLong(facts, "--dry-run");
+
+/** `git push` 的**重写远端**形：`--force-with-lease` 一并算 —— 它比 `--force` 温和，
+ *  但仍然是重写历史（"租约"保的是"别人没推过"，不是"历史不会变"）。 */
+const pushForces = (facts: GitFacts): boolean =>
+  hasShort(facts, "f") || hasLong(facts, "--force") || hasLong(facts, "--force-with-lease");
+
+/** `git checkout` 的**丢弃**形：只认 `-- <path>` 与 `.`/`..` 两形。
+ *  ⚠ 裸 `git checkout <path>` **刻意不判** —— 要与"那个名字是分支还是文件"才能分，
+ *  而本包不碰 fs。见 README 已知边界。 */
+const checkoutDiscards = (facts: GitFacts): boolean =>
+  facts.sawSeparator || facts.positionals.some((word) => /^\.{1,2}$/u.test(word));
+
+const GIT_DESTRUCTIVE: Readonly<Record<string, (facts: GitFacts) => BashDenialKey | undefined>> = {
+  reset: (facts) => (hasLong(facts, "--hard") ? "gitResetHard" : undefined),
+  restore: (facts) => (restoreStagedOnly(facts) ? undefined : "gitRestoreDiscard"),
+  clean: (facts) => (cleanForces(facts) ? "gitCleanForce" : undefined),
+  push: (facts) => (pushForces(facts) ? "gitForcePush" : undefined),
+  stash: (facts) =>
+    facts.positionals[0] === "drop" || facts.positionals[0] === "clear"
+      ? "gitStashDrop"
+      : undefined,
+  branch: (facts) => (hasShort(facts, "D") ? "gitBranchDelete" : undefined),
+  checkout: (facts) => (checkoutDiscards(facts) ? "gitCheckoutDiscard" : undefined),
+};
+
+function gitDestructive(facts: GitFacts): BashDenialKey | undefined {
+  return facts.sub === undefined ? undefined : GIT_DESTRUCTIVE[facts.sub]?.(facts);
+}
+
+/** 单段（已按候选头切好）：破坏性 git 子命令？词表入口与 `gitBypass` **同源**
+ *（同一个 `GIT_BIN_NAMES`、同一趟 `gitFacts` 走查）—— 两台走查迟早会漂。 */
+function gitDestructiveOf(tokens: readonly ShellToken[]): BashVerdict | undefined {
+  const [head] = tokens;
+  let result: BashVerdict | undefined;
+  if (head !== undefined && isExactBinIn(head, GIT_BIN_NAMES)) {
+    const key = gitDestructive(gitFacts(tokens.map((token) => token.value)));
+    if (key !== undefined) {
+      result = { key };
+    }
+  }
+  return result;
+}
+
+/** 长旗标等值（`--flag=value` 的取值在走查里已被切掉，这里只比旗标身份）。 */
+
+/**
+ * 这一串里有 dry-run 开关吗（`--dry-run` 或 `--dry-run=client`）——有它只打印、不动东西。
+ * 官方 `kubectl delete --dry-run=client` 是这条命令**推荐**的预演写法，拦它就是把
+ * 官方教给模型的正确姿势掐掉。
+ */
+const DRY_RUN_FLAG = "--dry-run";
+const hasDryRun = (words: readonly string[]): boolean =>
+  words.some((word) => word === DRY_RUN_FLAG || word.startsWith(`${DRY_RUN_FLAG}=`));
+
+/** 段内**非旗标**词（`terraform -chdir=x apply` 的全局旗标要跳掉）。
+ *  ⚠ 它不跳旗标的**取值**（`-n foo` 里的 `foo` 仍算位置参数）：各族的判据因此一律
+ *  用"包含某词"而不是"第 n 枚是某词"——少一层取值表要维护，代价是极少数生僻写法
+ *  会多问一句（`kubectl get pod delete` 那种），而多问一句是本族可接受的代价。 */
+const positionalsOf = (words: readonly string[]): string[] =>
+  words.filter((word) => !word.startsWith("-"));
+
+/** `terraform`（与它的开源分支 `tofu`）的破坏性形态。 */
+function terraformDanger(words: readonly string[]): BashDenialKey | undefined {
+  const [sub] = positionalsOf(words.slice(1));
+  let key: BashDenialKey | undefined;
+  if (sub === "destroy") {
+    // `terraform plan -destroy` **不是**这条：`plan` 只打印，`sub` 取到的是 `plan`。
+    key = "tfDestroy";
+  } else if (sub === "apply" && words.includes("-auto-approve")) {
+    key = "tfAutoApprove";
+  }
+  return key;
+}
+
+/** `docker … prune` 的破坏性形态。`docker system df` / `docker image rm` 都不在此列。 */
+const dockerDanger = (words: readonly string[]): BashDenialKey | undefined =>
+  positionalsOf(words.slice(1)).includes("prune") ? "dockerPrune" : undefined;
+
+/** `kubectl delete` 的破坏性形态（`--dry-run` 除外）。 */
+const kubectlDanger = (words: readonly string[]): BashDenialKey | undefined => {
+  const positional = positionalsOf(words.slice(1));
+  return positional.includes("delete") && !hasDryRun(words) ? "kubectlDelete" : undefined;
+};
+
+/**
+ * 能出现在迁移命令词之前的**启动器**：`python manage.py migrate`、`npx prisma migrate`、
+ * `bundle exec rails db:migrate`。表的存在是为了把"命令位置"钉住 ——
+ * 少了它，`grep manage.py migrate docs/` 这种**在文档里搜这串**的调用会假命中。
+ */
+const MIGRATE_LAUNCHERS: ReadonlySet<string> = new Set([
+  "python",
+  "python2",
+  "python3",
+  "pypy",
+  "pypy3",
+  "npx",
+  "bunx",
+  "exec",
+  "bundle",
+  "poetry",
+  "uv",
+  "pipenv",
+]);
+
+/**
+ * 迁移命令的 `(命令词, 动作词)` 对：只收**公认会改 schema** 的动作。
+ * 只读动作（`prisma migrate status`/`diff`、`flyway info`、`alembic history`）刻意不收 ——
+ * 它们不改任何东西，问用户是纯噪音。
+ */
+/** 三个框架共用的动作词（Rails 系与 Sequelize 都写 `db:migrate`）。 */
+const DB_MIGRATE_VERB = "db:migrate";
+
+const MIGRATE_PAIRS: readonly (readonly [string, string])[] = [
+  ["manage.py", "migrate"],
+  ["prisma", "migrate"],
+  ["rails", DB_MIGRATE_VERB],
+  ["rake", DB_MIGRATE_VERB],
+  ["alembic", "upgrade"],
+  ["alembic", "downgrade"],
+  ["flyway", "migrate"],
+  ["flyway", "undo"],
+  ["sequelize", DB_MIGRATE_VERB],
+  ["typeorm", "migration:run"],
+  ["typeorm", "migration:revert"],
+  ["knex", "migrate:latest"],
+  ["knex", "migrate:rollback"],
+];
+
+/** 动作词之后跟这些时表示**只读**（`prisma migrate status` 查状态而非发布迁移）。 */
+const MIGRATE_READ_ONLY_TAILS: ReadonlySet<string> = new Set(["status", "diff", "list", "history"]);
+
+/** 干跑旗标：有它时工具只打印将执行的语句（`manage.py migrate --plan`）。 */
+const MIGRATE_DRY_RUN_FLAGS: ReadonlySet<string> = new Set(["--plan", "--sql", DRY_RUN_FLAG]);
+
+/**
+ * 数据库迁移命令？**按"命令位置 + 动作词"对**判，不按"段头等于某命令"判 ——
+ * 这一族真正的命令词常常是 `python`/`npx`/`bundle` 的**参数**（`manage.py` 就是）。
+ */
+function migrateDanger(words: readonly string[]): BashDenialKey | undefined {
+  const bins = words.map((word) => binNameOf(word));
+  let key: BashDenialKey | undefined;
+  const dryRun = words.some((word) => MIGRATE_DRY_RUN_FLAGS.has(word));
+  for (let index = 0; index < bins.length - 1 && key === undefined; index += 1) {
+    // 命令位置：它前面的每一枚词都得是启动器（`grep manage.py migrate` 就不成立了）。
+    const atCommand = words.slice(0, index).every((word) => MIGRATE_LAUNCHERS.has(word));
+    const head = bins[index];
+    const action = bins[index + 1];
+    const tail = bins[index + 2];
+    const destructive =
+      atCommand &&
+      MIGRATE_PAIRS.some(([bin, verb]) => bin === head && verb === action) &&
+      (tail === undefined || !MIGRATE_READ_ONLY_TAILS.has(tail)) &&
+      !dryRun;
+    if (destructive) {
+      key = "dbMigrate";
+    }
+  }
+  return key;
+}
+
+/** 基础设施破坏族的**命令词 → 判据**表（与 git 族同一形状：查表，不在一条长 if 链上堆）。 */
+const INFRA_DESTRUCTIVE: Readonly<
+  Record<string, (words: readonly string[]) => BashDenialKey | undefined>
+> = {
+  terraform: terraformDanger,
+  tofu: terraformDanger,
+  docker: dockerDanger,
+  kubectl: kubectlDanger,
+};
+
+/** 单段（已按候选头切好）：基础设施破坏族？词表入口按**去路径前缀的命令词**认。 */
+function infraDestructiveOf(tokens: readonly ShellToken[]): BashVerdict | undefined {
+  const [head] = tokens;
+  const words = tokens.map((token) => token.value);
+  let key: BashDenialKey | undefined;
+  if (head !== undefined) {
+    // 命令词按**去路径前缀**认（`/usr/local/bin/kubectl` 与 `kubectl` 同判，与 git 族同口径）。
+    const predicate = INFRA_DESTRUCTIVE[binNameOf(head.value)];
+    key = predicate?.(words) ?? migrateDanger(words);
+  }
+  return key === undefined ? undefined : { key };
 }
 
 /** 系统关键前缀：整树删除不可逆。/var 与 /tmp **不在列**——它们是常见的缓存/临时
@@ -1135,6 +1553,63 @@ function isWindowsShapeTarget(raw: string, home: string): boolean {
   );
 }
 
+/** 家目录下的**深层普通后代**（相对部分形如 `a/b/…` 且不含 `..`）：日常清理目标。 */
+function isDeepHomeDescendant(target: string, home: string): boolean {
+  if (!target.startsWith(`${home}/`)) {
+    return false;
+  }
+  const rest = target.slice(home.length + 1);
+  return rest.includes("/") && !rest.split("/").includes("..");
+}
+
+/**
+ * 家目录形态的灾难判据：**家目录本身**、**直接子项**、或路径里出现 `..`（上跳可能落到
+ * 别处）都算；更深的普通后代不算——`rm -rf ~/.cache/x/y`、
+ * `rm -rf /Users/<user>/project/build` 是日常清理，把整棵家目录树一律拦下等于让 `rm -rf`
+ * 不可用（实测误拦：`rm -rf /Users/<user>/.cache/plugin-review/probe-dir` 被当成
+ * "目标是家目录"）。
+ * 变量形态（`$HOME/…`、`${HOME}/…`）由 `isHomeVarDisaster` 接到同一把尺子上判：`$HOME`、
+ * `$HOME/`、`$HOME/Documents` 拦，`$HOME/.cache/x/y` 放行；展开形状不可判时保守拦下。
+ * @param target 待判路径（词值或归一值）
+ * @param home `os.homedir()`
+ * @returns 是否属于「删了就是灾难」的家目录目标
+ */
+function isHomeDisasterPath(target: string, home: string): boolean {
+  if (target === home) {
+    return true;
+  }
+  if (!target.startsWith(`${home}/`)) {
+    return false;
+  }
+  const rest = target.slice(home.length + 1);
+  return rest.length === 0 || !rest.includes("/") || rest.split("/").includes("..");
+}
+
+/** 波浪号形态映射成家目录绝对形态（`~`→home、`~/x`→home/x），供同一把尺子复用。 */
+function tildeHomePath(value: string, home: string): string {
+  return value === "~" ? home : `${home}${value.slice(1)}`;
+}
+
+/** 变量形态（`$HOME` / `${HOME}`）标记之后的尾巴：`$HOME/x` → `/x`、`${HOME}` → 空串。
+ *  标记后没有闭合花括号（畸形输入）按空尾处理——那形退回「家目录本身」，保守。 */
+function homeVarTail(value: string): string {
+  if (HOME_EXPANSION_RE.test(value)) {
+    const end = value.indexOf("}");
+    return end === -1 ? "" : value.slice(end + 1);
+  }
+  return value.slice("$HOME".length);
+}
+
+/** 变量形态的灾难判据：与字面 / 波浪号两形**同一把尺子**（家目录本身、直接子项、含 `..`）。
+ *  尾巴不以 `/` 开头时（`${HOME:-/}x` 这类展开形状不可判）保持保守拦下。 */
+function isHomeVarDisaster(value: string, home: string): boolean {
+  const tail = homeVarTail(value);
+  if (tail !== "" && !tail.startsWith("/")) {
+    return true;
+  }
+  return isHomeDisasterPath(`${home}${tail}`, home);
+}
+
 /**
  * **POSIX 轨道**的灾难性删除目标：根 / 家目录（**变量与字面路径同判**）/ 系统前缀 / 上跳 /
  * 当前目录，绝对路径的 glob 形态（`/*`、`/usr/**`）等价于其目录本身。
@@ -1157,21 +1632,27 @@ function isPosixDisasterTarget(value: string): boolean {
       ? path.posix.join(posixNormalized.replace(/\/?\*+$/u, ""), ".")
       : posixNormalized;
   const home = os.homedir();
+  // 家目录下的深层普通后代（`~/.cache/x/y`、`/Users/<user>/project/build`）是日常清理目标：
+  // 系统前缀表里的 `/Users`（macOS）与 `/home`（Linux）会把它们一并拦下，故在这里先放行。
+  // 家目录本身、直接子项、含 `..` 的写法仍由下面的判据拦住；别人的家目录树不在豁免内
+  // （`/Users/<other>/x/y` 照旧被 `/Users` 前缀拦）。
+  if (isDeepHomeDescendant(posixTarget, home) && isDeepHomeDescendant(value, home)) {
+    return false;
+  }
   return (
     posixTarget === "/" ||
-    // 波浪号 / 变量 / 字面家目录这四形一律吃**原词值**：`path.posix.normalize` 会把标记后面的
-    // `..` 段整段吃掉（实测 `~/../etc` → `etc`、`$HOME/../usr` → `usr`），挂在归一值上等于给
-    // "带上一跳的灾难目标"留一条漏拦——复核实测：`rm -rf ~/../etc` 放行，而 bash 展开它得到 `/etc`。
-    // 归一值仍然参与（下面两条字面比较 + 系统前缀表），只是不再由它代言这四形。
-    value === "~" ||
-    value.startsWith("~/") ||
-    posixTarget === home ||
-    posixTarget.startsWith(`${home}/`) ||
-    // 字面家目录也吃原词值：`/Users/<user>/../y` 归一后落到**别人**的树，归一值那条撞不到。
-    value === home ||
-    value.startsWith(`${home}/`) ||
-    HOME_VAR_RE.test(value) ||
-    HOME_EXPANSION_RE.test(value) ||
+    // 波浪号 / 字面家目录这两形吃**原词值**：`path.posix.normalize` 会把标记后面的 `..`
+    // 段整段吃掉（实测 `~/../etc` → `etc`），挂在归一值上等于给"带上一跳的灾难目标"留一条
+    // 漏拦；归一值仍然参与（同一判据 + 系统前缀表）。
+    isHomeDisasterPath(posixTarget, home) ||
+    isHomeDisasterPath(value, home) ||
+    // 波浪号形态映射成家目录绝对形态后按同一把尺子判（`~`、`~/`、`~/x`、`~/a/../b`）。
+    ((value === "~" || value.startsWith("~/")) &&
+      isHomeDisasterPath(tildeHomePath(value, home), home)) ||
+    // 变量形态同样按那把尺子判（`$HOME`、`$HOME/`、`$HOME/Documents` 拦；
+    // `$HOME/.cache/x/y` 放行）——展开形状不可判时 isHomeVarDisaster 自己保守拦下。
+    ((HOME_VAR_RE.test(value) || HOME_EXPANSION_RE.test(value)) &&
+      isHomeVarDisaster(value, home)) ||
     // `~user/…` 吃原词值（归一会吃掉 `..` 段，见 USER_HOME_RE 的注释）。
     USER_HOME_RE.test(value) ||
     posixTarget === "." ||
@@ -1266,11 +1747,11 @@ function partitionRmArgs(
 function catastrophicRm(
   tokens: readonly ShellToken[],
   windowsDialect: boolean,
-): BashDenialKey | undefined {
+): BashVerdict | undefined {
   const [head] = tokens;
   // 两形里任一命中词表就用那一形（`\rm`、`my\rm`、`C:\tools\rm` 的头都是 rm）。
   const bin = head === undefined ? "" : rmBinOf(head);
-  let result: BashDenialKey | undefined;
+  let result: BashVerdict | undefined;
   if (bin.length > 0) {
     const cmdDialect = CMD_BUILTINS.has(bin);
     // 旗标面按**命令词**分派（命令词在调用点是已知量，词形不是）：只有 `remove-item`/`ri`
@@ -1307,7 +1788,21 @@ function catastrophicRm(
       hasForceRecursive(flags, cmdDialect, psParamTrack) &&
       targets.some((target) => disaster(target))
     ) {
-      result = "rmrf";
+      // 点名**触发判据的那几枚目标**（去重、按首次出现序）：一条 `rm -rf ./build ~` 里
+      // 真正成灾的是 `~`，而模型看到的拒绝理由若只说「目标是家目录」，它得回去自己
+      // 逐个目标比对才知道该动哪一个——`./build` 删掉是安全的，误把它一起改掉反而更糟。
+      // 取词面 `raw`（Windows 轨的判据读的也是它），故两条轨道共用同一份点名。
+      //
+      // ⚠ 这里**不需要**再兜一层空串：`disaster` 要求 `[value, raw]` 至少一形非空，
+      // 而词法层保证 `rawContent` 是 `content` 的超集（转义只缩不增、`\`+换行两者都空），
+      // 故 `raw === ""` 蕴含 `value === ""` —— disaster 为真时 raw 必非空。
+      // 反向那条 Windows 臂同样自足：`isWindowsShapeTarget` 命中盘符/UNC 形，raw 必非空。
+      // 于是名单恒非空，`Fix` 那条「offending 非空」的不变式由这里结构性地兑现，
+      // 不必留一条测不到的空串兜底（那正是覆盖率与可读性的双份负债）。
+      const offending = [
+        ...new Set(targets.filter((target) => disaster(target)).map((target) => target.raw)),
+      ];
+      result = { key: "rmrf", fix: { role: "disasterTarget", offending } };
     }
   }
   return result;
@@ -1324,8 +1819,8 @@ const FETCH_IN_SUBST_RE = new RegExp(`<\\(\\s*${FETCH_VERBS}`, "iu");
 /** 单段：下载即执行？执行端是 shell 解释器才拦；jq/grep 等接收端放行。
  *  入参是**结构视图**（引号内字面文本已清空、`$( )`/反引号体内保留），所以
  *  `echo "curl x | sh"` 放行而 `echo "$(curl x | sh)"` 照拦——后者实测真会执行。 */
-function pipeToShell(unprefixed: string): BashDenialKey | undefined {
-  let result: BashDenialKey | undefined;
+function pipeToShell(unprefixed: string): BashVerdict | undefined {
+  let result: BashVerdict | undefined;
   // 快速门槛：段里有取回内容的命令词
   if (FETCH_HEAD_RE.test(unprefixed)) {
     const fetchIdx = unprefixed.search(FETCH_HEAD_RE);
@@ -1340,7 +1835,7 @@ function pipeToShell(unprefixed: string): BashDenialKey | undefined {
       // fetch 结果经 <() 喂给它。命令头允许路径前缀（`/bin/bash <(curl …)` 照拦）。
       (SHELL_HEAD_RE.test(unprefixed) && FETCH_IN_SUBST_RE.test(unprefixed))
     ) {
-      result = "pipeShell";
+      result = { key: "pipeShell" };
     }
   }
   return result;
@@ -1405,14 +1900,14 @@ function npxDanger(
   words: readonly string[],
   start: number,
   serverWords: ReadonlySet<string>,
-): BashDenialKey | undefined {
+): BashVerdict | undefined {
   // 旗标挡在包名前必须跳掉，否则 `npx -y vite` 旗标错位漏拦。
   const pos = packageIndex(words, start + 1);
   const pkg = words[pos];
-  let result: BashDenialKey | undefined;
+  let result: BashVerdict | undefined;
   if (pkg !== undefined) {
     result = isLongRunningPkg(pkgBinName(pkg), words.slice(pos + 1), serverWords)
-      ? "devServer"
+      ? { key: "devServer" }
       : undefined;
   }
   return result;
@@ -1424,7 +1919,7 @@ function pkgManagerDanger(
   start: number,
   serverWords: ReadonlySet<string>,
   runArgs: ReadonlySet<string>,
-): BashDenialKey | undefined {
+): BashVerdict | undefined {
   const head = words[start];
   // 包管理器的全局旗标能挡在子命令**前**（`pnpm -w run dev`），也能挡在 run 与脚本名
   // **之间**（`npm run --silent dev`）→ 两处都跳旗标再定位，否则位置错位直接漏判。
@@ -1446,17 +1941,17 @@ function pkgManagerDanger(
   // / `pnpm vite dev` / `bun vite dev` 真的会启动 dev server（实测与 npx 同危，此前放行）；
   // npm 对未知子命令报错，多查无害。⇒ 解析出的子命令/脚本名本身也按命令头过一遍长驻判据，
   // 其后的词就是该二进制的参数（`yarn vite build` 的 build 照常给放行面用）。
-  let result: BashDenialKey | undefined;
+  let result: BashVerdict | undefined;
   if (isTempPkg) {
     result = npxDanger(words, subPos, serverWords);
   } else if (runArgs.has(script) || DEV_PREFIX.test(script)) {
     // npm test 等脚本名不含 dev 词根才放行——上面已匹配即拦
-    result = "devServer";
+    result = { key: "devServer" };
   } else if (
     script.length > 0 &&
     isLongRunningPkg(script, words.slice(scriptPos + 1), serverWords)
   ) {
-    result = "devServer";
+    result = { key: "devServer" };
   }
   return result;
 }
@@ -1474,14 +1969,14 @@ function devServerDangerOfHead(
   words: readonly string[],
   serverWords: ReadonlySet<string>,
   runArgs: ReadonlySet<string>,
-): BashDenialKey | undefined {
-  let result: BashDenialKey | undefined;
+): BashVerdict | undefined {
+  let result: BashVerdict | undefined;
   if (serverWords.has(head)) {
     // 直接调用 dev 服务器（按子命令/旗标区分长驻与一次性构建，不再一刀切）
-    result = isLongRunningPkg(head, words.slice(1), serverWords) ? "devServer" : undefined;
+    result = isLongRunningPkg(head, words.slice(1), serverWords) ? { key: "devServer" } : undefined;
   } else if (head === "cargo") {
     // watch 是长驻，run 是一次性执行
-    result = words[1] === "watch" ? "devServer" : undefined;
+    result = words[1] === "watch" ? { key: "devServer" } : undefined;
   } else if (head === "npx" || head === "bunx") {
     result = npxDanger(words, 0, serverWords);
   } else if (PKG_MANAGERS.has(head)) {
@@ -1516,9 +2011,9 @@ function dangerContextOf(opts: BashDangerOptions): DangerContext {
 }
 
 /** 单段（已按候选头切好）：长驻开发服务器？词表来自上下文（合并只做一次）。 */
-function devServer(tokens: readonly ShellToken[], ctx: DangerContext): BashDenialKey | undefined {
+function devServer(tokens: readonly ShellToken[], ctx: DangerContext): BashVerdict | undefined {
   const [headWord] = tokens;
-  let result: BashDenialKey | undefined;
+  let result: BashVerdict | undefined;
   if (headWord !== undefined) {
     // bin 名（去路径、已由 lexTokens 去引号）：`/usr/bin/vite`、`./.bin/next dev`、`"vite"` 与裸名同判
     const [valueForm, rawForm] = binForms(headWord);
@@ -1729,11 +2224,13 @@ function ruleAtCandidates(
   tokens: readonly ShellToken[],
   starts: readonly number[],
   ctx: DangerContext,
-): BashDenialKey | undefined {
-  let denial: BashDenialKey | undefined;
+): BashVerdict | undefined {
+  let denial: BashVerdict | undefined;
   for (const start of starts) {
     denial =
       gitBypass(tokens.slice(start)) ??
+      gitDestructiveOf(tokens.slice(start)) ??
+      infraDestructiveOf(tokens.slice(start)) ??
       catastrophicRm(tokens.slice(start), ctx.windowsDialect) ??
       devServer(tokens.slice(start), ctx);
     if (denial !== undefined) {
@@ -1747,18 +2244,42 @@ function ruleAtCandidates(
 function faceDenialOf(
   segText: string,
   words: readonly string[],
-  drill: (body: string, windowsFace: boolean) => BashDenialKey | undefined,
-): BashDenialKey | undefined {
+  drill: (body: string, windowsFace: boolean) => BashVerdict | undefined,
+): BashVerdict | undefined {
   const verdict = nestedShellVerdictOf(segText, words);
-  let denial: BashDenialKey | undefined;
+  let denial: BashVerdict | undefined;
   if (verdict.kind === "opaque") {
-    denial = "nestedShellUnconfirmed";
+    denial = { key: "nestedShellUnconfirmed" };
   } else if (verdict.kind === "body") {
     // 下钻与否（含"到界就不再取体、按需确认收口"）由调用方给的 drill 决定
     denial = drill(verdict.body, verdict.windowsFace);
   }
   return denial;
 }
+
+/**
+ * 严重度择优：`deny` 档压过 `ask` 档；**同档先到先得**（先命中的那个更贴近模型写的那一段）。
+ *
+ * 为什么必须有它（引入 `ask` 档带出来的漏拦）：`commandDanger` 原本是"首命中即返回"，
+ * 而一枚 `ask` 档命中会**让扫描提前收工**——`git push -f && rm -rf ~` 里第一段是 ask，
+ * 函数当场返回，`rm -rf ~` **从未被判定**。宿主只在结论是 allow 时才 dispatch，而 guard
+ * 读到的又正是这个 ask 结论（它按 `RULE_TIER` 让路，不拒），于是用户点了"允许"之后
+ * 灾难照常执行。所以扫描要一直走到拿到 `deny` 为止，`ask` 只是记下来的备选。
+ */
+function preferSevere(
+  current: BashVerdict | undefined,
+  candidate: BashVerdict | undefined,
+): BashVerdict | undefined {
+  let result = current;
+  if (candidate !== undefined && (result === undefined || RULE_TIER[candidate.key] === "deny")) {
+    result = candidate;
+  }
+  return result;
+}
+
+/** 拿到 `deny` 了吗（拿到了就可以停止扫描——更严重的档已经确定，后续候选改变不了结论）。 */
+const settled = (verdict: BashVerdict | undefined): boolean =>
+  verdict !== undefined && RULE_TIER[verdict.key] === "deny";
 
 /**
  * 一段命令的判定：三类规则逐候选命令头点位 + 执行面（shell 的 `-c`、`eval`、非 shell
@@ -1773,21 +2294,26 @@ function segmentDenial(
   tokens: readonly ShellToken[],
   starts: readonly number[],
   ctx: DangerContext,
-  drill: (body: string, windowsFace: boolean) => BashDenialKey | undefined,
-): BashDenialKey | undefined {
-  let denial = ruleAtCandidates(tokens, starts, ctx);
-  if (denial !== undefined) {
-    return denial;
+  drill: (body: string, windowsFace: boolean) => BashVerdict | undefined,
+): BashVerdict | undefined {
+  const rules = ruleAtCandidates(tokens, starts, ctx);
+  if (settled(rules)) {
+    return rules;
   }
+  // 规则面只命中了 `ask` 档 ⇒ **仍要下钻**：`-c` 体里可能藏着一条 `deny` 档
+  //（`git push -f && bash -c "rm -rf ~"` 那种形状在段内也一样成立）。原实现在这里
+  // 直接 return，`ask` 档一进来就会把体内那条更严重的判据整个跳过。
+  let best = rules;
   const words = tokens.map((token) => token.value);
   for (const start of starts) {
-    // "已确认危险"排在前：看不见才升格为需确认，看得见危险就用危险那条消息。
-    denial = faceDenialOf(segText, words.slice(start), drill);
-    if (denial !== undefined) {
+    // "已确认危险"排在前：看不见才升格为需确认，看得见危险就用危险那条。
+    const face = faceDenialOf(segText, words.slice(start), drill);
+    best = preferSevere(best, face);
+    if (settled(best)) {
       break;
     }
   }
-  return denial;
+  return best;
 }
 
 /**
@@ -1811,7 +2337,7 @@ function commandDanger(
   command: string,
   ctx: DangerContext,
   depth: number,
-): BashDenialKey | undefined {
+): BashVerdict | undefined {
   // 管道语义是跨段结构（下载→执行）：先在整命令视野里判 pipeToShell，再逐段判其余三类。
   // 结构视图清空引号内的**字面**文本（`echo "curl x | sh"` 不该误拦），但保留 `$( )`/反引号
   // 体内内容——那一枚在真实 shell 里会执行（实测 `echo "$(seq 3 | tail -1)"` 输出 `3`），
@@ -1821,22 +2347,27 @@ function commandDanger(
   // （`pwsh` 调用点里的 `bash -c "rm -rf C:/Windows"` 内层按 Windows 轨道判 ⇒ 拦）。
   const segmentation = splitSegments(command);
   for (const seg of segmentation.texts) {
-    if (result !== undefined) {
+    // 只有拿到 `deny` 档才算"结论已定"：`ask` 档只是备选，扫描要继续（见 preferSevere）。
+    if (settled(result)) {
       break;
     }
     const segText = peelSeg(seg);
     const tokens = lexTokens(segText);
     const starts = headStarts(tokens);
-    result = segmentDenial(segText, tokens, starts, ctx, (body, windowsFace) =>
-      depth >= NESTED_SHELL_MAX_DEPTH
-        ? "nestedShellUnconfirmed"
-        : commandDanger(body, windowsFace ? withWindowsFace(ctx) : ctx, depth + 1),
+    result = preferSevere(
+      result,
+      segmentDenial(segText, tokens, starts, ctx, (body, windowsFace) =>
+        depth >= NESTED_SHELL_MAX_DEPTH
+          ? { key: "nestedShellUnconfirmed" }
+          : commandDanger(body, windowsFace ? withWindowsFace(ctx) : ctx, depth + 1),
+      ),
     );
   }
-  if (segmentation.truncated && result === undefined) {
+  if (segmentation.truncated) {
     // 执行面区（`$( )`/反引号）套得比界内更深 ⇒ 还有一批体没扫到。与 `-c` 超界同一条纪律：
     // 看不见的那部分要升格为需确认，不能拿"扫到的这些没危险"当放行依据。
-    result = "nestedShellUnconfirmed";
+    // 它**不压**已拿到的 `deny`（同级取先到，且 deny 更严重）——`preferSevere` 已经管住这点。
+    result = preferSevere(result, { key: "nestedShellUnconfirmed" });
   }
   return result;
 }
@@ -2114,25 +2645,161 @@ export function editDanger(
 }
 
 /**
- * bash 命令危险判定：逐段检查，任一段命中即返回该段命中的规则键。
- * 非字符串/空串放行。这是 host 侧 tools.guard 的 bash 部分谓词
- * （宿主拿键去 `messagesFor(MESSAGES, locale)` 的结果里取拒绝理由回给模型）。
+ * bash 命令危险判定：**带出路**的出口——逐段检查，任一段命中即返回该段命中的规则键
+ * 与「哪几枚词/哪几个目标触发了判据」（见 `Fix`）。非字符串/空串放行。
+ *
+ * 这是 host 侧 `tools.guard` 的 bash 部分谓词用的出口（它拿 `key` 去
+ * `messagesFor(MESSAGES, locale)` 的结果里取拒绝理由，再按当次语言渲染 `fix`）。
+ * 只关心"判不判"的那一侧走 `bashDanger`（同一份判定，本函数是它唯一的实现）。
+ *
  * @param opts 词表配置（extraDevServerWords / extraDevRunArgs）+ 调用点的 shell 方言
  * （`shellDialect`，由宿主按工具身份给，缺省 = POSIX 读法）。
+ */
+
+export function bashVerdict(
+  command: string | undefined | null,
+  opts?: BashDangerOptions,
+): BashVerdict | undefined {
+  // 判定主体在 commandDanger（跨段 pipeToShell + 逐段四类 + 嵌套 `-c` 递归），
+  // 本函数只做入参收窄：非字符串/空串 → result 保持 undefined（放行）。
+  let result: BashVerdict | undefined;
+  if (typeof command === "string" && command.length > 0) {
+    // 超限 = 没判完，与"嵌套体看不见"同一结论：交给用户拍板，不静默放行。
+    result =
+      command.length > MAX_JUDGED_COMMAND_LENGTH
+        ? { key: "nestedShellUnconfirmed" }
+        : commandDanger(command, dangerContextOf(opts ?? {}), 0);
+  }
+  return result;
+}
+
+/**
+ * bash 命令危险判定（**只回规则键**的老出口，签名与判定逐字未变）。
+ * 为什么留着它而不是把 `bashVerdict` 顶上：它是本包随包发布的声明面的一部分
+ * （`types/lib/danger-rules.d.ts`），改返回形状是一次破坏性变更，而消费侧要的往往
+ * 只是"判不判"。本函数是 `bashVerdict` 的一行投影，两条路共用同一份判定 ——
+ * 判定只有一份实现，所以"两出口给出不同结论"这件事结构上不成立。
  */
 export function bashDanger(
   command: string | undefined | null,
   opts?: BashDangerOptions,
 ): BashDenialKey | undefined {
-  // 判定主体在 commandDanger（跨段 pipeToShell + 逐段四类 + 嵌套 `-c` 递归），
-  // 本函数只做入参收窄：非字符串/空串 → result 保持 undefined（放行）。
-  let result: BashDenialKey | undefined;
-  if (typeof command === "string" && command.length > 0) {
-    // 超限 = 没判完，与"嵌套体看不见"同一结论：交给用户拍板，不静默放行。
-    result =
-      command.length > MAX_JUDGED_COMMAND_LENGTH
-        ? "nestedShellUnconfirmed"
-        : commandDanger(command, dangerContextOf(opts ?? {}), 0);
+  return bashVerdict(command, opts)?.key;
+}
+
+/**
+ * 工具名 → shell 方言。这是**调用点身份**，不是从字形猜（`\\home\bob` 折叠后与 UNC
+ * 逐字节同形，字形本身说明不了谁在读它）：`bash` 名下按 POSIX 读法、`pwsh` 名下按
+ * Windows 字形轨道。其余工具名返回 `undefined`（本闸不判它们）。
+ *
+ * 为什么必须单源：guard 的 bash 闸与需确认档都要这个映射，两处各写一遍 `name === "pwsh" ? …`
+ * 时，任何一侧改了而另一侧没改，表现是"guard 拦得住、审批看不见"或反过来 ——
+ * 那种不一致没有任何运行期信号，正是本包最不该有的那种漂。
+ */
+export const dialectOfTool = (name: string | undefined): ShellDialect | undefined => {
+  if (name === "bash") {
+    return "posix";
   }
-  return result;
+  return name === "pwsh" ? "windows" : undefined;
+};
+
+/**
+ * 宿主 bash 的**后台执行**参数名（官方 `tool-bash` 的 schema：`run_in_background`
+ * "Run in the background and return a job id immediately (collect with `job_output`,
+ * stop with `job_kill`). **No timeout applies.**"）。
+ *
+ * 为什么这一枚要进判据：长驻命令**曾经**会挂死会话，那正是 `devServer` 规则的由来；
+ * 而宿主现在自己管得住它（job id / `job_output` / `job_kill`，且不设时限）。
+ * 于是"后台执行的长驻命令"不再是我们该拦的形态 —— 拦它就是**把宿主的正确写法一起拦掉**。
+ */
+const RUN_IN_BACKGROUND_KEY = "run_in_background";
+
+/** 这次调用要求后台执行吗（只认严格 `true`，与宿主官方的判据同形）。 */
+const isBackgroundCall = (args: Record<string, unknown> | undefined): boolean =>
+  args?.[RUN_IN_BACKGROUND_KEY] === true;
+
+/**
+ * 一次调用命中的事实：结论 + **被判定的那条命令原文**。
+ *
+ * 为什么原文一起交回而不是让调用方再从参数里读一遍：两处各读一次时，"判的是这串、
+ * 报的是另一串"这种错没有任何运行期信号。而调用方为了把 `unknown` 收成 `string`，
+ * 还得再写一道 `typeof command === "string"` —— 那是**死分支**（本函数返回非空蕴含
+ * 它必是字符串），留着就是覆盖率与可读性的双份负债。
+ */
+export interface BashHit {
+  verdict: BashVerdict;
+  command: string;
+}
+
+/**
+ * **调用点入口**：工具名 + 参数 + 配置 → 这次调用的判定结论。
+ *
+ * 它是 `bashVerdict`（只吃命令文本）之上的一层，收三件调用点才有的东西：
+ *  1. **方言**由工具身份给（`dialectOfTool`，不从字形猜）；
+ *  2. 命令原文从参数里读一次并**随结论交回**（见 `BashHit`）；
+ *  3. **后台执行的让路**：`devServer` 在 `run_in_background === true` 时不拦 ——
+ *     宿主的作业面自己管生命周期，长驻不再挂死会话（理由见 `RUN_IN_BACKGROUND_KEY`）。
+ *
+ * 判据本体仍在 `bashVerdict`（与 `bashDanger` 同一份实现），所以三个出口不可能给出
+ * 互相打架的结论。
+ */
+export function bashVerdictOf(
+  name: string | undefined,
+  args: Record<string, unknown> | undefined,
+  opts?: BashDangerOptions,
+): BashHit | undefined {
+  const dialect = dialectOfTool(name);
+  const { command } = args ?? {};
+  let hit: BashHit | undefined;
+  if (dialect !== undefined && typeof command === "string" && command.length > 0) {
+    const { key, fix } = bashVerdict(command, { ...opts, shellDialect: dialect }) ?? {};
+    const backgroundLongRun = key === "devServer" && isBackgroundCall(args);
+    if (key !== undefined && !backgroundLongRun) {
+      // 条件展开：`fix` 缺席时**不写该键**（exactOptionalPropertyTypes 下两者语义不同）。
+      hit = { verdict: { key, ...(fix === undefined ? {} : { fix }) }, command };
+    }
+  }
+  return hit;
+}
+
+/**
+ * 灾难目标词面 → **绝对路径**，供宿主做包含性判断（"这枚目标包不包含任何可写根"）。
+ *
+ * 只处理 `catastrophicRm` 会点名的那几类形态，**归一不出来的一律 `undefined`**，
+ * 调用方据此**保守地不让路**。刻意不处理的：
+ *  - **glob**（`/*`、`/usr/**`）：落点要展开才知道，猜它就是在给误放行开口子；
+ *  - **Windows 字形**（盘符 / UNC / `~\`）：要过一张盘符表才知道它指向哪棵树；
+ *  - **`~user/…`**：要查口令表（本包明令不查，见 `USER_HOME_RE`）；
+ *  - **`${HOME:-…}` 的带默认值形**：展开规则带分支，取最保守的那种不猜。
+ *
+ * @param word - `Fix.offending` 里的词面。
+ * @param cwd  - 会话工作目录（相对形按它归一）；缺席时相对形交回 `undefined`。
+ * @returns 归一后的绝对路径；判不出来时 `undefined`。
+ */
+export function disasterTargetPathOf(word: string, cwd: string | undefined): string | undefined {
+  const home = os.homedir();
+  const homeItself = word === "~" || word === "$HOME";
+  const homeChild = word.startsWith("~/") || word.startsWith("$HOME/");
+  // **判不出来的一律不归一**（调用方据此不让路）：glob 与反斜杠形的落点要过展开或盘符表，
+  // 而"以 `~`/`$` 开头却不属于上面两族"的是 `~user`、`${HOME:-…}`、别的变量形 ——
+  // 它们要过口令表或展开规则的分支（本包明令不猜）。少了这两条排除，它们会掉进下面的
+  // cwd 分支被拼成一个**看起来合理**的路径，那是这条判据最危险的那种错。
+  const opaque =
+    word.includes("*") || word.includes("\\") || (!homeItself && !homeChild && /^[~$]/u.test(word));
+  let result: string | undefined;
+  if (!opaque) {
+    if (homeItself) {
+      result = home;
+    } else if (homeChild) {
+      result = path.posix.join(
+        home,
+        word.startsWith("~/") ? word.slice(2) : word.slice("$HOME/".length),
+      );
+    } else if (path.posix.isAbsolute(word)) {
+      result = word;
+    } else if (cwd !== undefined) {
+      result = path.posix.resolve(cwd, word);
+    }
+  }
+  return result === undefined ? undefined : path.posix.normalize(result);
 }

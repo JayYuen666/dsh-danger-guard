@@ -21,6 +21,9 @@ import { rm, symlink } from "node:fs/promises";
 import path from "node:path";
 
 import type { Agent } from "@deepseek-ai/dsh-agent";
+// 审批面的两个类型从声明它那一侧取（wire-safe 入口）：本包不依赖它的运行期实现，
+// 这一层要钉的是"我们的 ask 决定被官方怎么读"。
+import type { ApprovalOutcome, ApprovalRequestEvent } from "@deepseek-ai/dsh-user-approval/types";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import type { ContextFormed } from "@deepseek-ai/dsh-llm";
 
@@ -571,5 +574,108 @@ describe("真实 spine 下的接线与物化", () => {
       "用户点名的凭据形态没进扫描隔离，就等于给用户开了一个绕过密钥面的口子",
     );
     assert.match(text, /凭据面文件/u, "被隔离的份数照报");
+  });
+});
+
+// ── 需确认档（`ask` 通道）：官方 `serviceAsk` 的每个出口都钉住 ────────────────────
+//
+// 这一组存在的理由（与上面几组同源）：`{ kind: "ask" }` 是**宿主的**决定形状，不是我们的。
+// 单元层只能证"我们交出了那个形状"，证不了"官方怎么读它、怎么物化它的结论"。所以这里
+// 用真 `ToolRuntime` 走到官方的 `prepareExecution` → `serviceAsk`，而**答案**从一枚替身
+// 审批服务来（官方那一侧只负责把答案映射成放行/拒绝——那是我们要钉的那一段）。
+//
+// 四条命题：
+//   ① 无审批面（headless / CI）⇒ **fail-closed**：拒绝，且用**我们**交的 reason 当理由；
+//   ② `allowed-once` ⇒ 真的放行并执行（审批不是"再拒一次"）；
+//   ③ `rejected` / `unavailable` ⇒ 拒绝，且**工具体没有被调用**（物理停止在 dispatch 之前）；
+//   ④ 请求带上了我们的 `reason` 与**逐语言**的 `displayReason`（弹窗那一面）。
+/** 官方四种结论里我们最常用的那一枚（收常量：sonarjs 的 no-duplicate-string 盯重复字面量）。 */
+const ALLOWED_ONCE: ApprovalOutcome = "allowed-once";
+
+/** 装一台带假审批服务的 spine。`outcome` 是官方四种结论之一。
+ *  提到模块层而不是放进 describe 体内：它不捕获任何外层变量，放在体内每轮重建（lint 的
+ *  consistent-function-scoping 正是盯这件事）。 */
+async function stageAsk(outcome?: ApprovalOutcome): Promise<{
+  spine: Spine;
+  agent: Agent;
+  requests: ApprovalRequestEvent[];
+}> {
+  const requests: ApprovalRequestEvent[] = [];
+  const spine = await bootSpine(
+    {},
+    outcome === undefined ? {} : { approval: { requests, outcome } },
+  );
+  stages.push(spine);
+  return { spine, agent: await createAgent(spine, spine.project.root), requests };
+}
+
+describe("需确认档（ask 通道）：官方 serviceAsk 的四个出口", () => {
+  /** 一条必然落在 `ask` 档的命令：引号不闭合 ⇒ 取不出体 ⇒ `nestedShellUnconfirmed`。 */
+  const ASK_COMMAND = 'bash -c "rm -rf /';
+  // `description` 是宿主那条 bash 夹具的必填参数（缺它会先被工具自己的参数校验拦下，
+  // 那样测到的就不是审批通道）——照既有用例的给法补齐。
+  const askExec = { description: "检查嵌套体", command: ASK_COMMAND } as const;
+
+  it("无审批面 ⇒ fail-closed：拒绝，理由用我们交的那句（不是静默放行）", async () => {
+    const { spine, agent } = await stageAsk();
+    const text = modelText(await dispatch(spine, agent, "ask-none", TOOL_BASH, askExec));
+    // 官方的降级臂给的是 `ask.reason ?? <它自己的兜底句>` —— 我们交了就一定是我们的那句。
+    assert.equal(text, `Error: ${MESSAGES.zh.nestedShellUnconfirmed}`);
+  });
+
+  it("allowed-once ⇒ 真的放行并执行（审批不是换一种方式的拒绝）", async () => {
+    const { spine, agent } = await stageAsk(ALLOWED_ONCE);
+    const result = await dispatch(spine, agent, "ask-ok", TOOL_BASH, askExec);
+    const text = modelText(result);
+    assert.equal(result.isError, false, `审批放行后不该是错误结果：${text}`);
+    assert.match(text, /ran .*rm -rf/u, "工具体确实被执行了");
+  });
+
+  it("rejected ⇒ 拒绝，且工具体没有被调用（物理停止在 dispatch 之前）", async () => {
+    const { spine, agent } = await stageAsk("rejected");
+    const result = await dispatch(spine, agent, "ask-no", TOOL_BASH, askExec);
+    assert.equal(result.isError, true);
+    // 文案归宿主（"the user rejected tool ..."）：这一句不是我们的，钉它是为了证
+    // "拒绝确实发生了"，而不是证措辞。
+    assert.match(modelText(result), /rejected/u);
+  });
+
+  it("unavailable ⇒ 拒绝并点明没有审批通道（headless 与'人说了不'要分得开）", async () => {
+    const { spine, agent } = await stageAsk("unavailable");
+    const text = modelText(await dispatch(spine, agent, "ask-unavail", TOOL_BASH, askExec));
+    assert.match(text, /no approval channel is available/u);
+    assert.doesNotMatch(text, /rejected/u, "两种拒绝的理由不同源，模型可分辨");
+  });
+
+  it("cancelled ⇒ 拒绝并点明审批被撤回（与'人说了不'是两回事）", async () => {
+    const { spine, agent } = await stageAsk("cancelled");
+    const text = modelText(await dispatch(spine, agent, "ask-cancel", TOOL_BASH, askExec));
+    assert.match(text, /was cancelled/u);
+  });
+
+  it("审批请求带上我们的 reason 与**逐语言**的 displayReason（弹窗那一面）", async () => {
+    const { spine, agent, requests } = await stageAsk(ALLOWED_ONCE);
+    await dispatch(spine, agent, "ask-payload", TOOL_BASH, askExec);
+    assert.equal(requests.length, 1, "一次 ask 恰好问一次");
+    const req = requests.at(0);
+    assert.ok(req !== undefined, "请求已记下");
+    assert.equal(req.toolName, TOOL_BASH);
+    assert.equal(req.reason, MESSAGES.zh.nestedShellUnconfirmed, "reason 用当次语言（默认中文）");
+    // 逐语言的展示文案：写死 `{zh, en}` 会让宿主新增的语言静默取不到（见 displayReasonOf 注释）。
+    assert.deepEqual(req.displayReason, {
+      en: MESSAGES.en.nestedShellUnconfirmed,
+      zh: MESSAGES.zh.nestedShellUnconfirmed,
+    });
+  });
+
+  it("deny 档的命令**不问审批**（同一张 RULE_TIER：两档互斥，不可能双重收口）", async () => {
+    const { spine, agent, requests } = await stageAsk(ALLOWED_ONCE);
+    const result = await dispatch(spine, agent, "ask-not", TOOL_BASH, {
+      description: "清理",
+      command: "rm -rf /",
+    });
+    assert.equal(result.isError, true, "deny 档照旧硬拒");
+    assert.match(modelText(result), /danger-guard/u);
+    assert.equal(requests.length, 0, "deny 档不该弹审批（弹了就是把它也交给用户批准）");
   });
 });

@@ -31,6 +31,10 @@ import {
 } from "../lib/fact-gate.ts";
 // 名单默认值与 host 的取证判据、指令文案兜底同源（lib/ref-search-policy.ts），卡片只是回退显示它。
 import { DEFAULT_REF_SEARCH_TOOLS } from "../lib/ref-search-policy.ts";
+import { createStatsReader, topLines } from "./stats-reader.ts";
+import type { RemoteFace, StatsLine } from "./stats-reader.ts";
+// 形状从**叶子**模块取（见 src/stats-reader.ts 的说明：judge-stats 带 node:os/node:path）。
+import type { StatsSnapshot } from "../lib/stats-shape.ts";
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate } from "./ui-messages.ts";
 
@@ -93,6 +97,7 @@ const CARD_CSS = [
   ".dgc-numinput{width:64px;box-sizing:border-box;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:1px solid var(--dsw-alias-border-l2,transparent);border-radius:8px;padding:6px 8px;margin-top:4px;text-align:center}",
   ".dgc-textarea{width:100%;box-sizing:border-box;font:inherit;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:1px solid var(--dsw-alias-border-l2,transparent);border-radius:8px;padding:6px 8px;margin-top:4px;resize:vertical;font-family:ui-monospace,SFMono-Regular,monospace}",
   // 保存条（改动先暂存，点「保存」才写入生效；「撤销」丢弃本地改动）
+  ".dgc-stats{border-top:1px dashed var(--dsw-alias-border-l2);margin-top:6px;padding-top:4px}",
   ".dgc-savebar{display:flex;gap:8px;align-items:center;padding:10px 0 2px;border-top:1px dashed var(--dsw-alias-border-l2);margin-top:6px;flex-wrap:wrap}",
   ".dgc-btn{appearance:none;font:inherit;font-size:12px;cursor:pointer;border-radius:6px;padding:4px 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1,transparent);color:var(--dsw-alias-label-primary,inherit)}",
   ".dgc-btn:hover:not(:disabled){border-color:var(--dsw-alias-label-dimmed)}",
@@ -102,6 +107,9 @@ const CARD_CSS = [
   ".dgc-dirty{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f99)}",
   ".dgc-saveerr{font-size:12px;color:#c4483f}",
 ].join("\n");
+
+/** 错误色那一格：保存失败与统计读取失败共用（`sonarjs/no-duplicate-string` 盯着重复字面量）。 */
+const ERROR_CLASS = "dgc-saveerr";
 
 /** SVG path 的 path-data 属性键（`d` 单字符过短被 id-length 拦截，用常量间接触达）。 */
 const SVG_PATH_KEY = "d";
@@ -354,7 +362,7 @@ function SaveBar(props: SaveBarProps): ReactNode {
   const { t } = props;
   const dis = !props.writable || props.busy;
   const statusText = props.error ?? dirtyText(t, props.writable, props.dirty);
-  const statusClass = props.error === null ? "dgc-dirty" : "dgc-saveerr";
+  const statusClass = props.error === null ? "dgc-dirty" : ERROR_CLASS;
   return createElement(
     "div",
     { className: "dgc-savebar" },
@@ -387,6 +395,8 @@ function SaveBar(props: SaveBarProps): ReactNode {
 interface DgCardProps {
   /** 取文案（官方 ctx.locale.bind 的结果，见 apply）。 */
   t: Translate;
+  /** 读一次宿主侧判定统计；`undefined` = 这个部署没装 Remote 面（那一段显示"读不到"）。 */
+  readStats?: () => Promise<StatsSnapshot>;
   useCard: <Out>(selector: (snap: CardSnapshot) => Out) => Out;
   set: (field: string, value: unknown) => Promise<void>;
   unset: (field: string) => Promise<void>;
@@ -618,6 +628,142 @@ function vocabRows(rc: RowCtx): ReactNode[] {
   ];
 }
 
+/** 一条读数的形状：`面名 12 · 键名 3`（各行的取值都过这里）。 */
+const statsSummary = (lines: readonly StatsLine[]): string =>
+  lines.map((line) => `${line.label} ${line.count}`).join(" · ");
+
+/** 一行读数（读数块里的每一行都是它；`key` 只为 React 列表稳定，不参与渲染）。 */
+const statLine = (key: string, text: string): ReactNode =>
+  createElement("div", { className: "dgc-hint", key }, text);
+
+/** 有快照时的各行。拆出来是为了**分开两件复杂度**：组件那层只管状态与生命周期，
+ *  而"哪一格要不要显示"是纯展示判断（合在一起会顶爆 cognitive-complexity）。 */
+function statsValueLines(t: Translate, snap: StatsSnapshot): ReactNode[] {
+  const lines: ReactNode[] = [];
+  const calls = topLines(snap.calls, 6);
+  const hits = topLines(snap.hits, 6);
+  const asks = topLines(snap.asks, 6);
+  const slow = topLines(snap.slow, 6);
+  // 每一格都先把文案落成变量再 push：本仓 lint 的 `max-nested-calls` 上限是 3，
+  // 而 `push(statLine(…, t(…, { … })))` 那一串正好是第四层。
+  if (calls.length > 0) {
+    const callsText = t("statsCalls", { summary: statsSummary(calls) });
+    lines.push(statLine("calls", callsText));
+  }
+  if (hits.length > 0) {
+    const hitsText = t("statsHits", { summary: statsSummary(hits) });
+    lines.push(statLine("hits", hitsText));
+  }
+  if (asks.length > 0) {
+    const asksText = t("statsAsks", { summary: statsSummary(asks) });
+    lines.push(statLine("asks", asksText));
+  }
+  if (slow.length > 0) {
+    const slowText = t("statsSlow", { ms: String(snap.slowMs), summary: statsSummary(slow) });
+    lines.push(statLine("slow", slowText));
+  }
+  if (snap.quotaReleases > 0) {
+    // 配额放行是"有目标一直凑不齐证据"的信号，比任何命中数都更该被看见 → 用告警色。
+    const quotaText = t("statsQuota", { count: String(snap.quotaReleases) });
+    lines.push(createElement("div", { className: ERROR_CLASS, key: "quota" }, quotaText));
+  }
+  return lines;
+}
+
+/** 读数块的四种"非正常"面 + 正常面（纯函数：组件只负责把它的结果摆出来）。 */
+function statsLinesOf(
+  t: Translate,
+  read: unknown,
+  failed: string | null,
+  snap: StatsSnapshot | null,
+): ReactNode[] {
+  if (read === undefined) {
+    return [statLine("unavailable", t("statsUnavailable"))];
+  }
+  // 读取失败照实说（含错误码），不假装"还没有判定" —— 那会把一次读取故障说成一条结论。
+  if (failed !== null) {
+    return [createElement("div", { className: ERROR_CLASS, key: "failed" }, failed)];
+  }
+  if (snap === null) {
+    return [statLine("loading", t("statsLoading"))];
+  }
+  const values = statsValueLines(t, snap);
+  return values.length === 0 ? [statLine("empty", t("statsEmpty"))] : values;
+}
+
+/**
+ * 判定统计读数块：打开卡片时拉一次，另有手动刷新。
+ *
+ * **不订阅、不轮询**（见 `src/stats-reader.ts` 的读取策略）：判定统计的变化只发生在 agent
+ * 干活时，而那时用户多半不在看设置页；少一层订阅就少一类竞态与"上一个宿主的旧值"。
+ * 刷新用 tick 驱动同一个 effect：一条读取路径，不写两遍。
+ */
+function StatsBlock(props: {
+  t: Translate;
+  read: (() => Promise<StatsSnapshot>) | undefined;
+}): ReactNode {
+  const { t, read } = props;
+  const [snap, setSnap] = useState<StatsSnapshot | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    // 用 async + try/catch 而不是 then 链：本仓 lint 禁 then（`prefer-await-to-then`）与
+    // promise 里的回调（`no-callback-in-promise`），而 `live` 那个"卸载后不再写状态"
+    // 的护栏在 await 之后重判一次即可。
+    let live = true;
+    const load = async (): Promise<void> => {
+      if (read === undefined) {
+        return;
+      }
+      setBusy(true);
+      try {
+        const next = await read();
+        if (live) {
+          setSnap(next);
+          setFailed(null);
+        }
+      } catch (error: unknown) {
+        if (live) {
+          setFailed(String(error instanceof Error ? error.message : error));
+        }
+      } finally {
+        if (live) {
+          setBusy(false);
+        }
+      }
+    };
+    void load();
+    return () => {
+      live = false;
+    };
+  }, [read, tick]);
+  const refresh = createElement(
+    "button",
+    {
+      type: "button",
+      className: "dgc-btn",
+      disabled: read === undefined || busy,
+      onClick: () => {
+        setTick((current) => current + 1);
+      },
+    },
+    t("statsRefresh"),
+  );
+  const head = createElement(
+    "div",
+    { className: "dgc-row" },
+    createElement("div", { className: "dgc-label" }, t("statsTitle")),
+    refresh,
+  );
+  return createElement(
+    "div",
+    { className: "dgc-stats" },
+    head,
+    ...statsLinesOf(t, read, failed, snap),
+  );
+}
+
 function DgCard(props: DgCardProps): ReactNode {
   const { t } = props;
   const [open, setOpen] = useState(false);
@@ -673,6 +819,7 @@ function DgCard(props: DgCardProps): ReactNode {
     { className: "dgc-body" },
     ...gateRows(rc),
     ...vocabRows(rc),
+    createElement(StatsBlock, { t, read: props.readStats }),
     createElement(SaveBar, {
       t,
       dirty,
@@ -764,6 +911,10 @@ export interface ClientCtx {
     register: (ns: typeof NS, dicts: LocaleCatalog) => () => void;
     bind: (ns: typeof NS) => Translate;
   };
+  /** 官方 Typert Remote 的客户端面。**可选**：没装它的部署读不到宿主侧统计，
+   *  卡片照常渲染（那一段显示"读不到"）。与 host 侧可选读面同一条纪律 ——
+   *  一枚读数面的缺席绝不能让整张卡挂不上。 */
+  remote?: RemoteFace;
 }
 
 function cardStore(form: EntryForm): {
@@ -824,6 +975,7 @@ function apply(ctx: ClientCtx): void {
   // 故注册项数与回收范围都不变，只是由一枚效应承载（旧写法要自己拼两个 disposer）。
   ctx.effect(() => ctx.locale.register(NS, UI_MESSAGES), "danger-guard-card: locale dictionaries");
   const t = ctx.locale.bind(NS);
+  const readStats = ctx.remote === undefined ? undefined : createStatsReader(ctx.remote);
   ctx.slots.inject("plugins.bundle.config", () => {
     const unregister = ctx.slots.register(
       {
@@ -838,6 +990,9 @@ function apply(ctx: ClientCtx): void {
         inject: () => ({
           t,
           hooks: { card: store },
+          // 读数器在 apply 期造一次（`$mount` 幂等，见 stats-reader）；宿主没装 Remote 面时
+          // 交 undefined，卡片那一段显示"读不到"而不是让整张卡挂不上。
+          ...(readStats === undefined ? {} : { readStats }),
           // 0.1.7 的 set/unset 回 `Promise<boolean>`（受理位）。这里**刻意不消费**它：卡片的
           // 保存条沿用 0.1.6 的 `Promise<void>` 形状，失败面仍只认 rejection（传输失败），
           // 由 save() 的 try/catch 呈现为可见错误。改用受理位要新增判定与文案键，那是改

@@ -68,6 +68,26 @@ export interface UiMessages {
   readonly secretHint: string;
   /** 密钥模式 textarea 的占位（正则示例 + 每行一条的说明）。 */
   readonly secretPlaceholder: string;
+  /** 判定统计块的标题（说明它是宿主进程内存）。 */
+  readonly statsTitle: string;
+  /** 刷新按钮。 */
+  readonly statsRefresh: string;
+  /** 读取中。 */
+  readonly statsLoading: string;
+  /** 宿主侧统计读面不在时的那句（不装 Remote 的部署会看到它）。 */
+  readonly statsUnavailable: string;
+  /** 还没有判定发生过。 */
+  readonly statsEmpty: string;
+  /** 判定次数（槽位 summary）。 */
+  readonly statsCalls: string;
+  /** 直接拒的命中分布（槽位 summary）。 */
+  readonly statsHits: string;
+  /** 需确认的命中分布（槽位 summary）。 */
+  readonly statsAsks: string;
+  /** 配额放行次数（槽位 count）——防死锁出口被用到了，这一格最该被看见。 */
+  readonly statsQuota: string;
+  /** 慢判定分布（槽位 ms/summary）。 */
+  readonly statsSlow: string;
 }
 
 /**
@@ -172,6 +192,17 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     secretLabel: "额外密钥路径模式",
     secretHint:
       "追加到内置正则（.ssh/私钥/证书/…）。每行一条正则片段（可含逗号，按行分隔不会被切碎）。加载期逐条编译：编不过或超长的会点名告警『本条未生效』，不静默放行",
+    statsTitle: "判定统计（宿主进程内存，宿主重启即清零）",
+    statsRefresh: "刷新",
+    statsLoading: "读取中…",
+    statsUnavailable: "读不到宿主侧统计（当前部署没装远程读面）——阈值与窗口见左上的设置行。",
+    statsEmpty: "还没有判定发生过。",
+    statsCalls: "判定次数：{summary}",
+    statsHits: "拦截命中（直接拒）：{summary}",
+    statsAsks: "需确认（问过用户）：{summary}",
+    statsQuota:
+      "⚠ 配额放行 {count} 次：连续未收敛拒绝达上限后的出口，用到它说明有目标一直凑不齐证据。",
+    statsSlow: "慢判定（≥{ms}ms）：{summary}",
     secretPlaceholder: "/id_dsa$|\\.p12$/i（每行一条，可含逗号）",
   },
   en: {
@@ -228,6 +259,18 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     secretLabel: "Extra secret path patterns",
     secretHint:
       "Appended to the built-in regex (.ssh / private keys / certificates / ...). One regex fragment per line - commas survive because lines are the separator. Each pattern is compiled at load time; one that fails to compile or is over-long is named in a warning as not in effect, never silently allowed through",
+    statsTitle: "Judgement stats (host-process memory; cleared when the host restarts)",
+    statsRefresh: "Refresh",
+    statsLoading: "Loading…",
+    statsUnavailable:
+      "Host-side stats are unreachable (this deployment composes no Remote read face) — thresholds and windows live in the settings rows above.",
+    statsEmpty: "No judgement has happened yet.",
+    statsCalls: "Judgements: {summary}",
+    statsHits: "Blocked (hard refusal): {summary}",
+    statsAsks: "Needs confirmation (asked the user): {summary}",
+    statsQuota:
+      "⚠ {count} quota release(s): the exit after consecutive unconverged refusals — using it means some target never gathered its evidence.",
+    statsSlow: "Slow judgements (≥{ms}ms): {summary}",
     secretPlaceholder: "/id_dsa$|\\.p12$/i (one per line, commas allowed)",
   },
 };

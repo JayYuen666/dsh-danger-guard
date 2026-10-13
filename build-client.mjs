@@ -45,6 +45,10 @@ export async function buildClient() {
   });
   const { output } = await bundle.generate({
     format: "cjs",
+    // 见 build-host.mjs 里的同一处：装载器只 `import()` 文本，注释字节是真实装载成本。
+    // 实测客户端 38.7→23.1 KB。`//#region` 在 minify 下不再出现，故下面那次折算同样是空操作。
+    minify: true,
+    comments: false,
   });
   const chunk = output.find((item) => item.type === "chunk");
   if (chunk === undefined) {

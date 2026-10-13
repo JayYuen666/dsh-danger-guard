@@ -2,6 +2,182 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.3
+
+判定面与**宿主官方保护面**对齐，并给拒绝理由补上"照做得到"的出路。判据表新增两族
+（git 破坏族 7 枚、基础设施族 5 枚），并新增一条**需确认**通道接宿主的审批面。
+
+### Added
+
+- **需确认档（`ask`）：规则键的第二档处置，接宿主原生审批。** 此前本包只有"硬拒"与"放行"
+  两档，而 `nestedShellUnconfirmed` 那条虽写着"请贴给用户确认"，机制上只是把一段话丢回给
+  模型 —— **模型可以无视它直接重试**。现在有一条真正的审批通道：
+  - 归属面是**一张表** `RULE_TIER: Record<BashDenialKey, "deny" | "ask">`（`lib/danger-rules.ts`）。
+    两条性质由它**结构性**保证：**加了规则键却忘定档 = 编译错误**（`Record` 的完整性），
+    **一枚键同时属于两档不可能**（同一格塞不进两个值）。
+  - 这条分工是硬需求，不是风格：`tools.guard` 是**同步**谓词而 `ApprovalService.request()`
+    返回 Promise，所以需确认这一档只能落在 `tools/pre-execute` 瀑布上；而宿主在审批放行之后
+    **还会再跑一次 guard**（installed dsh-tools `lib/index.js:3239`），于是"两处都认领同一枚键"
+    的表现就是**用户点了"允许"之后还是被拒**。
+  - 交出去的是官方的 `{ kind: "ask", reason, displayReason }`（`dsh-tools/lib/types/index.d.ts:454`），
+    宿主 `serviceAsk` 负责策略判定、审计落日志、UI 路由与 fail-closed。**零新依赖**。
+  - `displayReason` 逐 `Locale` 取（`lib/messages.ts` 的 `displayReasonOf`），不写死 `{zh, en}` ——
+    `MessagesCatalog` 的类型注释明写"宿主哪天加一门语言这两处必须一起响"。
+  - `nestedShellUnconfirmed` 随之翻到 `ask` 档（行为变更，见下）。
+  - 集成层用真 `ToolRuntime` 走官方 `serviceAsk` 的**四个出口**各钉一条：
+    `allowed-once` 放行并真的执行 / `rejected` 拒 / `unavailable` 拒并点明无审批通道 /
+    `cancelled` 拒；另有"无审批面 ⇒ fail-closed 且理由用我们交的那句"与"`deny` 档不问审批"。
+- **严重度择优：`deny` 压过 `ask`。** 引入 `ask` 档带出一个漏拦：`commandDanger` 原本
+  "首命中即返回"，而一枚 `ask` 档命中会让扫描**提前收工** —— `python3 -c "…" && rm -rf /`
+  里第二段**从未被判定**，用户点了"允许"之后灾难照常执行。现在逐段扫到拿到 `deny` 为止
+  （`preferSevere` / `settled`），`segmentDenial` 命中 `ask` 后**仍下钻**。
+- **拒绝理由自带出路（`Fix`）。** 此前给模型的是**判断**（"请移除该旗标"），不是**动作**。
+  现在 `BashVerdict` 带一枚结构化的 `fix`：git 绕过点名越界的那几枚旗标（短簇点名整枚簇，
+  因为簇里别的字母是真旗标）、灾难 rm 点名真正成灾的目标（**排除安全目标** —— 一条
+  `rm -rf ./build ~` 里该动的是 `~`）。形状住在零依赖叶子模块 `lib/fix.ts`：放 `danger-rules`
+  里会让 `lib/messages.ts` 为拿类型把它（带 `node:os`/`node:path`）拖进**客户端类型程序**（实测 TS2591）。
+  `bashDanger` 随之退化成一行键投影，**428 处既有断言零改动**。
+- **git 破坏族（7 枚规则键，全部 `ask`）**：`gitResetHard` / `gitCheckoutDiscard` /
+  `gitRestoreDiscard` / `gitCleanForce` / `gitStashDrop` / `gitBranchDelete` / `gitForcePush`。
+  此前本包拦 `git commit --no-verify`（一次提交跳过钩子）却放行 `git reset --hard`
+  （可能丢掉三天的工作）——威胁模型不自洽。判据与 `gitBypass` **共用同一趟走查**
+  （`gitFacts` 扩展三枚面：长旗标原词 / 短簇字母 / 位置参数 + `--` 分界），按子命令查表
+  （`GIT_DESTRUCTIVE`）而不是长 `if` 链：链上加满七条会把复杂度推到 25，而上限是 20。
+  每条文案都写明**该先跑什么**（`git stash push -u` / `git clean -nd` / `git branch --merged` /
+  `--force-with-lease`）。已知边界逐条钉了现状用例：裸 `git checkout <path>` 不判
+  （与切分支词法上不可分）、`checkout -B` 不判、push 目标分支不解析、`rebase --abort` 未收。
+- **基础设施破坏族（5 枚规则键，全部 `ask`）**：`tfDestroy` / `tfAutoApprove` / `dockerPrune` /
+  `kubectlDelete` / `dbMigrate`。最后一枚来自 dsh 官方自带的示例 mod `Blast Radius`
+  （`packages/experimental/claude-code-mods/examples/blast-radius/`）的风险表 —— 数据库迁移是
+  **命令形状**，不需要 SQL 词法（所以"SQL 不做"那条拦不住它，但它也不属于那一类）。
+  判据里三处刻意不判：`terraform plan -destroy`（plan 只打印）、`kubectl delete --dry-run`
+  （官方教的预演写法）、只读动作与干跑旗标（`prisma migrate status` / `flyway info` /
+  `manage.py migrate --plan`）。迁移族另有一层**命令位置**判据：命令词之前的每一枚词都得是
+  启动器（`python`/`npx`/`bundle exec`…），于是 `grep manage.py migrate docs/` 这种
+  "在文档里搜这串"不会假命中。
+- **爆炸半径预演（`ask` 档专属）。** 此前 `ask` 是**盲问**：用户只看到"这条命令会丢弃未提交
+  改动"，看不到**具体丢什么**。现在 `ask` 档命中时会跑一趟**只读预演**（`BLAST_COMMANDS` 表：
+  `git status --porcelain` / `git clean -nd` / `git stash list` / `git branch -vv` / `git log`），
+  把清单接进审批请求的 `reason` 与 **`displayReason` 的每一门语言**（只接 `reason` 的话弹窗
+  看不到证据，这次改动就白做了）。**空输出是结论**（"此刻不会改动任何东西"），不是"没查到"。
+  四条边界见 `lib/blast-radius.ts` 的文件头。
+
+- **判定统计读数进设置卡（官方 Typert Remote）。** 卡片此前只有输入控件，看不到"拦了什么、慢在哪"。
+  现在宿主侧挂一枚读数服务（`lib/stats-remote.ts`，`@Remote("stats")`），卡片打开时（另有「刷新」）
+  拉一次并渲染：各面判定次数、`deny`/`ask` 两档的规则键命中、事实门配额放行次数（告警色）与慢判定。
+  - **只走官方通道**：设置面没有"宿主计算值"的口子（`ctx.settings` 只有 configure/describe/update/
+    replace/mutate），所以唯一的合法路径就是 Remote —— 官方 `permission-presets` 正是这么把进程级
+    目录交给客户端 UI 的。
+  - **手写 descriptor，不跑生成器**：`TypertCodec` 的 `{ mode: "src-json" }` 变体不需要 `typeSymbol`
+    也不需要 `create()`，而无参一元 JSON 结果正是它覆盖的形状。两侧一致性由门禁钉住：
+    `test/stats-remote.test.ts` 用官方 `remoteMethods()` 读宿主标记，再与客户端 descriptor 逐字段对质。
+  - **装饰器预转换**（`decorator-transform.mjs`）：官方 `Remote` 只能用**标准装饰器（TC39）**声明，
+    而本仓两条管线的解析器都不降级它 —— 实测 rolldown 会把 `@Remote("stats")` **原样吐进产物**
+    （非法 JS，插件在宿主里直接加载失败）而构建报成功。进程内也没有替代入口（本仓 TS 7 的 JS 面上
+    只有 `version`），故这一步跑一次 `tsc`（`--noResolve`：只编这一个文件、说明符逐字保留）。
+  - **读法是按需拉取、不订阅**：判定统计只在 agent 干活时变，跨宿主重连缓存旧值正是要避开的失效。
+    当前部署没装 Remote 面时那一段显示「读不到」，卡片照常（可选读面，拦截面绝不为它下线）。
+  - 新增一条产物级门禁：`test/artifact-loads.test.ts` —— 产物**真的能被 Node 加载**（本轮踩过的
+    失效模式正是"产物非法 JS 而构建报成功"，逐字节比对新旧与体积预算两条都抓不住它）。
+
+### Fixed
+
+- **大仓里预检等于没做（refs 凭证永远给不出）—— 遍历改成分层的。** 原先从 `root` 做**一趟纯
+  广度优先**：大仓里预算恰好在最有用的文件**之前**耗尽（先把 `apps/a`、`apps/b`… 全走一遍，
+  才轮到目标那个深目录与它同级的 `test/` 层），于是 `complete` 永远为 false、凭证永远给不出。
+  现在层级**自下而上**（目标所在目录 → … → 项目根）、层内**广度优先**（同层文件先读完再下钻
+  —— 这条是实测踩出来的：纯深度优先下，一个装几百个文件的子目录会把同层的引用者挤掉，
+  连既有夹具的 `hits.ts` 都读不到）。已走过的目录进 `visited`，下层那棵树不会在上层重走。
+  凭证判据同步修正为 `遍历未被截断` **或** `找到了引用`（`refsCreditable`）：门禁认可模型自己
+  那次**作用域正确**的检索当凭证，而那次检索也不是穷尽的 —— 要求我们这趟扫描穷尽比那还严。
+  而"**零命中 + 被截断**"仍然不给凭证：假阴性全住在那一种里。
+- **`ancestorLevelsOf` 的两处边界 bug**（新写的函数，测试当场抓出两个）：`root === "/"` 时
+  往上一级会走到空串而循环退出，于是**丢掉 root 自己** —— `/` 下的文件与其余兄弟目录永远不会
+  被走；同一族的 `\`${root}/\`` 对 `root = "/"` 会拼出 `"//"` 而 `startsWith` 恒假
+  （与 `lib/sandbox-scope.ts` 那条同源，两处都做了尾斜杠归一）。
+- **新增 `test/preflight-scan.test.ts`**（10 条）：`lib/preflight-scan.ts` 一直是导出的，
+  却只经 host 接线被测，于是若干内部出口在集成层根本走不到 —— 最典型的一条：**一层只有一个
+  文件时，"逐项查取消"的第二次永远不会发生**，那处守卫成了死代码而覆盖率门只是把它算进去。
+  顺带发现 `test/fixtures/local-fs-face.ts` 的 `abortAfterLstat` 选项**从未被任何用例用过**
+  （一枚死夹具），现在有了；`ancestorLevelsOf` 因此导出**只为可测**（照 host 的 `noteJudgeCost`
+  先例，写明理由）：它的两条边界只有"目标直接在 `/` 下"与"目标不在 root 之下"才走到。
+
+### Changed
+
+- **`nestedShellUnconfirmed` 从硬拒改为 `ask`。** 它的文案本来就写着"把它贴给用户、由用户显式
+  确认后再执行"，而旧机制只是把一段话丢回给模型 —— 模型完全可以无视。改档后变成宿主审批，
+  模型绕不过去；**无 approval channel 的部署（headless / CI）下由宿主 fail-closed 退化为硬拒**，
+  与改档前的可观测行为一致（都是"这次调用不执行"）。
+- **`devServer` 在 `run_in_background === true` 时让路，且拒绝文案点名它。** dsh 的 `bash`
+  有 `run_in_background`（schema 原话"return a job id immediately… **No timeout applies**"）
+  与整套作业工具（`job_output`/`job_list`/`job_kill`），长驻命令**不再会挂死会话** ——
+  我们拦它的理由已不成立，而且把宿主的正确写法一起拦了。
+  ⚠ **已知重叠**：宿主基础组合包默认启用 `guard/timeout-policy`（为每次工具调用施加协作式
+  时间上限并返回清晰错误），且 `tool-bash` 的 `promoteOnTimeout` 默认把超时的前台命令**提升成
+  后台作业**。所以 `devServer` 现在只剩"省一轮等待 + 告诉模型正确写法"的 UX 价值，不再是安全属性。
+- **`rmrf` 在宿主沙箱确实管得住时让路。** dsh 自带进程级沙箱，它的拒绝会附带**官方认可的升级
+  路径**：`[sandbox: escalation available — retry this exact command once with
+  sandbox_permissions + justification; the approval prompt asks the user]`。我们的硬拒跑在
+  bash 工具之前，把那条路整个掐死了。现在读宿主的能力面（`ctx.shell.sandboxMode` 是执行器的
+  自报、`ctx.sandboxPolicy.resolve()` 同步交出生效 mode，源码注释原话"Enforcing filesystem,
+  one-shot bash, and terminal backends read the **SAME** resolved policy here"）决定是否让路。
+  **判据被刻意收紧**：不是直觉上的"目标在可写根之外"，而是**"目标包不住任何可写根"** ——
+  `workspace-write` 的语义是*允许*改工作区内的文件，于是 `rm -rf ~`（工作区在 `~` 下）会
+  **先删光工作区内容**、再在边界外被拒；沙箱是路径白名单，**不提供原子性**。所以
+  `~`/`/`/`.`/`..` 一律不让路，只有 `rm -rf /etc/foo`、`rm -rf ~/Downloads` 这类才让。
+  `danger-full-access`（含 `auto` 档）/ 无沙箱装配 / 读不到能力面 → 保持硬拒（那时我们是唯一兜底）。
+  ⚠ **`auto` 档仍然必要**：它的旋钮组合是 `danger-full-access` + `ask` + 逐调用 reviewer，
+  而 reviewer 的 allow **不等于用户批准**，沙箱此时完全不拦。
+- **`secretPath` 保持一律拦**，不跟着让路：`dsh-fs-sandbox` 与 `dsh-fs-local` 是**互斥装配**，
+  "装的是哪个"没有可读的口子 —— 按本仓纪律**不猜**。而且代价不对称：误拦只是让用户去终端改，
+  漏拦是凭据外泄且难以发现。
+- `devDependencies` 新增 `@deepseek-ai/dsh-shell` 与 `@deepseek-ai/dsh-sandbox-policy`
+  （workspace `overrides` 里已有的 `0.2.1-alpha.2`；**type-only 使用**，产物里零新说明符）。
+- **结构：三处单源搬迁**（`host.ts` 一路顶在 `eslint/max-lines` 的 2000 行预算上）：
+  - `lib/judge-stats.ts` —— 判定成本统计（只依赖 `console`）。它同时是**设置卡要展示的那份
+    数据**（`noteJudgeCost` 由 host 转发一枚，对外声明面逐字不变）。
+  - `lib/confirm.ts` —— `ask` 通道的决定构造（宿主无关，可脱离宿主单测）。
+  - `lib/sandbox-scope.ts` —— 沙箱管辖面的读与包含性判据；`realpathOf` 由宿主**注入**
+    （lib 不 import `node:fs`，那是本仓纪律）。
+  - `lib/settings-read.ts` —— `strArray`（设置值面的防御性收窄）与 `bashOptsOf`
+    （guard 与需确认档**共用**的那份词表装配）。
+  - `lib/blast-radius.ts` —— 预演常量表与渲染。
+  - 另把 `resolvedFormsOf` 搬进 `lib/target-paths.ts`（那本来就是那个模块的名字）。
+- `test/dist-size.test.ts` 的 host.js 预算按实测上浮 ~4% 调整（两轮共 +17.6 KB）。
+
+- **产物开 `minify: true` + `comments: false`。** 装载器只 `await import()` 文本（`vendor/include/src/
+  index.ts:222`），注释与空白此前占掉一半以上，而没有人会去读装载器吃的文件。实测 host 309,394→86,727 B
+  （−72%）、settings 7,293→2,881 B、client 38,782→23,436 B；`types/` 的声明**不**压缩：那是发布面给
+  编辑器读的 API 文档（JSDoc 就是它的正文）。
+- **更正一条写在 `test/dist-size.test.ts` 里的错误结论**：此前记的是"压缩后跨包说明符双双消失，
+  于是两道外部化门禁会变成恒绿"。实测否证 —— 那是 `from"x"` 与 `from "x"` 的**空白差异**，
+  说明符一直在。真正会被 minify 打瞎的是**带标识符的文本判据**（内联体被 mangle，实测故意不外部化
+  `dsh-brand` 时产物里 `brandNumber` 一次都查不到），所以 `test/build-host.test.ts` 的内联判据改成
+  **结构性**的：看 chunk 的 `moduleIds` 里有没有依赖表的包（负向对照实测会红）。客户端的同类判据
+  （`test/build-client.test.ts`）改成按**属性名与字面量**判（引号容忍三种形态）。
+- 三条体积预算按新实测重定：host 92,000 / settings 3,050 / client 24,500 字节。
+### Fixed
+
+- **`isAncestorDirOf` 对根目录的判定是个安全 bug**：它用 `"${candidate}/"` 拼前缀，`candidate = "/"`
+  时得到 `"//"`，`startsWith` 恒假 —— 于是 `rm -rf /` 会被新加的沙箱让路判据判成"包不住可写根"
+  而**放行一次全盘删除**。修法与用例在某单测里各钉一处（该用例专测这一支）。
+- **`preflightSignalOf` 不容缺席的调用方信号**：官方 `ToolExecution` 把它标为必填，而该函数
+  抛在 `confirmFactory` 里、**不在任何 try 之内** —— "宿主送来一枚没带 signal 的执行面"会被
+  变成"整次工具调用成异常"。一句可选的测量读数不该有那个权力，现在缺席只留墙钟。
+- **`clipBlast` 的"被收紧"判据拿原文 `trim()` 比**：porcelain 输出的**前导空格是有意义的**
+  （` M a.ts` = 工作区已改），trim 之后比会把"只是行首有空格"判成被截断，于是给用户添一句假话。
+  改成按"我们真的丢没丢东西"算。
+- 两处新增的**死分支**按本仓纪律消掉而不是补用例：`word.split("=")[0] ?? word` 的 `??`
+  （`split` 必返回至少一个元素）与 `bashJudgeOf` 里永远取不到的方言回落项。
+
+### Tests
+
+`npm test` 741 条、四项覆盖率仍为 100%。新增三份专测：
+`test/sandbox-scope.test.ts`（19 条：让路判据本体 + 三处形态归一 + 规范化/软链）、
+`test/blast-radius.test.ts`（20 条：常量表、上限收紧、渲染、以及"任何失败都退回盲问"的五种形状）、
+以及 `test/host-contract.test.ts` / `test/host.test.ts` / `test/danger-rules.test.ts` 里的
+ask 通道、沙箱读法、两族新规则的用例。
+
 ## 0.1.2
 
 ### Added

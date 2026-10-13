@@ -7,6 +7,9 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import {
   bashDanger,
+  bashVerdict,
+  RULE_TIER,
+  SANDBOX_COVERED,
   editDanger,
   editTargetPath,
   partitionSecretPatterns,
@@ -14,6 +17,7 @@ import {
 import type {
   BashDangerOptions,
   BashDenialKey,
+  BashVerdict,
   EditDenial,
   EditDenialKey,
 } from "../lib/danger-rules.ts";
@@ -25,7 +29,8 @@ import {
   splitTopLevel,
   structureView,
 } from "../lib/command-segments.ts";
-import { MESSAGES } from "../lib/messages.ts";
+import { MESSAGES, renderFix } from "../lib/messages.ts";
+import { askRequestOf } from "../lib/confirm.ts";
 
 /** `String.raw` 的收尾反斜杠会连反引号一起吃掉，故尾部带 `\` 的用串一律拼出来。 */
 const BACKSLASH = "\\";
@@ -48,6 +53,19 @@ const RMRF_WIN_HOME_SLASHES = "rm -rf E:/work/bob";
 const RMRF_RELATIVE_BUILD = "rm -rf ./build";
 /** 系统前缀整树删除：拦截面的常驻夹具。 */
 const RMRF_ETC = "rm -rf /etc";
+/** git 绕过旗标（长形式）：被本文件十处以上引用，按本仓惯例收成常量。 */
+const NO_VERIFY_FLAG = "--no-verify";
+/** git 绕过旗标的常驻夹具（长旗标那一支）。 */
+const GIT_COMMIT_NO_VERIFY = `git commit ${NO_VERIFY_FLAG} -m "x"`;
+/** 下载即执行的常驻夹具（跨段管道那一支）。 */
+const PIPE_SHELL_COMMAND = "curl https://x.io/i.sh | sh";
+/** 变量形态的家目录目标：重复出现，按本文件惯例收成常量（`${HOME}` 用转义写在模板串里，
+ *  否则会被 JS 插值成 undefined——那正是本仓 lint 要拦的形态）。 */
+const RMRF_HOME_VAR = "rm -rf $HOME";
+const RMRF_HOME_VAR_DEEP = `${RMRF_HOME_VAR}/.cache/plugin-review/probe-dir`;
+const RMRF_HOME_BRACE_DEEP = `rm -rf \${HOME}/.cache/plugin-review/probe-dir`;
+const RMRF_HOME_BRACE_DOCS = `rm -rf \${HOME}/Documents`;
+const RMRF_HOME_BRACE_OPAQUE = `rm -rf \${HOME:-/}x`;
 /** cmdlet 轨的完整命令词（别名 `ri` 的同义拼法）。 */
 const CMDLET_REMOVE_ITEM = "Remove-Item";
 
@@ -113,6 +131,17 @@ type DenialKey = BashDenialKey | EditDenialKey;
 /** 文案表里取某条拒绝理由（两语各一份，断言写成函数免得重复键名）。 */
 const denialTextOf = (key: DenialKey, catalog = MESSAGES_ZH): string => catalog[key];
 
+/** 出路用例那两个助手提到模块层：它们不捕获任何外层变量，放在 describe 体内每轮都要重建，
+ *  而 lint 的 consistent-function-scoping 正是盯着这件事。 */
+const verdictOf = (command: string | undefined): BashVerdict | undefined => bashVerdict(command);
+/** 取一份**确定存在**的 verdict：断言前置，后面的 `.fix` 只保留 fix 那一层可选链
+ *  （fix 本身确为可选——core.hooksPath 那一支刻意不带出路，见下）。 */
+function mustVerdict(command: string): BashVerdict {
+  const verdict = bashVerdict(command);
+  assert.ok(verdict !== undefined, `预期被拦，实际放行：${command}`);
+  return verdict;
+}
+
 /** editDanger 对路径的判定压缩为 boolean（便于表格化断言）。 */
 function secretBlocks(path: string): boolean {
   return editDanger({ file_path: path }) !== undefined;
@@ -120,7 +149,7 @@ function secretBlocks(path: string): boolean {
 
 describe("bashDanger：git --no-verify 拦截", () => {
   it("git commit --no-verify 被拦", () => {
-    const result = bashDanger('git commit --no-verify -m "x"');
+    const result = bashDanger(GIT_COMMIT_NO_VERIFY);
     assert.equal(result, "noVerify");
     assert.match(denialTextOf("noVerify"), /no-verify/u);
   });
@@ -183,6 +212,35 @@ describe("bashDanger：rm -rf 拦截", () => {
     assert.equal(bashDanger("rm -rf node_modules"), undefined);
     assert.equal(bashDanger("rm -rf ./dist"), undefined);
     assert.equal(bashDanger("rm -rf src/old"), undefined);
+  });
+
+  it("rm -rf 家目录深层后代放行；家目录本身/直接子项/上跳仍拦", () => {
+    const home = os.homedir();
+    // 实测误拦：家目录下三层深的具体目录被当成「目标是家目录」。
+    assert.equal(
+      bashDanger(`rm -rf ${home}/.cache/plugin-review/probe-dir`),
+      undefined,
+      "家目录深层后代不该拦",
+    );
+    assert.equal(bashDanger("rm -rf ~/.cache/plugin-review/probe-dir"), undefined);
+    assert.equal(bashDanger("rm -rf ~/project/build/output"), undefined);
+    assert.ok(bashDanger(`rm -rf ${home}`) !== undefined, "家目录本身仍拦");
+    assert.ok(bashDanger("rm -rf ~/") !== undefined, "家目录加斜杠仍拦");
+    assert.ok(bashDanger(`rm -rf ${home}/Documents`) !== undefined, "直接子项仍拦");
+    assert.ok(bashDanger("rm -rf ~/a/../..") !== undefined, "带 .. 的写法仍拦");
+  });
+
+  it("rm -rf 变量形态按同一把尺子判：深层放行，家目录本身/直接子项仍拦", () => {
+    assert.equal(bashDanger(RMRF_HOME_VAR_DEEP), undefined);
+    assert.equal(bashDanger(RMRF_HOME_BRACE_DEEP), undefined);
+    assert.ok(bashDanger(RMRF_HOME_VAR) !== undefined, "家目录本身仍拦");
+    assert.ok(bashDanger(`${RMRF_HOME_VAR}/`) !== undefined, "家目录加斜杠仍拦");
+    assert.ok(bashDanger(RMRF_HOME_BRACE_DOCS) !== undefined, "直接子项仍拦");
+    assert.ok(bashDanger(`${RMRF_HOME_VAR}/../etc`) !== undefined, "带 .. 仍拦");
+    // 展开形状不可判（`${HOME:-/}x`）⇒ 保守拦下，不按尾巴长度放行。
+    assert.ok(bashDanger(RMRF_HOME_BRACE_OPAQUE) !== undefined, "不可判的展开保守拦");
+    // 未闭合的 `${HOME`（畸形输入）：尾巴按空串处理 ⇒ 退回「家目录本身」，保守拦下。
+    assert.ok(bashDanger(`rm -rf \${HOME`) !== undefined, "未闭合展开保守拦");
   });
 
   it("rm -rf .. 上跳路径被拦（越出项目根）", () => {
@@ -713,7 +771,7 @@ describe("审查修复回归：安全绕过 H1-H6", () => {
   it("h6：提交信息里的 --no-verify 字样不误杀（真实旗标仍拦）", () => {
     assert.equal(bashDanger('git commit -m "add --no-verify flag docs"'), undefined);
     assert.equal(bashDanger("git commit -m 'docs: explain --no-verify'"), undefined);
-    assert.ok(bashDanger('git commit --no-verify -m "x"') !== undefined);
+    assert.ok(bashDanger(GIT_COMMIT_NO_VERIFY) !== undefined);
   });
 });
 
@@ -941,7 +999,7 @@ describe("绕过面回归：git 钩子绕过的短旗标/缩写/持久配置", (
   });
 
   it("git 接受的不歧义长旗标缩写（--no-v…）同样绕过钩子", () => {
-    for (const flag of ["--no-v", "--no-ve", "--no-ver", "--no-veri", "--no-verify"]) {
+    for (const flag of ["--no-v", "--no-ve", "--no-ver", "--no-veri", NO_VERIFY_FLAG]) {
       assert.ok(bashDanger(`git commit ${flag} -m x`) !== undefined, flag);
     }
     // 过短前缀歧义面太大（--no-edit / --no-commit 都以 --no- 开头）→ 不拦
@@ -1670,7 +1728,7 @@ describe("b9：非 Windows 宿主上整条 Windows 字形轨道退出判定", ()
       ["rm -rf /usr/**", "rmrf"],
       ["rm -rf ~", "rmrf"],
       [RMRF_HOME_DOCUMENTS, "rmrf"],
-      ["rm -rf $HOME", "rmrf"],
+      [RMRF_HOME_VAR, "rmrf"],
       [`rm -rf \${HOME}`, "rmrf"],
       ["rm -rf ..", "rmrf"],
       ["rm -rf ./../../etc", "rmrf"],
@@ -2180,7 +2238,7 @@ describe("b10 反例：命令词方言不得伤及既有 POSIX 判定", () => {
       RMRF_ETC,
       "rm -rf /usr",
       RMRF_HOME_DOCUMENTS,
-      "rm -rf $HOME",
+      RMRF_HOME_VAR,
       "rm -rf /System/Library",
       "rm -rf /tmp/../etc",
     ]) {
@@ -3152,7 +3210,7 @@ describe("复评修复回归：git 参数按角色判", () => {
 
   it("带值选项的取值不当旗标：-m --no-verify 实测钩子照跑", () => {
     assert.equal(bashDanger("git commit -m --no-verify"), undefined);
-    assert.equal(bashDanger('git commit -m "--no-verify"'), undefined);
+    assert.equal(bashDanger(`git commit -m "${NO_VERIFY_FLAG}"`), undefined);
     assert.equal(bashDanger("git commit -am --no-verify"), undefined);
     assert.equal(bashDanger("git commit -a --no-verify -m x"), "noVerify");
   });
@@ -3164,7 +3222,7 @@ describe("复评修复回归：git 参数按角色判", () => {
 
   it("引号包裹的旗标与命令头都是真生效写法", () => {
     // 真 git 2.54：`git commit \"--no-verify\"` 钩子未运行且提交成功
-    assert.equal(bashDanger('git commit "--no-verify"'), "noVerify");
+    assert.equal(bashDanger(`git commit "${NO_VERIFY_FLAG}"`), "noVerify");
     assert.equal(bashDanger("git commit '-n' -m x"), "noVerify");
     assert.equal(bashDanger('"git" commit --no-verify'), "noVerify");
     assert.equal(bashDanger(String.raw`\git commit --no-verify`), "noVerify");
@@ -3281,5 +3339,396 @@ describe("复评修复回归：密钥面的相对路径、词法归一与长度�
     assert.deepEqual(split.rejected, ["[a-", ""]);
     // 超长模式同样拒绝（长度是唯一能静态判的那一道）
     assert.deepEqual(partitionSecretPatterns(["a".repeat(600)]).rejected.length, 1);
+  });
+});
+
+describe("出路（Fix）：拒绝理由点名到底是哪几枚词/哪几个目标越界", () => {
+  it("git 绕过：点名那枚长旗标本身", () => {
+    const verdict = mustVerdict(GIT_COMMIT_NO_VERIFY);
+    // 整枚 fix 一起比：role 与 offending 是同一件事的两面，拆成两条断言时
+    // "role 对、offending 漏了"那种错要靠人眼补。
+    assert.deepEqual(verdict.fix, { role: "bypassFlag", offending: [NO_VERIFY_FLAG] });
+  });
+
+  it("git 绕过：短旗标簇点名**整枚簇**（去掉的是簇里那个字母，别的字母是真旗标）", () => {
+    assert.deepEqual(verdictOf("git commit -an")?.fix?.offending, ["-an"]);
+    assert.deepEqual(verdictOf("git commit -na")?.fix?.offending, ["-na"]);
+  });
+
+  it("git 绕过：缩写（--no-v…）照点名那一枚**实际写出来的**词面", () => {
+    assert.deepEqual(verdictOf("git commit --no-veri -m x")?.fix?.offending, ["--no-veri"]);
+  });
+
+  it("git 绕过：同一枚旗标出现两次只列一次（模型要删的是全部出现处）", () => {
+    assert.deepEqual(verdictOf("git commit --no-verify -a --no-verify")?.fix?.offending, [
+      NO_VERIFY_FLAG,
+    ]);
+    // 短簇那一支的去重是**另一处**判据（两处各写一次，不共用一个辅助函数：一个是长旗标、
+    // 一个是簇内字母，共用反而要把"该不该记"的判断提到调用方，徒增一层参数）。
+    assert.deepEqual(verdictOf("git commit -an -an")?.fix?.offending, ["-an"]);
+  });
+
+  it("core.hooksPath 那一支**不带出路**：机械解要删「键 值」二元组，走查没记词位", () => {
+    const verdict = mustVerdict("git -c core.hooksPath=/dev/null commit -m x");
+    assert.equal(verdict.key, "noVerify");
+    assert.equal(verdict.fix, undefined, "硬造一个改法不如让模型照基础文案自己改");
+    assert.equal(verdictOf("git config core.hooksPath /dev/null")?.fix, undefined);
+  });
+
+  it("放行侧不出路：命中条件不成立时连 verdict 都不存在", () => {
+    assert.equal(verdictOf("git commit -m x"), undefined);
+    assert.equal(verdictOf(RMRF_RELATIVE_BUILD), undefined);
+    assert.equal(verdictOf(""), undefined);
+    assert.equal(verdictOf(undefined), undefined);
+  });
+
+  it("rmrf：点名真正成灾的目标，安全的那些**不进名单**", () => {
+    const verdict = mustVerdict("rm -rf ./build ~");
+    assert.equal(verdict.key, "rmrf");
+    assert.deepEqual(
+      verdict.fix,
+      { role: "disasterTarget", offending: ["~"] },
+      "`./build` 是安全目标，不该出现在出路里",
+    );
+  });
+
+  it("rmrf：多个成灾目标按首次出现序去重列出", () => {
+    assert.deepEqual(verdictOf("rm -rf / /etc /")?.fix?.offending, ["/", "/etc"]);
+  });
+
+  it("rmrf：非灾难级旗标不拦，也就不带出路（rm -r ~ 放行、rm -R ~ 拦）", () => {
+    assert.equal(verdictOf("rm -r ~"), undefined);
+    assert.deepEqual(verdictOf("rm -R ~")?.fix?.offending, ["~"]);
+  });
+
+  it("devServer / pipeShell / 需确认那一档不带出路：它们缺的是执行上下文，不是某枚词", () => {
+    // 长驻不是"某枚词错了"，下载即执行不是"某枚词错了"（整条管道才是），
+    // 认不准那档则连执行面都还没看见——三者的出路都在各自的基础文案里讲完了。
+    assert.equal(verdictOf("pnpm run watch")?.fix, undefined);
+    assert.equal(verdictOf(PIPE_SHELL_COMMAND)?.fix, undefined);
+    assert.equal(verdictOf('python3 -c "print(1')?.fix, undefined);
+  });
+
+  it("超长输入升格需确认时同样不带出路", () => {
+    const verdict = mustVerdict("a".repeat(1_000_001));
+    assert.equal(verdict.key, "nestedShellUnconfirmed");
+    assert.equal(verdict.fix, undefined);
+  });
+
+  it("bashDanger 是 bashVerdict 的键投影：两条出口不可能给出不同结论", () => {
+    for (const command of [
+      GIT_COMMIT_NO_VERIFY,
+      "rm -rf ./build ~",
+      "pnpm run watch",
+      PIPE_SHELL_COMMAND,
+      RMRF_RELATIVE_BUILD,
+      "echo hi",
+    ]) {
+      assert.equal(bashDanger(command), bashVerdict(command)?.key, command);
+    }
+    assert.equal(bashDanger(undefined), undefined);
+  });
+});
+
+describe("出路文案（renderFix）：结构由 lib 产出，句子按当次语言渲染", () => {
+  /** 汉字区段：en 文案里出现即说明有句子没翻。 */
+  const HAN = /\p{Script=Han}/u;
+
+  it("按 role 选中对应的模板，并填出词面", () => {
+    const bypass = renderFix(
+      { role: "bypassFlag", offending: [NO_VERIFY_FLAG, "-an"] },
+      MESSAGES_ZH,
+    );
+    assert.ok(bypass.includes(NO_VERIFY_FLAG), bypass);
+    assert.ok(bypass.includes("-an"), bypass);
+    assert.ok(bypass.includes("、"), "多枚词用 listSeparator 连接（跟随语言）");
+
+    const target = renderFix({ role: "disasterTarget", offending: ["~", "/etc"] }, MESSAGES_ZH);
+    assert.ok(target.includes("~"), target);
+    assert.ok(target.includes("/etc"), target);
+  });
+
+  it("两枚模板都不是彼此的复述（角色表接错时读起来仍然通顺，只有这条能抓住）", () => {
+    assert.notEqual(MESSAGES_ZH.fixBypassFlag, MESSAGES_ZH.fixDisasterTarget);
+    assert.notEqual(MESSAGES_EN.fixBypassFlag, MESSAGES_EN.fixDisasterTarget);
+  });
+
+  it("en：整行英文，不混进汉字", () => {
+    for (const fix of [
+      { role: "bypassFlag", offending: [NO_VERIFY_FLAG] },
+      { role: "disasterTarget", offending: ["~"] },
+    ] as const) {
+      const line = renderFix(fix, MESSAGES_EN);
+      assert.ok(!HAN.test(line), line);
+      assert.ok(!line.includes("{values}"), `占位符没被替换：${line}`);
+    }
+  });
+});
+
+/** 该串命中的规则键（`bashVerdict` 的结论；档位另判）—— 提到模块层：
+ *  它不捕获任何外层变量，放 describe 体内每轮重建（lint 的 consistent-function-scoping 盯这个）。 */
+const gitKeyOf = (command: string): BashDenialKey | undefined => bashVerdict(command)?.key;
+/** 该串是否落在 `ask` 档（走 lib/confirm 的入口，与预检同一条路）。 */
+const gitAskOf = (command: string): BashDenialKey | undefined =>
+  askRequestOf("bash", { command }, undefined, MESSAGES.zh)?.key;
+
+describe("git 破坏族（A1）：全部 `ask` 档，逐子命令判", () => {
+  it("`reset --hard` 与 `push --force` 家族：命中且入 `ask` 档", () => {
+    assert.equal(gitKeyOf("git reset --hard"), "gitResetHard");
+    assert.equal(gitAskOf("git reset --hard"), "gitResetHard");
+    assert.equal(gitKeyOf("git push --force"), "gitForcePush");
+    assert.equal(gitAskOf("git push --force"), "gitForcePush");
+    for (const command of [
+      "git push -f origin main",
+      "git push --force-with-lease",
+      "git push origin main --force",
+      // `--flag=value` 形：取值不是旗标的身份，等号前那一段才是。
+      "git push --force-with-lease=main",
+    ]) {
+      assert.equal(gitKeyOf(command), "gitForcePush", command);
+    }
+  });
+
+  it("`--soft`/`--mixed` 保留工作区 ⇒ 不判（那两条不丢东西）", () => {
+    for (const command of ["git reset --soft HEAD~1", "git reset --mixed", "git reset HEAD~1"]) {
+      assert.equal(gitKeyOf(command), undefined, command);
+    }
+  });
+
+  it("`clean -f` 判；带 `-n`/`--dry-run` 不判（`-n` 赢过 `-f`，git 只打印）", () => {
+    for (const command of [
+      "git clean -f",
+      "git clean -fdx",
+      "git clean -fdq",
+      "git clean --force",
+    ]) {
+      assert.equal(gitKeyOf(command), "gitCleanForce", command);
+    }
+    for (const command of [
+      "git clean -n",
+      "git clean -nd",
+      "git clean -nf",
+      "git clean --dry-run -f",
+    ]) {
+      assert.equal(gitKeyOf(command), undefined, command);
+    }
+  });
+
+  it("`stash drop|clear` 判；`pop`/`apply`/`list`/`show`/裸 `stash` 不判", () => {
+    assert.equal(gitKeyOf("git stash drop"), "gitStashDrop");
+    assert.equal(gitKeyOf("git stash clear"), "gitStashDrop");
+    assert.equal(gitKeyOf("git stash drop stash@{2}"), "gitStashDrop");
+    for (const command of [
+      "git stash",
+      "git stash list",
+      "git stash pop",
+      "git stash apply",
+      "git stash show",
+      "git stash push -m wip",
+    ]) {
+      assert.equal(gitKeyOf(command), undefined, command);
+    }
+  });
+
+  it("`branch -D` 判；`-d` 不判（小写时 git 自己会拒绝未合并的分支）", () => {
+    assert.equal(gitKeyOf("git branch -D feature"), "gitBranchDelete");
+    assert.equal(gitKeyOf("git branch -aD feature"), "gitBranchDelete");
+    for (const command of [
+      "git branch -d feature",
+      "git branch",
+      "git branch -a",
+      "git branch new",
+    ]) {
+      assert.equal(gitKeyOf(command), undefined, command);
+    }
+  });
+
+  it("`restore` 判；**`--staged` 单用不判**（只动索引，内容不丢）", () => {
+    for (const command of [
+      "git restore .",
+      "git restore src/a.ts",
+      "git restore --worktree src/a.ts",
+    ]) {
+      assert.equal(gitKeyOf(command), "gitRestoreDiscard", command);
+    }
+    for (const command of ["git restore --staged .", "git restore -S src/a.ts"]) {
+      assert.equal(gitKeyOf(command), undefined, command);
+    }
+    // `--staged` 与 `--worktree` 并存 = 两边都动 ⇒ 仍判。
+    assert.equal(gitKeyOf("git restore --staged --worktree ."), "gitRestoreDiscard");
+  });
+
+  it("`checkout`：只认 `-- <path>` 与 `.`/`..` 两形，裸路径不判（与切分支词法上不可分）", () => {
+    for (const command of [
+      "git checkout -- .",
+      "git checkout -- src/a.ts",
+      "git checkout .",
+      "git checkout ..",
+    ]) {
+      assert.equal(gitKeyOf(command), "gitCheckoutDiscard", command);
+    }
+    for (const command of ["git checkout main", "git checkout -b new", "git checkout src/a.ts"]) {
+      assert.equal(
+        gitKeyOf(command),
+        undefined,
+        `${command}（裸路径与切分支不可分，按已知边界登记）`,
+      );
+    }
+  });
+
+  it("包装词与嵌套不下钻之外的位置都判得到（与其余规则同一条包装词纪律）", () => {
+    assert.equal(gitKeyOf("sudo git reset --hard"), "gitResetHard");
+    assert.equal(gitKeyOf("bash -c 'git clean -fdx'"), "gitCleanForce");
+  });
+
+  it("与沙箱**零重叠**：这些键都不在 `SANDBOX_COVERED` 里（让路面只有 `rmrf` 一枚）", () => {
+    // 判据面全在工作区**之内**（沙箱恰恰允许）或远端（网络不在沙箱的 vocabulary 内），
+    // 所以它们不该跟着 `rmrf` 一起让路。
+    for (const key of [
+      "gitResetHard",
+      "gitCheckoutDiscard",
+      "gitRestoreDiscard",
+      "gitCleanForce",
+      "gitStashDrop",
+      "gitBranchDelete",
+      "gitForcePush",
+    ] as const) {
+      assert.equal(SANDBOX_COVERED.has(key), false, key);
+    }
+  });
+
+  it("`--no-verify` 不改变破坏性判据的结论（`reset` 本就不在钩子绕过的清单里）", () => {
+    // 两条判据共用一趟走查，但各判各的：`gitBypass` 只认
+    // commit/push/merge/cherry-pick/rebase/am 六个子命令，`reset` 不在其中
+    //（`git reset` 本来就不跑 pre-commit 钩子），所以这一串只有破坏性那一条命中。
+    assert.equal(gitKeyOf("git reset --hard --no-verify"), "gitResetHard");
+  });
+
+  it("两条判据同时命中时 `gitBypass` 优先（它是 `deny` 档，更严重的那条先出）", () => {
+    // `git push --no-verify --force` 两条都命中；`gitBypass` 在候选链里排在前面。
+    assert.equal(gitKeyOf("git push --no-verify --force"), "noVerify");
+  });
+});
+
+describe("基础设施破坏族（A2）：terraform / docker / kubectl / 迁移命令", () => {
+  it("`terraform destroy` 判；`terraform plan -destroy` **不判**（plan 只打印）", () => {
+    assert.equal(gitKeyOf("terraform destroy"), "tfDestroy");
+    assert.equal(gitKeyOf("terraform destroy -auto-approve"), "tfDestroy");
+    assert.equal(gitKeyOf("terraform -chdir=infra destroy"), "tfDestroy");
+    assert.equal(gitKeyOf("tofu destroy"), "tfDestroy", "开源分支 tofu 同判");
+    for (const command of ["terraform plan -destroy", "terraform plan", "terraform init"]) {
+      assert.equal(gitKeyOf(command), undefined, command);
+    }
+  });
+
+  it("`apply -auto-approve` 判；裸 `apply` 不判（terraform 自己会问）", () => {
+    assert.equal(gitKeyOf("terraform apply -auto-approve"), "tfAutoApprove");
+    assert.equal(gitKeyOf("terraform -chdir=infra apply -auto-approve"), "tfAutoApprove");
+    for (const command of ["terraform apply", "terraform plan -out=tfplan", "terraform validate"]) {
+      assert.equal(gitKeyOf(command), undefined, command);
+    }
+  });
+
+  it("`docker … prune` 判；`system df` / `image rm` 不判", () => {
+    for (const command of [
+      "docker system prune",
+      "docker system prune -a",
+      "docker volume prune",
+      "docker builder prune --all",
+      "docker image prune",
+      "docker container prune",
+    ]) {
+      assert.equal(gitKeyOf(command), "dockerPrune", command);
+    }
+    for (const command of ["docker system df", "docker image rm x", "docker ps -a"]) {
+      assert.equal(gitKeyOf(command), undefined, command);
+    }
+  });
+
+  it("`kubectl delete` 判；`--dry-run` 不判（那是官方推荐的预演写法）", () => {
+    assert.equal(gitKeyOf("kubectl delete pod web-1"), "kubectlDelete");
+    assert.equal(gitKeyOf("kubectl delete ns staging"), "kubectlDelete");
+    assert.equal(gitKeyOf("kubectl -n prod delete pvc data"), "kubectlDelete");
+    for (const command of [
+      "kubectl get pods",
+      "kubectl delete pod web-1 --dry-run=client",
+      "kubectl delete -f x.yaml --dry-run=client",
+    ]) {
+      assert.equal(gitKeyOf(command), undefined, command);
+    }
+  });
+
+  it("迁移命令按**命令位置 + 动作词**判：常见启动器前缀都认", () => {
+    for (const command of [
+      "python manage.py migrate",
+      "python3 manage.py migrate app",
+      "npx prisma migrate deploy",
+      "prisma migrate dev",
+      "bundle exec rails db:migrate",
+      "rails db:migrate",
+      "rake db:migrate",
+      "alembic upgrade head",
+      "alembic downgrade -1",
+      "flyway migrate",
+      "npx sequelize db:migrate",
+      "typeorm migration:run",
+      "knex migrate:latest",
+    ]) {
+      assert.equal(gitKeyOf(command), "dbMigrate", command);
+    }
+  });
+
+  it("只读动作与干跑旗标不判（问用户是纯噪音）", () => {
+    for (const command of [
+      "prisma migrate status",
+      "prisma migrate diff",
+      "flyway info",
+      "alembic history",
+      "alembic current",
+      "python manage.py migrate --plan",
+      "python manage.py showmigrations",
+      "rails db:migrate:status",
+      "python manage.py makemigrations",
+    ]) {
+      assert.equal(gitKeyOf(command), undefined, command);
+    }
+  });
+
+  it("**命令位置**那一层挡住『在文档里搜这串』的假命中", () => {
+    // `grep manage.py migrate docs/` 里的那对词是**搜的内容**，不是要执行的命令。
+    // 判据要求命令词之前的每一枚词都是启动器 —— `grep` 不在那张表里。
+    assert.equal(gitKeyOf("grep manage.py migrate docs/"), undefined);
+    assert.equal(gitKeyOf("rg prisma migrate src/"), undefined);
+    // 反向对照：换成真启动器就判得到。
+    assert.equal(gitKeyOf("npx prisma migrate deploy"), "dbMigrate");
+  });
+
+  it("包路径前缀与包装词都认（与其余族同一条纪律）", () => {
+    assert.equal(gitKeyOf("/usr/local/bin/kubectl delete pod x"), "kubectlDelete");
+    assert.equal(gitKeyOf("sudo terraform destroy"), "tfDestroy");
+    assert.equal(gitKeyOf("sudo docker system prune -a"), "dockerPrune");
+  });
+
+  it("五枚新键全在 `ask` 档，且都不在沙箱让路面上", () => {
+    for (const key of [
+      "tfDestroy",
+      "tfAutoApprove",
+      "dockerPrune",
+      "kubectlDelete",
+      "dbMigrate",
+    ] as const) {
+      assert.equal(RULE_TIER[key], "ask", key);
+      assert.equal(SANDBOX_COVERED.has(key), false, key);
+    }
+  });
+
+  it("文案都写明了出路（干跑命令 / 预演 / 备份），不是只说『别做』", () => {
+    // 每一族的文案里都点名该先跑什么 —— 这是 `ask` 能否被「照做」的分水岭。
+    assert.match(MESSAGES.zh.tfDestroy, /plan -destroy/u);
+    assert.match(MESSAGES.zh.tfAutoApprove, /plan/u);
+    assert.match(MESSAGES.zh.dockerPrune, /docker system df/u);
+    assert.match(MESSAGES.zh.kubectlDelete, /--dry-run=client/u);
+    assert.match(MESSAGES.zh.dbMigrate, /--plan|--sql|info/u);
+    assert.match(MESSAGES.en.dbMigrate, /--plan|--sql|info/u);
   });
 });

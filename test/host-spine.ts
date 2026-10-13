@@ -42,6 +42,9 @@ import type {
 import type { SessionEvent, SessionId } from "@deepseek-ai/dsh-session";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { SettingsForms, SettingsNamespace } from "@deepseek-ai/dsh-settings";
+// 审批面的两个类型从**声明它那一侧**取（`@deepseek-ai/dsh-user-approval/types` 是 wire-safe
+// 入口，不拖 cordis/service 链）：本包不依赖它、也不 import 它的运行期实现。
+import type { ApprovalOutcome, ApprovalRequestEvent } from "@deepseek-ai/dsh-user-approval/types";
 import { brandString } from "@deepseek-ai/dsh-brand";
 import { LOCALE_SETTINGS_NAMESPACE } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 
@@ -320,13 +323,31 @@ const sessionIdOf = (raw: string): SessionId => brandString<SessionId>(raw);
 const callIdOf = (raw: string): ToolCallId => brandString<ToolCallId>(raw);
 
 /**
+ * 假的审批服务：形状按官方 `ApprovalService` 的**被调用那一位**给（`request(req)`），
+ * 返回官方的四种结论之一。
+ *
+ * 为什么不装官方的 `ApprovalService` 真件：本包要钉的不是"官方怎么收集答案"（那是官方的
+ * 契约面），而是"**我们的 `{kind:'ask'}` 决定，官方是怎么读、怎么物化的**"。所以
+ * 上面那一位由官方的 `serviceAsk` 提供，而答案从这一枚替身来。
+ * ⚠ `request` 的入参形状按官方 `ApprovalRequestEvent` 声明收（不手抄字段名）：
+ * 字段改名/换形状会在这里变成编译错误。
+ */
+export interface ApprovalSpy {
+  /** 官方请求（含我们交的 `reason` 与 `displayReason`）原样记下，供断言。 */
+  requests: ApprovalRequestEvent[];
+  /** 下一条请求的结论；由用例按官方四种取值设定。 */
+  outcome: ApprovalOutcome;
+}
+
+/**
  * 装配一台真 spine：真 ToolRuntime + 真 SessionStore + 真投影注册表 + 本包两条条目。
  * @param row 设置条目的**用户层 config**（越界值会只炸设置条目自己，见 bulkhead 用例）
  * @param options.localePreference 宿主 locale 偏好（`settings.describe()` 里那一条的真形状）
+ * @param options.approval 装上假审批服务（不给 = 宿主没装审批面，走 `serviceAsk` 的降级臂）
  */
 export async function bootSpine(
   row: Record<string, unknown> = {},
-  options: { localePreference?: string } = {},
+  options: { localePreference?: string; approval?: ApprovalSpy } = {},
 ): Promise<Spine> {
   const ctx = new Context();
   // 描述符按官方 `SettingsDescriptor` 的**必填位**给齐（ns/autoGenerate/schema/value/revision/
@@ -345,6 +366,18 @@ export async function bootSpine(
           },
         ];
   ctx.provide("settings", settingsStub(describe));
+  // 先解构出局部量：闭包里 `options.approval` 的收窄会丢（属性访问不参与控制流收窄）。
+  const { approval } = options;
+  if (approval !== undefined) {
+    // 形状即官方 `ApprovalService` 上 `serviceAsk` 真正调的那一位（`request(req)`）：
+    // 官方把服务改名/改签名时这里当场红。
+    ctx.provide("approval", {
+      request: (req: ApprovalRequestEvent): Promise<ApprovalOutcome> => {
+        approval.requests.push(req);
+        return Promise.resolve(approval.outcome);
+      },
+    });
+  }
   await mountAgentLoopTestDependencies(ctx, { workingDirectory: true });
   registerFileTools(ctx);
   registerSearchTools(ctx);

@@ -1,7 +1,9 @@
 // build-client 冒烟：client.js 产出且含设置卡关键文案。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { declareClientFreshness } from "./client-freshness.ts";
@@ -9,6 +11,34 @@ import { declareSchemaCoverage } from "./schema-coverage.ts";
 
 /** 构建产物相对本文件的定位符（`npm run build:client` 的唯一出口，三条用例都读它）。 */
 const CLIENT_BUNDLE_SPEC = "../client.js";
+
+// 产物开 `minify: true` 之后，文本判据的**粒度**被两件事限死（都是实测）：
+//   ① 标识符（变量/函数/参数名）会被 mangle ⇒ `const inject = [...]`、`ctx.configForms.get(…)`
+//      这种**带名字**的判据全部失效（写下去就是恒绿/恒红的假门禁）；
+//   ② 引号会被换成最短的那个（实测压成了反引号）⇒ 判据里不能写死 `"`。
+// 剩下的可信粒度是**属性名**（不 mangle）与**字面量**（引号类型可容忍）。下面两条助手就是它。
+
+/** 入口 inject 清单：三项、顺序、闭合全钉死，引号容忍三种形态。 */
+const INJECT_LIST = /\[\s*[`"']slots[`"']\s*,\s*[`"']configForms[`"']\s*,\s*[`"']locale[`"']\s*\]/u;
+
+/** 产物里 `configForms.get(<设置条目 id>)` 的那个实参（属性链不 mangle，字面量可查）。 */
+const CONFIG_FORM_LOOKUP = /\.configForms\.get\(\s*[`"'](?<id>[^`"']+)[`"']\s*\)/u;
+
+/**
+ * 从 `cordis.patch.yml` 取**设置条目**的 id（它就是紧挨着 `name: "…/settings"` 的那一行 id）。
+ *
+ * 为什么从组合清单里取而不是在用例里写死：这条判据要防的正是**两处漂开** —— 卡片按命名空间
+ * 取表单，而那个命名空间必须是随包发布的组合清单里真正挂着 schema 的那一行。
+ */
+function settingsEntryId(): string {
+  const patch = readFileSync(path.join(import.meta.dirname, "..", "cordis.patch.yml"), "utf8");
+  const id = /-\s*id:\s*(?<id>\S+)\s*\n\s*name:\s*"[^"]*\/settings"/u.exec(patch)?.groups?.["id"];
+  assert.ok(
+    id !== undefined,
+    "cordis.patch.yml 里找不到设置条目（name 以 /settings 结尾的那一行）",
+  );
+  return id;
+}
 
 await declareClientFreshness(import.meta.url);
 await declareSchemaCoverage(import.meta.url, {
@@ -43,7 +73,9 @@ describe("danger-guard client 构建", () => {
     const text = await readFile(clientJsPath, "utf8");
     // 框架 InjectFace/PropsHooks（client-runner）：注入 { hooks: { card } } → prop useCard
     assert.ok(text.includes("useCard"), "必须用 useCard 读快照");
-    assert.ok(!text.includes("props.hooks.card"), "不得读 props.hooks.card（浏览器崩溃根因）");
+    // ⚠ 判据粒度：原来的 `props.hooks.card` 在压缩产物里**不可能**出现（`props` 会被 mangle）
+    // ⇒ 那条恒绿。属性名不 mangle，所以钉**属性链**：真出现回归时产物里就是 `X.hooks.card`。
+    assert.ok(!text.includes(".hooks.card"), "不得读会崩的 props.hooks.card 属性链");
   });
 
   it("产物入口只列 0.1.7 仍在的服务（configForms 取代已移除的 settingsScope）", async () => {
@@ -53,25 +85,21 @@ describe("danger-guard client 构建", () => {
     // 零命中，只要它回到清单里，整条 client 入口就挂不上（症状 = 设置卡静默消失）。
     // 替代面 = configForms（installed dsh-client-ui-settings/lib/types/client/
     // config-form.d.ts:94-98 的 Context 增强 + :142 的 get<T>(entryId): ConfigForm<T>）。
-    const raw = /const inject = \[(?<items>[^\]]*)\];/u.exec(text)?.groups?.["items"] ?? "";
-    assert.ok(raw.length > 0, "产物里找不到入口 inject 清单");
-    const items = raw
-      .split(",")
-      .map((piece) => piece.trim().replaceAll(/^["']|["']$/gu, ""))
-      .filter((piece) => piece.length > 0);
-    // 精确全等清单，不放宽为包含判定。
-    assert.deepEqual(items, ["slots", "configForms", "locale"]);
+    // 三项、顺序、闭合全钉死（不放宽为包含判定）：变量名会被 mangle，故判据钉数组项本身。
+    assert.match(text, INJECT_LIST, "入口 inject 清单必须是 slots / configForms / locale 三项");
     assert.ok(!text.includes("settingsScope"), "不得再向宿主索要已移除的 settingsScope 服务");
     // 取表单走 configForms.get(**设置条目 id**)——本包是 bulkhead，卡片写的命名空间是
     // danger-guard-settings（持有 Config 的那一行），不是拦截条目 danger-guard。
-    assert.ok(
-      text.includes("ctx.configForms.get(SETTINGS_NS)"),
-      "取表单走 configForms.get(条目 id)",
+    // 这里把产物里的实参与 cordis.patch.yml 的那一行**对质**：两处漂开就是卡片静默读不到表单。
+    const idInBundle = CONFIG_FORM_LOOKUP.exec(text)?.groups?.["id"];
+    assert.equal(
+      idInBundle,
+      settingsEntryId(),
+      "product 里 configForms.get 的实参必须是设置条目 id",
     );
-    const nsRaw = /const SETTINGS_NS = "(?<ns>[^"]+)";/u.exec(text)?.groups?.["ns"] ?? "";
-    assert.equal(nsRaw, "danger-guard-settings", "产物里的设置条目 id 与 cordis.patch.yml 一致");
     // 表单是 provider 持有的共享对象，消费契约 ConfigForm 里没有 dispose
     //（installed config-form-types.d.ts:36-74）：slot disposer 只注销登记。
-    assert.ok(!/form\.dispose\(\)|scope\.dispose\(\)/u.test(text), "产物不得销毁 provider 的表单");
+    // 判据取全链 `.dispose()`：客户端产物里**一处**都不该有（表单归 provider 持有）。
+    assert.ok(!/\.dispose\(\)/u.test(text), "产物不得销毁 provider 的表单");
   });
 });

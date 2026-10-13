@@ -62,13 +62,25 @@
 
 ## 运行期依赖
 
-运行期依赖的许可由各自包随包分发，本包不重复其文本：`@deepseek-ai/dsh-brand`、
-`@deepseek-ai/schemastery`、`@jayyuen66/dsh-plugin-shared`、`zod`。
+运行期依赖的许可由各自包随包分发，本包不重复其文本：`@deepseek-ai/dsh`（宿主本体：peer 里钉住
+它能承载本包的版本面，源码不 import 它）、`@deepseek-ai/dsh-brand`、`@deepseek-ai/dsh-llm`、
+`@deepseek-ai/dsh-typert-protocol`、`@deepseek-ai/schemastery`、
+`@jayyuen66/dsh-plugin-shared`、`zod`。
 
 其中 `@deepseek-ai/dsh-brand` 虽看似只服务于类型，**仍必须是运行期依赖**：宿主类型面用
 品牌串做名义类型（nominal typing），构造品牌需要真实函数值而没有 type-only 的构造途径。
 若把它降为 `devDependencies`，打包器会把构造函数体内联进产物，于是每个包各得一份官方
 构造函数，单例语义随之失效。`build-host.mjs` 的外部化清单只读 `dependencies` ∪
 `peerDependencies`，`test/build-host.test.ts` 对此有断言钉住。
+
+`@deepseek-ai/dsh-llm` 由预检以值引入（`createUserMessage`，注入给模型的消息），同一条口径：
+落 `peerDependencies`、产物里保持裸说明符 —— 内联等于每包各持一份官方的消息铸造与深冻结。
+
+`@deepseek-ai/dsh-typert-protocol` 由判定统计读数面（`lib/stats-remote.ts`）以值引入：要
+`extends TypertRemoteService` 并用 `@Remote` 标记端点，**两枚都是值，没有 type-only 的构造途径**
+（与 `brandNumber` 同族）。同样落 `peerDependencies`，产物里保持裸说明符；`build-host.mjs` 的
+外部化清单只读 `dependencies` ∪ `peerDependencies`，而 `test/build-host.test.ts` 另有一条
+**结构性**断言钉住"依赖表里的包一个都没被内联"（看 chunk 的 `moduleIds`，不看函数名 —— 产物开了
+minify，内联体里的标识符会被 mangle）。
 
 `zod` 由 `lib/tool-ledger.ts` 以值引入（其 `stateSchema`），同样只能是运行期依赖。

@@ -328,23 +328,59 @@ async function scanOneFile(ctx: ScanCtx, item: ScanItem): Promise<boolean> {
   return true;
 }
 
-/** 广度优先走一遍项目：目录展开、文件按引用词扫一遍；每一项之前查取消与**各自的预算**。
- *  循环体里的 `await` 是这条扫描的**中断检查点**（见文件头的"有界"）。
- *  预算用完而停下 = `capped`（结论只覆盖已扫范围，仍然可用）；信号中断 = 整趟作废
- *  （由 scanReferences 收尾，不在这里判——两种"停"的去向不同，混在一处就会把截断当完整）。 */
-async function walkForRefs(ctx: ScanCtx, rootTarget: FsTarget): Promise<void> {
-  const queue: ScanItem[] = [
-    { path: ctx.root, rel: "", target: rootTarget, isDir: true, size: undefined },
-  ];
+/**
+ * 目标到扫描起点之间的**祖先层级**（自下而上：目标所在目录 → … → `root`）。
+ *
+ * **导出只为可测**（与 host 的 `noteJudgeCost` 同一条先例）：它是纯字符串函数，而它的两条
+ * 边界只有"目标直接在 `/` 下"（root 带尾斜杠）与"目标根本不在 root 之下"才能走到 ——
+ * 那两条在集成层要么得扫整个文件系统、要么得构造无关目录，直接调它才钉得住。
+ *
+ * 目标不在 `root` 之下时（`projectRootOf` 的回落值理应是目标的祖先，但调用方传什么这里
+ * 不假定）只交回 `root` 一层 —— 那时"最近的祖先"无从谈起，退回从起点扫一遍。
+ * 全用字符串切分，不 import `node:path`（本文件不假定本地盘，见文件头）。
+ */
+export function ancestorLevelsOf(root: string, targetN: string): readonly string[] {
+  // 根为 `/` 时 `\`${root}/\`` 会拼出 `//`，`startsWith` 恒假 ⇒ 整条链空掉。带尾斜杠的根
+  //（`/`、`C:/`）因此单独归一，与 lib/sandbox-scope.ts 的 contains 同一条纪律。
+  const prefix = root.endsWith("/") ? root : `${root}/`;
+  const under = (item: string): boolean => item === root || item.startsWith(prefix);
+  const levels: string[] = [];
+  let current = targetN.slice(0, Math.max(targetN.lastIndexOf("/"), 0));
+  // `current.length > 0` 是终止条件：往上走时它严格变短（`\`a/b\` → `\`a\` → `\`\``）。
+  while (current.length > 0 && under(current)) {
+    levels.push(current);
+    if (current === root) {
+      break;
+    }
+    current = current.slice(0, Math.max(current.lastIndexOf("/"), 0));
+  }
+  // ⚠ root 本身**必须**在链上：`root = "/"` 时往上一级会走到空串（`/tmp` → `""`）而
+  // 循环就此退出 —— 少了这一句，`/` 自己的文件与其余兄弟目录永远不会被走，
+  // 而"分层"的全部意义正是"每一层都走到"。
+  if (levels.length > 0 && levels.at(-1) !== root) {
+    levels.push(root);
+  }
+  return levels.length === 0 ? [root] : levels;
+}
+
+/** 走**一层**：从该层目录起做广度优先。已展开过的目录跳过（见 `walkForRefs` 的 `visited`）。 */
+async function walkLevel(ctx: ScanCtx, start: ScanItem, visited: Set<string>): Promise<void> {
+  const queue: ScanItem[] = [start];
   for (const item of queue) {
-    if (ctx.signal.aborted) {
+    if (ctx.signal.aborted || ctx.state.capped) {
       return;
+    }
+    if (visited.has(item.path)) {
+      // 跳过已展开过的目录（下层走过的那棵树会在上层重新出现）。
+      // oxlint-disable-next-line eslint/no-continue -- 换成"条件成立才入队"要把三层判断嵌进一个表达式，读起来比 continue 更难（同 listChildren 那处）
+      continue;
     }
     if (item.isDir) {
       if (ctx.state.dirs >= PREFLIGHT_MAX_DIRS) {
         ctx.state.capped = true;
         return;
       }
+      visited.add(item.path);
       ctx.state.dirs += 1;
       ctx.state.walked.push(item.rel);
       // oxlint-disable-next-line eslint/no-await-in-loop -- 顺序展开一层：见文件头（并发列目录同样会爆 fd；这处 await 也是取消与墙钟的中断点）
@@ -358,6 +394,47 @@ async function walkForRefs(ctx: ScanCtx, rootTarget: FsTarget): Promise<void> {
         return;
       }
     }
+  }
+}
+
+/**
+ * **分层遍历**：预算优先花在"离目标最近"的那些文件上。
+ *
+ * 原先是从 `root` 做一趟纯广度优先 —— 大仓里预算恰好在最有用的文件**之前**耗尽：
+ * BFS 会先把 `apps/a`、`apps/b`… 全走一遍才轮到目标那个深目录与它同级的 `test/` 层。
+ * 结果是引用面永远 `complete === false`、refs 凭证永远给不出，而预检恰恰在最需要它的
+ * 仓库里等于没做（这是本次要修的 bug）。
+ *
+ * 现在分两层：
+ *  1. **层级自下而上**：从目标所在目录起，一层层向上走到 `root`（`ancestorLevelsOf`）。
+ *     每层走完（或被预算截断）再上一层 —— 目标在下一层时，近邻就已经被读完了。
+ *  2. **层内广度优先**：同一层里先把该层自己的文件读完，再下钻它的子目录
+ *     （`walkLevel`）。少了这一条，一个装了几百个文件的子目录会把同层的引用者挤掉。
+ *
+ * 已展开过的目录不再进队列（`visited`）：下层走过的那棵树在上层会出现，不能重走。
+ */
+async function walkForRefs(ctx: ScanCtx, rootTarget: FsTarget): Promise<void> {
+  const visited = new Set<string>();
+  for (const level of ancestorLevelsOf(ctx.root, ctx.targetN)) {
+    if (ctx.signal.aborted || ctx.state.capped) {
+      return;
+    }
+    const rel = level === ctx.root ? "" : level.slice(ctx.root.length + 1);
+    let target: FsTarget | undefined;
+    if (level === ctx.root) {
+      target = rootTarget;
+    } else {
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- 逐层顺序定身份：层数就是目标到 root 的深度（个位数），而并发解析会在远端后背上一次开几枚往返；这处 await 也是取消的中断点
+        target = await ctx.fs.resolve(level, { signal: ctx.signal });
+      } catch {
+        // 这一层解析不出来 = 它的子树没被走 ⇒ 遍历不算完整（保守，而不是静默当它不存在）。
+        ctx.state.capped = true;
+        return;
+      }
+    }
+    // oxlint-disable-next-line eslint/no-await-in-loop -- 逐层顺序走：上一层的预算位决定要不要继续往上（走完一层才可能 capped）；这处 await 也是取消的中断点
+    await walkLevel(ctx, { path: level, rel, target, isDir: true, size: undefined }, visited);
   }
 }
 

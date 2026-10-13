@@ -13,6 +13,10 @@
 // 带变量的文案用 `{name}` 占位符（与官方 client-locale 同字形），由本模块的 fillTemplate 填充；
 // 两语模板的占位符集合是否一致由测试比对（翻译漏掉插值是这类改造最容易静默发生的错）。
 import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
+// 形状单源在零依赖的 ./fix.ts（**不能**从 ./danger-rules.ts 借：那会把它拖进客户端的
+// 类型程序，而它导的是 node:os/node:path —— 实测 TS2591 `Cannot find name 'node:os'`）。
+// 这里只为了类型编译期绑住「角色 → 模板」那张表。
+import type { Fix } from "./fix.ts";
 
 /**
  * 模板槽位：占位符名 → 已文本化的替换值。
@@ -39,6 +43,11 @@ export function fillTemplate(template: string, slots: MessageSlots): string {
 
 /** 本包 host 侧产出的全部模型可读文案。 */
 export interface DangerGuardMessages {
+  // ── 出路（`Fix` 的单行渲染；见 renderFix）────────────────────────────────────
+  /** 绕过旗标档：点名命令里哪几枚（短旗标簇里则是其中哪个字母）越界（槽位 values）。 */
+  readonly fixBypassFlag: string;
+  /** 灾难目标档：点名哪几个目标触发判据（槽位 values）。 */
+  readonly fixDisasterTarget: string;
   // ── bash / 编辑闸的拒绝理由（lib/danger-rules.ts）───────────────────────
   /** git 钩子绕过（--no-verify 及缩写 / core.hooksPath）。 */
   readonly noVerify: string;
@@ -51,6 +60,39 @@ export interface DangerGuardMessages {
   /** 执行面里那条命令没被检查到（嵌套 shell 的 `-c` 体、解释器的代码串、超出长度上限的输入）
    *  → 需用户确认。 */
   readonly nestedShellUnconfirmed: string;
+  // ── git 破坏族（A1；全部 `ask` 档）─────────────────────────────────────────────
+  /** `git reset --hard`（丢弃未提交改动）。 */
+  readonly gitResetHard: string;
+  /** `git checkout -- <path>` / `git checkout .`（丢弃路径改动）。 */
+  readonly gitCheckoutDiscard: string;
+  /** `git restore <path>`（丢弃工作区改动）。 */
+  readonly gitRestoreDiscard: string;
+  /** `git clean -f*`（删未跟踪文件）。 */
+  readonly gitCleanForce: string;
+  /** `git stash drop|clear`（丢 stash）。 */
+  readonly gitStashDrop: string;
+  /** `git branch -D`（强删分支）。 */
+  readonly gitBranchDelete: string;
+  /** `git push --force` 家族（重写远端）。 */
+  readonly gitForcePush: string;
+  // ── 基础设施破坏族（A2；全部 `ask` 档）─────────────────────────────────────────
+  /** `terraform destroy`。 */
+  readonly tfDestroy: string;
+  /** `terraform apply -auto-approve`。 */
+  readonly tfAutoApprove: string;
+  /** `docker * prune`。 */
+  readonly dockerPrune: string;
+  /** `kubectl delete`。 */
+  readonly kubectlDelete: string;
+  /** 数据库迁移命令。 */
+  readonly dbMigrate: string;
+  // ── 爆炸半径预演（`ask` 档专属：把"这一步会改动什么"量给用户看）─────────────────
+  /** 预演块头（槽位 command/body）。 */
+  readonly blastHead: string;
+  /** 预演零输出 —— 那是"此刻没有待丢的东西"这条结论，不是"什么都没查到"（槽位 command）。 */
+  readonly blastEmpty: string;
+  /** 预演输出被上限收紧（槽位 chars/lines）。 */
+  readonly blastClip: string;
   /** 编辑目标是密钥/凭据文件。 */
   readonly secretPath: string;
   /** 编辑目标长到没法判（超出可判定长度上限）→ 需用户确认。 */
@@ -153,21 +195,82 @@ export interface DangerGuardMessages {
 
 export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
   zh: {
+    fixBypassFlag:
+      "出问题的是这几枚：{values}。把它们从命令里去掉后重试同一操作（若它在短旗标簇里，" +
+      "去掉的是**簇内对应的那个字母**，其余字母是真旗标，别一起删）。",
+    fixDisasterTarget:
+      "被判灾难的是这几个目标：{values}。把**它们**换成项目内的相对路径（例如 ./build）后重试；" +
+      "命令里其余目标是安全的，不必跟着改。",
+    gitResetHard:
+      "[danger-guard] `git reset --hard` 会丢弃工作区与索引里**所有未提交的改动**" +
+      "（未跟踪文件不动），且不可撤销。先 `git stash push -u` 把改动收起来（之后 " +
+      "`git stash pop` 拿回来）再重置；确实要重来时请用户确认，审批通过即执行。",
+    gitCheckoutDiscard:
+      "[danger-guard] 这条 `git checkout` 会**丢弃** `--` 之后那些路径的未提交改动。" +
+      "先 `git diff <path>` 看清要丢的是什么，或 `git stash push <path>` 存一份再丢；" +
+      "也可请用户确认。",
+    gitRestoreDiscard:
+      "[danger-guard] `git restore` 把工作区文件还原到 HEAD/索引的版本，**当前改动就此丢失**。" +
+      "只想去掉暂存而不动工作区时用 `--staged` 单用（那条不丢内容）；" +
+      "要丢内容时先 `git stash push` 或 `git diff` 看一眼，或请用户确认。",
+    gitCleanForce:
+      "[danger-guard] `git clean -f` 删除未跟踪文件；带 `-x` 连 `.gitignore` 里的一起删。" +
+      "先跑 `git clean -nd`（`-n` 只打印清单、不删）确认无误会再执行，或请用户确认。",
+    gitStashDrop:
+      "[danger-guard] `git stash drop`/`clear` 永久丢掉 stash 条目，没有回收站。" +
+      "先 `git stash list` 看清是哪一条、必要时 `git stash apply` 先落一份再删；" +
+      "或请用户确认。",
+    gitBranchDelete:
+      "[danger-guard] `git branch -D` 强删分支：未合并的提交会失去那个分支引用" +
+      "（reflog 里还能捞，但不该指望）。先 `git branch --merged` 看它是否已合并；" +
+      "或请用户确认。",
+    gitForcePush:
+      "[danger-guard] 强制推送会**重写远端分支历史**，别人的本地副本会与它分叉。" +
+      "只是不想覆盖别人的提交时用 `--force-with-lease`；确属 rebase 后的常规强推，" +
+      "请用户确认后执行。",
+    tfDestroy:
+      "[danger-guard] `terraform destroy` 会删掉这个 state 里的**全部**资源，" +
+      "而且删除顺序由依赖图决定、不可撤销。先 `terraform plan -destroy` 看清会删什么；" +
+      "只删一部分用 `-target=`；确实要整体销毁时请用户确认后执行。",
+    tfAutoApprove:
+      "[danger-guard] `-auto-approve` 跳过 terraform 自己那道交互确认 —— " +
+      "apply 的后果不再经过任何人过目。先 `terraform plan` 看一遍再决定；" +
+      "或去掉该旗标，让 terraform 自己问你。",
+    dockerPrune:
+      "[danger-guard] `docker … prune` 删掉未使用的镜像/容器/卷/网络；`-a`/`--all` " +
+      '把"未使用"扩到"没在跑的"（包含别人正在用的镜像层与数据卷）。' +
+      "先 `docker system df` 看占用，支持 `--dry-run` 的版本先加它打印一遍；" +
+      "或请用户确认。",
+    kubectlDelete:
+      "[danger-guard] `kubectl delete` 删集群对象（Pod/Deployment/PVC/Namespace…），" +
+      "删 PVC 与 Namespace 会连带数据。先 `kubectl get <类型> <名字> -o yaml` 看清对象，" +
+      "或用 `--dry-run=client` 预演；或请用户确认。",
+    dbMigrate:
+      "[danger-guard] 数据库迁移会改动 schema，而多数迁移不可逆（丢列/丢表尤其）。" +
+      "先跑各工具自己的干跑看清将执行的语句：`manage.py migrate --plan`、" +
+      "`prisma migrate diff`、`alembic upgrade --sql`、`flyway migrate` 前先 `flyway info`；" +
+      "确认前先备份；或请用户确认。",
+    blastHead: "[预演] `{command}`（只读）：\n{body}",
+    blastEmpty:
+      "[预演] `{command}` 没有任何输出 —— **这一步此刻不会改动任何东西**（工作区本来就是干净的）。",
+    blastClip: "（输出已按上限收紧到 {lines} 行 / {chars} 字符）",
     noVerify:
       "[danger-guard] 检测到 git 钩子绕过（--no-verify 及其缩写 -n / core.hooksPath 重定向）。" +
       "它会让提交跳过 pre-commit 质量与安全检查。请移除该旗标正常提交；" +
       "若钩子误报，先修钩子或与用户确认豁免，不要绕过。",
     rmrf:
-      "[danger-guard] rm -rf 的目标是家目录/根/上跳路径，会灾难性删除用户数据。" +
+      "[danger-guard] rm -rf 的目标是家目录本身、家目录直接子项、根或上跳路径，会灾难性删除用户数据。" +
       "请在目标项目目录内做相对路径清理（如 rm -rf ./build），或先与用户确认。",
     pipeShell:
       '[danger-guard] 检测到"下载即执行"管道（curl/wget | sh/bash）。' +
       "远程脚本未审计即执行有任意代码风险。请先下载到本地（curl -O），" +
       "审计内容并经用户确认后再执行。",
     devServer:
-      "[danger-guard] 该命令会启动长驻开发服务器（dev/watch/vite 等），" +
-      "在 Agent 会话内会挂死当前回合或占住后台。请改用一次性命令（build/check/test），" +
-      "确需长驻服务时请先与用户确认并由用户在独立终端启动。",
+      "[danger-guard] 该命令会启动长驻开发服务器（dev/watch/vite 等）。" +
+      "前台跑它会把这一回合挂住到超时为止。两条出路：①确需长驻服务时，**带 " +
+      "`run_in_background: true` 重试**——宿主的作业面会立刻返回 job id 并施加 " +
+      "`job_output` / `job_kill` 管它，不设时限；②改用一次性命令（build/check/test）。" +
+      "（由用户在自己的终端启动当然也可以。）",
     nestedShellUnconfirmed:
       "[danger-guard] 这条命令真正要执行的那段内容**未被检查**：嵌套 shell 的 `-c` 体因引号不闭合被" +
       "截断、套娃层数超出下钻上限（嵌套 `-c` 与 `$( )` 命令替换各自有一道层数界）、段头是取代码串再" +
@@ -175,7 +278,9 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "或命令长度超出可判定上限。" +
       "这不是「已确认危险」也不是「已确认安全」——请勿原样重试，" +
       "把它贴给用户、由用户显式确认后再执行；" +
-      '或改写成单层、引号闭合、直白可读的形态（如 bash -c "rm -rf ./build"）后重试。',
+      '或改写成单层、引号闭合、直白可读的形态（如 bash -c "rm -rf ./build"）后重试。' +
+      "若是解释器代码串那一类（python -c / node -e / perl -e），把代码写进文件再执行" +
+      "（如 python3 script.py），或改用 read / grep / glob 这类本机工具完成同样的读取。",
     secretPath:
       "[danger-guard] 编辑目标是密钥/凭据文件（.ssh、私钥、证书、密钥库）。" +
       "凭据面不由模型直接改动；确需变更请让用户在终端手动操作。",
@@ -262,13 +367,80 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
     preflightSummary: "danger-guard 预检：随本次读取附上目标的引用面",
   },
   en: {
+    fixBypassFlag:
+      "These are the offending flag(s): {values}. Remove them from the command and retry the same " +
+      "operation (when one of them sits inside a short flag cluster, drop **that letter** — the " +
+      "other letters are real flags, don't delete them too).",
+    fixDisasterTarget:
+      "These targets triggered the disaster rule: {values}. Replace **them** with " +
+      "project-relative paths (e.g. ./build) and retry; the command's other targets are safe " +
+      "and need no change.",
+    gitResetHard:
+      "[danger-guard] `git reset --hard` discards **every uncommitted change** in the working " +
+      "tree and the index (untracked files stay), and it cannot be undone. Stash first " +
+      "(`git stash push -u`, recover with `git stash pop`) and then reset; when the reset really " +
+      "is wanted, ask the user — approval runs it.",
+    gitCheckoutDiscard:
+      "[danger-guard] This `git checkout` **discards** the uncommitted changes of the paths after " +
+      "`--`. Look first with `git diff <path>`, or keep a copy with `git stash push <path>`; " +
+      "asking the user works too.",
+    gitRestoreDiscard:
+      "[danger-guard] `git restore` puts working-tree files back to the HEAD/index version — " +
+      "**the current changes are gone**. To only unstage without touching the working tree, use " +
+      "`--staged` alone (that form keeps content); to discard content, look with " +
+      "`git stash push` / `git diff` first, or ask the user.",
+    gitCleanForce:
+      "[danger-guard] `git clean -f` deletes untracked files; with `-x` it also deletes what " +
+      "`.gitignore` covers. Run `git clean -nd` first (`-n` prints the list without deleting), " +
+      "or ask the user.",
+    gitStashDrop:
+      "[danger-guard] `git stash drop`/`clear` throws stash entries away for good — there is no " +
+      "trash bin. Check `git stash list` to see which one it is, land a copy with " +
+      "`git stash apply` when in doubt, or ask the user.",
+    gitBranchDelete:
+      "[danger-guard] `git branch -D` force-deletes a branch: unmerged commits lose that " +
+      "reference (reflog can still find them, but do not count on it). Check " +
+      "`git branch --merged` first, or ask the user.",
+    gitForcePush:
+      "[danger-guard] A force push **rewrites the remote branch history**, so everyone else's " +
+      "local copy diverges from it. Use `--force-with-lease` when the point is merely not to " +
+      "clobber others' commits; for a plain post-rebase force push, ask the user first.",
+    tfDestroy:
+      "[danger-guard] `terraform destroy` deletes **every** resource in this state, in " +
+      "dependency-graph order, and it cannot be undone. Look first with " +
+      "`terraform plan -destroy`; narrow it with `-target=`; ask the user before destroying " +
+      "the whole thing.",
+    tfAutoApprove:
+      "[danger-guard] `-auto-approve` skips terraform's own interactive confirmation — the " +
+      "consequences of the apply pass nobody's eyes. Run `terraform plan` first, or drop the " +
+      "flag and let terraform ask you.",
+    dockerPrune:
+      "[danger-guard] `docker … prune` deletes unused images/containers/volumes/networks; " +
+      '`-a`/`--all` widens "unused" to "not currently running" (which includes image layers ' +
+      "and volumes someone else is using). Check `docker system df` first, add `--dry-run` on " +
+      "versions that support it, or ask the user.",
+    kubectlDelete:
+      "[danger-guard] `kubectl delete` removes cluster objects (Pod/Deployment/PVC/Namespace…), " +
+      "and deleting a PVC or a Namespace takes data with it. Look first with " +
+      "`kubectl get <kind> <name> -o yaml`, rehearse with `--dry-run=client`, or ask the user.",
+    dbMigrate:
+      "[danger-guard] A database migration changes the schema, and most migrations are " +
+      "irreversible (dropped columns and tables especially). Run the tool's own dry run to see " +
+      "the statements first: `manage.py migrate --plan`, `prisma migrate diff`, " +
+      "`alembic upgrade --sql`, `flyway info` before `flyway migrate`. Back up before " +
+      "confirming, or ask the user.",
+    blastHead: "[rehearsal] `{command}` (read-only):\n{body}",
+    blastEmpty:
+      "[rehearsal] `{command}` printed nothing — **this step changes nothing right now** (the " +
+      "working tree is already clean).",
+    blastClip: "(output clipped to the {lines}-line / {chars}-character cap)",
     noVerify:
       "[danger-guard] Git hook bypass detected (--no-verify, its abbreviations, or a " +
       "core.hooksPath redirect). It makes the commit skip the pre-commit quality and security " +
       "checks. Drop the flag and commit normally; if a hook cries wolf, fix the hook or agree an " +
       "exemption with the user instead of bypassing it.",
     rmrf:
-      "[danger-guard] The target of this rm -rf is the home directory, / or an upward path — it " +
+      "[danger-guard] The target of this rm -rf is the home directory itself, a direct child of it, / or an upward path — it " +
       "would delete user data catastrophically. Clean up with relative paths inside the target " +
       "project (e.g. rm -rf ./build), or confirm with the user first.",
     pipeShell:
@@ -276,10 +448,12 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "script without auditing it means arbitrary code. Download it first (curl -O), audit the " +
       "content, and execute only after the user confirms.",
     devServer:
-      "[danger-guard] This command starts a long-running dev server (dev/watch/vite, …). Inside " +
-      "an agent session it hangs the current turn or squats a background job. Use a one-shot " +
-      "command instead (build/check/test); when a long-running server really is needed, have the " +
-      "user start it in their own terminal.",
+      "[danger-guard] This command starts a long-running dev server (dev/watch/vite, …). Run in " +
+      "the foreground it blocks this turn until it times out. Two ways out: (1) when the server " +
+      "really is needed, **retry with `run_in_background: true`** — the host's job surface returns " +
+      "a job id immediately, imposes no deadline, and hands you `job_output` / `job_kill`; " +
+      "(2) use a one-shot command instead (build/check/test). Having the user start it in their " +
+      "own terminal works too.",
     nestedShellUnconfirmed:
       "[danger-guard] The part this command actually executes was never inspected: the `-c` body " +
       "of a nested shell was truncated by unbalanced quotes, the nesting went past the drill-down " +
@@ -288,7 +462,9 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "perl -e, … — what that language does is not visible at the command-lexer level), or the " +
       "command is longer than the judgable limit. This is neither 'confirmed dangerous' nor " +
       "'confirmed safe' — do not retry it verbatim. Paste it to the user and run it only after " +
-      'they explicitly confirm; or rewrite it as one plain, quote-balanced layer (e.g. bash -c "rm -rf ./build") and retry.',
+      'they explicitly confirm; or rewrite it as one plain, quote-balanced layer (e.g. bash -c "rm -rf ./build") and retry. ' +
+      "For the interpreter case (python -c / node -e / perl -e), put the code in a file and run it " +
+      "(e.g. python3 script.py), or use a built-in tool (read / grep / glob) for the same read.",
     secretPath:
       "[danger-guard] The edit target is a secret/credential file (.ssh, private keys, " +
       "certificates, keystores). Credentials are not edited by the model; when one really must " +
@@ -408,4 +584,41 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "shown above.",
     preflightSummary: "danger-guard preflight: reference surface attached to this read result",
   },
+};
+
+/**
+ * 一条 `Fix` 渲染成**单独一行**（宿主把它接在拒绝理由之后）。
+ *
+ * 「角色 → 用哪句模板」这张表收在这里而不是调用点：调用点是 host，而角色集住在
+ * `lib/danger-rules.ts`。收在中间这枚模块里，两边各改一处时会当场红——写死在 host
+ * 的话，新增角色会静默落进 `fixDisasterTarget` 那一支（两支都是"点名 + 换掉"，
+ * 读起来还挺通顺，于是测试也未必抓得住）。
+ *
+ * `offending` 恒非空：lib 侧两处产出点都在组装前判过长度（空名单交出的是
+ * "没有 fix"，不是"有 fix 但没内容"）。
+ */
+export function renderFix(fix: Fix, messages: DangerGuardMessages): string {
+  const template = fix.role === "bypassFlag" ? messages.fixBypassFlag : messages.fixDisasterTarget;
+  return fillTemplate(template, { values: fix.offending.join(messages.listSeparator) });
+}
+
+/**
+ * 一枚键在**全部语言**下的文案，交成官方 `ApprovalRequestEvent.displayReason` 的形状
+ * （`{ readonly en: string; readonly [locale: string]: string }`）。
+ *
+ * 为什么不写 `{ en: MESSAGES.en[key], zh: MESSAGES.zh[key] }`：那与 `MessagesCatalog` 的
+ * `Record<Locale, …>` 设计正相反 —— 它的注释明写「键集绑 Locale 而不是手写 `{ zh; en }`：
+ * 宿主哪天加一门语言，这两处必须**一起**响」，否则新增那门语言会静默取不到文案
+ *（库里的 `messagesFor` 就是为这条才按下标索引而不是二元分派）。这里逐 locale 取，
+ * 语言集扩宽时自动跟上；`en` 单独显式写一次，是因为官方把它定成**必填**成员，
+ * 而索引签名给不出必填保证。
+ */
+export const displayReasonOf = (
+  key: keyof DangerGuardMessages,
+): { en: string; [locale: string]: string } => {
+  const out: { en: string; [locale: string]: string } = { en: MESSAGES.en[key] };
+  for (const [locale, table] of Object.entries(MESSAGES)) {
+    out[locale] = table[key];
+  }
+  return out;
 };

@@ -26,6 +26,35 @@ import { MESSAGES } from "../lib/messages.ts";
 import { call as fxCall, result as fxResult } from "./fixtures/events.ts";
 // 事件类型与生产面（host.ts）同源：官方判别联合由 shared 具名 re-export。
 import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
+import type { Events } from "@deepseek-ai/cordis";
+
+/** `tools/pre-execute` 的返回域（与 host.ts 里那枚读法同一条：`Awaited<ReturnType<next>>`）。 */
+type PreDecision = Awaited<ReturnType<Parameters<Events["tools/pre-execute"]>[1]>>;
+
+/**
+ * 走一次 `tools/pre-execute` 瀑布。本文件的 mock 把监听器**按事件名**收在
+ * `disposedHandlers` 里（真实 cordis 的 emit 语义），所以这里按键取出来驱动一次。
+ * `next()` 一律回 `allow`：本组用例测的是"下游本来会放行时，本插件把它换成什么"。
+ * 入参收 `unknown`（驱动替身，形状由各用例按自己的道具给）。
+ */
+async function runPreExecute(ctx: MockCtx, exec: unknown): Promise<PreDecision> {
+  const listeners = ctx.disposedHandlers.get("tools/pre-execute") ?? [];
+  assert.equal(listeners.length, 1, "pre-execute 监听器已注册（apply 之后才该调用）");
+  const listener = listeners.at(0) as unknown as (
+    exec: unknown,
+    next: () => Promise<PreDecision>,
+  ) => Promise<PreDecision>;
+  return listener(exec, () => Promise.resolve({ kind: "allow" }));
+}
+
+/** 从一次 pre-execute 的结论里取出 `ask` 臂（官方 `PreToolDecision` 是判别联合：
+ *  不显式收窄就取不到 `reason`/`displayReason` —— 这正是"形状钉在官方声明上"的体现）。 */
+function askArmOf(decision: PreDecision): Extract<PreDecision, { kind: "ask" }> {
+  if (decision.kind !== "ask") {
+    assert.fail(`预期走审批通道，实际结论是 ${decision.kind}`);
+  }
+  return decision;
+}
 
 /** locale 命名空间未注册（本文件的 mock 默认）→ 宿主按中文渲染拒绝理由，
  *  期望值即中文文案表的对应条目：断言看的是"回给模型的那句话"，与迁移前逐字相同。 */
@@ -96,8 +125,12 @@ interface MockCtx {
   effect: (fn: () => (() => void) | undefined) => void;
   bus: LessonLoopSpy;
   guardInstalled: GuardCall | null;
+  /** 服务注册路径（`TypertRemoteService` 构造时会走它）。本包的替身只探它可调用。 */
+  reflect: { provide: (name: string, value?: unknown) => () => void };
   effects: (() => void)[];
   disposedHandlers: Map<string, ((session: { id?: unknown }) => void)[]>;
+  /** 除设置读数口/log 之外的可选服务面（`shell` 等）。缺省空表 = 未装配。 */
+  extraServices: Record<string, unknown>;
 }
 
 /** guard 谓词的执行参数类型（抽取 `extends (exec: infer Exec)` 的推断，改名避开 id-length）。 */
@@ -149,7 +182,16 @@ function createMockCtx(bus: LessonLoopSpy = {}, value?: Partial<Config>): MockCt
   const ctx: MockCtx = {
     guardInstalled: null,
     effects: [],
+    // 该条目现在会注册一枚 Typert Remote 服务（`ctx.reflect.provide` 是它的注册路径，见
+    // lib/stats-remote.ts）。真宿主里 `reflect` 恒在，手写 mock 里补一枚最小替身就够 ——
+    // 与下面 `effect` / `provide` 那几位的待遇一致。
+    reflect: {
+      provide: () => (): void => {
+        void 0;
+      },
+    },
     disposedHandlers: new Map(),
+    extraServices: {},
     value: { ...DEFAULT_CTX_VALUE, ...value },
     bus,
     tools: {
@@ -180,7 +222,12 @@ function createMockCtx(bus: LessonLoopSpy = {}, value?: Partial<Config>): MockCt
     if (name === "workingDirectory") {
       return ctx.workingDirectory;
     }
-    return name === "lessonLoop" ? ctx.bus : undefined;
+    if (name === "lessonLoop") {
+      return ctx.bus;
+    }
+    // 除这几枚之外的可选服务面（本包读的：`shell` —— 沙箱模式与爆炸半径预演）。
+    // 缺省空表 = 未装配 ⇒ 与"没装执行器"同解（闸门照常拦，预演退回盲问）。
+    return ctx.extraServices[name];
   };
   // 按事件名路由（真实 cordis 的 emit 语义）：此前把所有监听器塞进同一个数组，
   // "会话销毁"组用例会把 locale 失效监听器也一起喂到——今天无害，但 mock 的分发
@@ -362,11 +409,16 @@ function reportSpy(): { ctx: MockCtx; reports: unknown[] } {
   return { ctx, reports };
 }
 
-describe("bash 闸的两种结论在总线侧必须可分辨（拦 vs 认不准）", () => {
-  it("命中危险模式 → 签名 = 命令原文，needsUserConfirmation=false", () => {
+describe("bash 闸的两种结论在总线侧必须可分辨（硬拒 vs 需确认）", () => {
+  it("命中危险模式 → 走 guard 硬拒，签名 = 命令原文，needsUserConfirmation=false", () => {
     const { ctx, reports } = reportSpy();
     applyPlugin(ctx);
-    assert.equal(ctx.guardInstalled!.fn(bashExec), RMRF_MESSAGE);
+    const denied = ctx.guardInstalled!.fn(bashExec);
+    // 基础理由逐字是消息表那条；其后另起一行是**出路**（点名触发判据的目标）。
+    // 两段合起来比一条会把出路那一行的存在与内容一起糊掉——而那正是"模型知道该改什么"。
+    assert.ok(denied !== undefined, "预期被拦，实际放行");
+    assert.ok(denied.startsWith(`${RMRF_MESSAGE}\n`), `拒绝理由结构变了：${denied}`);
+    assert.ok(denied.includes("/"), "出路未点名触发判据的目标");
     assert.equal(reports.length, 1);
     const rep = reports[0] as ReportPayload;
     assert.equal(rep.category, BASH_DENIAL_CATEGORY);
@@ -374,11 +426,27 @@ describe("bash 闸的两种结论在总线侧必须可分辨（拦 vs 认不准�
     assert.equal(rep.evidence["needsUserConfirmation"], false);
   });
 
-  it("`-c` 体未被检查 → 同一通道上报，签名用命令原文并标记需确认", () => {
+  it("`-c` 体未被检查 → 走 ask 通道（guard 不拒），同类别上报且标记需确认", async () => {
     const { ctx, reports } = reportSpy();
     applyPlugin(ctx);
-    // 守卫仍返回字符串（= 物理拒绝，模型不会静默跑到没检查过的命令）
-    assert.equal(ctx.guardInstalled!.fn(bashUnconfirmedExec), NESTED_SHELL_UNDETERMINED_MESSAGE);
+    // 结论一：**guard 不再拒它**。这一档的收口在 `tools/pre-execute` 的宿主审批上
+    //（`RULE_TIER.nestedShellUnconfirmed === "ask"`）—— 旧实现把一段"请贴给用户确认"
+    // 的文案丢回给模型，而模型完全可以无视它直接重试；改档后模型绕不过去。
+    assert.equal(
+      ctx.guardInstalled!.fn(bashUnconfirmedExec),
+      undefined,
+      "ask 档不该由 guard 收口（两处都收口会让用户点了允许还是被拒）",
+    );
+    // 结论二：审批请求确实发出去了，并且把它翻成了宿主认的 `ask` 决定。
+    const decision = askArmOf(await runPreExecute(ctx, bashUnconfirmedExec));
+    assert.equal(decision.reason, NESTED_SHELL_UNDETERMINED_MESSAGE);
+    // `displayReason` 官方定成 `{ readonly en: string; readonly [locale: string]: string }`
+    // —— 人读那一面（弹窗），与回给模型的 `reason` 同源同键。
+    assert.deepEqual(decision.displayReason, {
+      en: MESSAGES.en.nestedShellUnconfirmed,
+      zh: MESSAGES.zh.nestedShellUnconfirmed,
+    });
+    // 结论三：教训总线仍看得见它，且能与"已确认危险"区分开。
     assert.equal(reports.length, 1, "需确认同样进教训总线");
     const rep = reports[0] as ReportPayload;
     assert.equal(rep.source, "danger-guard");
@@ -387,10 +455,30 @@ describe("bash 闸的两种结论在总线侧必须可分辨（拦 vs 认不准�
     // 签名用**命令原文**：类别级归并在 lesson-loop 侧（CATEGORY_SIGNATURES 的 dangerous-bash），
     // 原文因此落进 evidence.signature —— 卡片不再按套娃形态碎片化，人审也看得见是哪条命令。
     assert.equal(rep.signature, 'bash -c "rm -rf /');
-    assert.equal(rep.detail, NESTED_SHELL_UNDETERMINED_MESSAGE);
-    assert.equal(rep.evidence["tool"], "bash");
     assert.equal(rep.evidence["needsUserConfirmation"], true);
     assert.notEqual(rep.detail, RMRF_MESSAGE, "两种结论的文案不同源，模型可分辨");
+  });
+
+  it("ask 档**压不过** deny 档：同一串里既有需确认段又有灾难段 → 整串按硬拒收口", async () => {
+    const { ctx, reports } = reportSpy();
+    applyPlugin(ctx);
+    // 这是引入 ask 档带出来的漏拦面：`commandDanger` 原本"首命中即返回"，而 `ask` 档命中
+    // 会让扫描提前收工 ⇒ 后一段的 `rm -rf /` **从未被判定**；用户点了允许之后 guard 跑起来
+    // 看到的仍是 ask 结论（按 RULE_TIER 让路）⇒ 灾难执行。严重度择优把这条堵住。
+    //
+    // 输入要选**两段都判得出**的：`python3 -c "print(1)"` 是"非 shell 解释器的代码串"那一档
+    //（opaque ⇒ `nestedShellUnconfirmed` ⇒ ask），而 `rm -rf /` 是 deny。
+    // 不能用 `bash -c "…` 那种引号不闭合的写法——按定义它就取不出体，整串只该有一个 ask 结论，
+    // 测不到"前 ask 后 deny"这个形状（第一版用例就是踩在这个前提上）。
+    const command = 'python3 -c "print(1)" && rm -rf /';
+    const denied = ctx.guardInstalled!.fn({ name: "bash", arguments: { command } });
+    assert.ok(denied?.startsWith(`${RMRF_MESSAGE}\n`) === true, `整串应按 deny 收口：${denied}`);
+    // 已按 deny 收口的串**不该再弹审批** —— 否则 `deny` 那一段会被一并批准
+    //（审批是整次调用的放行，没有"只批准后半段"这种语义）。
+    const preDecision = await runPreExecute(ctx, { name: "bash", arguments: { command } });
+    assert.notEqual(preDecision.kind, "ask", "已按 deny 收口的串不该再弹审批");
+    assert.equal(reports.length, 1);
+    assert.equal((reports[0] as ReportPayload).evidence["needsUserConfirmation"], false);
   });
 });
 
@@ -949,14 +1037,17 @@ describe("检索工具的在位探测：指令只点这台宿主上注册着的�
   // 默认名单里 grep/glob 出自宿主 stock 目录，而 zg_search（连它的 root/query/fts/vector 参数面）
   // 出自**另一枚插件**（本仓同级包 @jayyuen66/dsh-zvec-grep）——装不装逐台不同。没装还点名它，
   // 就是"指令不可照做"：模型照着烧一次调用，然后被同一个缺项再拒一次。
-  it("get 认得出的名字才进指令；认不出的一律不点", () => {
+  it("stock 名字（grep/glob）免探一律点；插件工具按探测结果点", () => {
     const ctx = createMockCtx();
     ctx.tools.get = (name: string): unknown => (name === "grep" ? {} : undefined);
     applyPlugin(ctx);
     const message = ctx.guardInstalled!.fn(editWithoutEvidence("s-present"));
     assert.equal(typeof message, "string");
-    assert.match(message!, /grep/u, "注册在位的照点");
-    assert.doesNotMatch(message!, /glob|zg_search/u, "没注册的名字点了就是给模型一条走不通的路");
+    assert.match(message!, /grep/u, "stock 名字照点");
+    // 实测缺陷回归：program 模式下探测面看不见原生工具，早前这下会把 glob 一并摘掉 ⇒
+    // 引用证据只剩 zg_search。stock 名字随宿主出厂，探测不到不等于不存在。
+    assert.match(message!, /glob/u, "stock 名字免探，探不到也不该把门关上");
+    assert.doesNotMatch(message!, /zg_search/u, "插件工具没注册就不点（探测口存在的意义）");
   });
 
   it("探测抛错 ⇒ 一律算「在」：宁可多点名一个名字，也不把模型要走的门关上", () => {
@@ -975,5 +1066,97 @@ describe("检索工具的在位探测：指令只点这台宿主上注册着的�
     applyPlugin(ctx);
     const message = ctx.guardInstalled!.fn(editWithoutEvidence("s-noget"));
     assert.match(message!, /grep/u, "探不到就不筛，判定面一条不减");
+  });
+});
+
+// ── 爆炸半径预演：宿主侧那一趟（`ctx.shell` 的读法与接线）──────────────────────
+//
+// 量证据那一半的判据与渲染在 `lib/blast-radius.ts`（那边的专测逐条钉上限、渲染与失败面）；
+// 这一组钉的是**宿主侧**：读哪个服务、跑的是哪条命令、`deny` 档不跑、缺席时不静默换命令。
+/** 一台"记下入参、答给定输出"的假执行器（提到模块层：它不捕获任何外层变量，
+ *  放 describe 体内每轮重建 —— lint 的 consistent-function-scoping 盯这个）。 */
+const shellSpyOf = (text: string): { specs: unknown[]; shell: Record<string, unknown> } => {
+  const specs: unknown[] = [];
+  return {
+    specs,
+    shell: {
+      resolve: (request: unknown) => request,
+      execute: (spec: unknown) => {
+        specs.push(spec);
+        return Promise.resolve({
+          result: () =>
+            Promise.resolve({ exitCode: 0, timedOut: false, aborted: false, stdout: { text } }),
+        });
+      },
+    },
+  };
+};
+
+/** 装一台带假执行器的 spine（`extraServices` 是 mock 的可选服务面）。 */
+const bootWithShell = (text: string): { ctx: MockCtx; specs: unknown[] } => {
+  const { ctx } = reportSpy();
+  const { specs, shell } = shellSpyOf(text);
+  ctx.extraServices = { shell };
+  applyPlugin(ctx);
+  return { ctx, specs };
+};
+
+describe("ask 档的爆炸半径预演：宿主侧读法与接线", () => {
+  /** 一次 `git reset --hard` 的 `ask` 命中（带 signal：真宿主必带，预演靠它取消）。 */
+  const resetExec = {
+    name: "bash",
+    arguments: { command: "git reset --hard" },
+    signal: new AbortController().signal,
+    agent: { session: { id: "s-1", header: { cwd: "/w/proj" }, snapshotEvents: () => [] } },
+  };
+
+  it("`ask` 档会跑表里那条只读预演，结果接进 `reason` 与 `displayReason`", async () => {
+    const { ctx, specs } = bootWithShell(" M src/a.ts\n?? scratch.txt");
+    const decision = askArmOf(await runPreExecute(ctx, resetExec));
+    assert.equal((specs[0] as { command?: unknown }).command, "git status --porcelain");
+    assert.match(decision.reason ?? "", /scratch\.txt/u, "清单进了模型侧的理由");
+    assert.match(
+      decision.displayReason?.["zh"] ?? "",
+      /scratch\.txt/u,
+      "也进了弹窗那一面 —— 只接 reason 的话用户看不到证据",
+    );
+  });
+
+  it("执行器缺席 ⇒ **盲问**：审批照旧问，只是没有证据（不静默换一条命令）", async () => {
+    const { ctx } = reportSpy();
+    applyPlugin(ctx);
+    const decision = askArmOf(await runPreExecute(ctx, resetExec));
+    assert.equal(decision.reason, MESSAGES.zh.gitResetHard, "没有预演时理由就是基础文案");
+    assert.doesNotMatch(decision.reason ?? "", /\[预演\]/u);
+  });
+
+  it("`deny` 档**不跑预演**（结论已定，白烧一枚子进程没有意义）", async () => {
+    const { ctx, specs } = bootWithShell("x");
+    const denied = ctx.guardInstalled!.fn({
+      name: "bash",
+      arguments: { command: "rm -rf /" },
+      agent: { session: { id: "s-1", header: { cwd: "/w/proj" }, snapshotEvents: () => [] } },
+    });
+    assert.ok(denied !== undefined, "deny 档照旧硬拒");
+    assert.equal(specs.length, 0, "deny 档一枚子进程都不该起");
+  });
+
+  it("没有预演命令的键（如基础设施族）⇒ 不跑，盲问", async () => {
+    const { ctx, specs } = bootWithShell("x");
+    const exec = {
+      name: "bash",
+      arguments: { command: "terraform destroy" },
+      signal: new AbortController().signal,
+      agent: { session: { id: "s-1", header: { cwd: "/w/proj" }, snapshotEvents: () => [] } },
+    };
+    const decision = askArmOf(await runPreExecute(ctx, exec));
+    assert.equal(specs.length, 0, "表里没有它的预演命令");
+    assert.equal(decision.reason, MESSAGES.zh.tfDestroy);
+  });
+
+  it("预演交回的清单**为空**时也给结论（『此刻不会改动任何东西』）", async () => {
+    const { ctx } = bootWithShell("");
+    const decision = askArmOf(await runPreExecute(ctx, resetExec));
+    assert.match(decision.reason ?? "", /不会改动任何东西/u);
   });
 });

@@ -129,6 +129,8 @@ interface MockCtx {
   effect: (fn: () => (() => void) | undefined) => void;
   value: Config;
   guardInstalled: { fn: GuardFn } | null;
+  /** 服务注册路径（`TypertRemoteService` 构造时会走它）。本包的替身只探它可调用。 */
+  reflect: { provide: (name: string, value?: unknown) => () => void };
   preExecute: { fn: PreExecuteFn } | null;
   postExecute: { fn: PostExecuteFn } | null;
   disposed: ((session: unknown) => unknown) | null;
@@ -142,6 +144,14 @@ function createMockCtx(): MockCtx {
   const ctx: MockCtx = {
     guardInstalled: null,
     fsFace: localFsFace(),
+    // 该条目现在会注册一枚 Typert Remote 服务（`ctx.reflect.provide` 是它的注册路径，见
+    // lib/stats-remote.ts）。真宿主里 `reflect` 恒在，手写 mock 里补一枚最小替身就够 ——
+    // 与下面 `effect` / `provide` 那几位的待遇一致。
+    reflect: {
+      provide: () => (): void => {
+        void 0;
+      },
+    },
     inject(deps, activate) {
       if (deps.includes("fs") && ctx.fsFace !== undefined) {
         activate({ fs: ctx.fsFace });
@@ -1263,7 +1273,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       );
     });
 
-    it("遍历截断但有命中：正文与引用都递出，refs 凭证照旧不给", async () => {
+    it("遍历截断但**找到了引用** ⇒ 凭证照给（实证就是实证，而门禁对模型的标准也不是穷尽）", async () => {
       const ctx = createMockCtx();
       ctx.value.smallEditChars = 10;
       apply(ctx);
@@ -1273,11 +1283,17 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
         await editDenyOf(ctx, targetPartial, session),
         "截断扫描也要递出正文",
       );
-      assert.ok(reason.includes(`${REF_LINE_PREFIX}hits.ts`), "根层命中先被读到（BFS 判据）");
+      assert.ok(reason.includes(`${REF_LINE_PREFIX}hits.ts`), "近邻的命中先被读到");
       assert.ok(reason.includes(partialLine(PREFLIGHT_MAX_FILES, rootPartial)), "未扫完必须点名");
-      assert.ok(
-        guardOf(ctx, { name: "edit", args, session }) !== undefined,
-        "半份扫描不算探过引用面",
+      // 判据变了（见 host.ts 的 refsCreditable）：门禁认可模型自己那次**作用域正确**的检索
+      // 当凭证，而那次检索也不是穷尽的 —— 要求我们这趟扫描穷尽比那还严，代价落在最需要预检的
+      // 大仓上（遍历必然被截断 ⇒ 凭证永远给不出 ⇒ 预检白做）。
+      // 找到了引用就是**实证**：模型已经看见了"谁在用"。而"零命中 + 被截断"仍然不给凭证 ——
+      // 假阴性全部住在那一种里（见下一条用例）。
+      assert.equal(
+        guardOf(ctx, { name: "edit", args, session }),
+        undefined,
+        "有命中的半份扫描算探过引用面：模型已经看见谁在用它",
       );
     });
 
@@ -1611,12 +1627,20 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       const target = officialTarget("reuse");
       const reason = await editDenyOf(ctx, target, fakeSession("s-official-reuse", []));
       assert.ok(reason !== undefined, "这一趟确实走了 B 面递证据（否则探针数不到东西）");
-      // 目标一枚 + 扫描起点一枚。远端/沙箱后端下每一枚 resolve 可能是一次往返，
-      // 所以"官方那一形"不许把一次盲改的身份问询从两趟抬成四趟。
-      assert.deepEqual(
-        asked,
-        [target, rootOfficial],
+      // 目标一枚 + 扫描起点一枚 + **每一层扫描起点一枚**（分层遍历要按层下钻，每层的起点
+      // 都得先定身份；层数=目标到 root 的深度）。远端/沙箱后端下每一枚 resolve 可能是一次往返，
+      // 所以这里既钉"同一枚目标只问一次"，也钉"多出来的那几枚是**层**的身份、不是目标的重复"：
+      // 目标那一枚必须在最前且只出现一次。
+      assert.equal(asked[0], target, "目标的身份必须先问、且只问一次");
+      assert.equal(
+        asked.filter((item) => item === target).length,
+        1,
         `同一枚目标被问了不止一次，实际问的是：${asked.join(" , ")}`,
+      );
+      assert.deepEqual(
+        asked.slice(1),
+        [rootOfficial, path.dirname(target)],
+        `层身份问询的形状变了，实际问的是：${asked.join(" , ")}`,
       );
     });
 
@@ -1640,5 +1664,131 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       assert.deepEqual(decision, ALLOW, "非写类调用预检整趟不参与");
       assert.equal(resolves, 0, "没有目标就没有可问的真实路径");
     });
+  });
+});
+
+// ── C：分层预算扫描（修"大仓里 refs 凭证永远给不出"）───────────────────────────
+//
+// 修前的形状：从 `root` 做一趟纯广度优先 —— 大仓里预算恰好在最有用的文件**之前**耗尽
+// （BFS 先把 `apps/a`、`apps/b`… 走完，才轮到目标那个深目录与它同级的 `test/` 层），
+// 于是 `complete` 永远为 false、refs 凭证永远给不出，而预检恰恰在最需要它的仓库里等于没做。
+//
+// 现在分两层：**层级自下而上**（目标所在目录 → … → root），**层内广度优先**（同层文件先读完
+// 再下钻）。这一组用"目标在深处、近邻有引用者、远处有 300 个无命中文件"的真实目录钉住它。
+describe("分层预算扫描（C）：近邻优先，预算不再被远处的兄弟层吃光", () => {
+  let rootDeep: string;
+  let targetDeep: string;
+
+  beforeAll(async () => {
+    rootDeep = await mkdtemp(path.join(tmpdir(), "dg-pf-deep-"));
+    await writeFile(path.join(rootDeep, PROJECT_MARKER), "{}\n");
+    // 远处兄弟层：300 个无命中文件，足以吃光 256 的文件预算。
+    await bulkFiles(path.join(rootDeep, "bulk"));
+    // 目标在两层深处，**引用者就在它同级**（`test/` 是门禁认的层之一）。
+    const dir = path.join(rootDeep, "deep", "mid");
+    await mkdir(path.join(dir, "test"), { recursive: true });
+    // 文件名要带**够长的词干**：匹配词是"全名 + ≥4 字符的词干"（host 的 MIN_STEM），
+    // 而 `mod.ts` 的词干 `mod` 只有 3 字符 ⇒ `"../mod"` 匹配不上，那条夹具会测了个寂寞。
+    targetDeep = path.join(dir, "deepmod.ts");
+    await writeFile(targetDeep, "export const deep = 1;\n");
+    await writeFile(
+      path.join(dir, "test", "deepmod.test.ts"),
+      'import { deep } from "../deepmod";\n',
+    );
+  });
+
+  it("预算先买到近邻：深目标的引用者被读到，far 兄弟层没读也不影响", async () => {
+    const ctx = createMockCtx();
+    ctx.value.smallEditChars = 10;
+    apply(ctx);
+    const session = fakeSession("s-deep", []);
+    const reason = mustDeny(await editDenyOf(ctx, targetDeep, session), "深目标的盲改");
+    assert.ok(
+      reason.includes(`${REF_LINE_PREFIX}deep/mid/test/deepmod.test.ts`),
+      `近邻的引用者必须被读到（旧 BFS 在这里会先读光 bulk/）：${reason.slice(0, 300)}`,
+    );
+    // 遍历仍然被截断（300 个远处的文件读不完）—— 这恰恰是"分层"要证明的事：
+    // 截断发生在**远处**，而不是在目标的近邻之前。
+    assert.ok(reason.includes(partialLine(PREFLIGHT_MAX_FILES, rootDeep)), "未扫完照旧点名");
+  });
+
+  it("截断但找到了引用 ⇒ **凭证照给**：原样重试即放行（这就是那个 bug 的收口）", async () => {
+    const ctx = createMockCtx();
+    ctx.value.smallEditChars = 10;
+    apply(ctx);
+    const session = fakeSession("s-deep-credit", []);
+    const args = editArgs(targetDeep);
+    await editDenyOf(ctx, targetDeep, session);
+    assert.equal(
+      guardOf(ctx, { name: "edit", args, session }),
+      undefined,
+      "预检在大仓里给出凭证 —— 修前这里必然仍被拒（refs 永远凑不齐）",
+    );
+  });
+});
+
+describe("分层遍历的两条保守出口：中途取消 与 层起点解析不出来", () => {
+  // ⚠ 自带夹具：这两条用例**不复用**外层套件的 `targetMain` —— 那是别人的 `beforeAll` 建的，
+  // 而它的 `afterAll` 会把临时目录删掉；兄弟套件之间的这种依赖在单跑一条（`-t`）时会直接
+  // 崩成"目标不存在"（实测踩过：目标为 undefined ⇒ 事实门根本不判 ⇒ 断言测了个寂寞）。
+  let root: string;
+  let target: string;
+
+  beforeAll(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "dg-pf-outlet-"));
+    await writeFile(path.join(root, PROJECT_MARKER), "{}\n");
+    await mkdir(path.join(root, "src"), { recursive: true });
+    target = path.join(root, "src", "outletmod.ts");
+    await writeFile(target, "export const outlet = 1;\n");
+  });
+
+  it("遍历**中途**被取消 ⇒ 该层就地收手、整趟作废（合流信号可以随时中断）", async () => {
+    // `abortAfterLstat` 这枚夹具选项此前**没有任何用例用过**（一枚死夹具）——
+    // 而它守的那处检查（`listChildren` 逐项查取消）正是"信号随时可能中断"的兑现：
+    // 预检的信号是「调用方信号 ⊕ 3 秒墙钟」的合流，墙钟可以在任何一次 await 之后到点。
+    const controller = new AbortController();
+    const ctx = createMockCtx();
+    ctx.value.smallEditChars = 10;
+    ctx.fsFace = localFsFace({ abortAfterLstat: controller });
+    apply(ctx);
+    // `read` 先由会话满足：**正文读取自己也会 `lstat`**（判"是不是普通文件"那一趟），
+    // 于是中止点在扫描之前就落到正文那一趟上，`listChildren` 里那处逐项检查根本走不到。
+    // 这一条要钉的正是扫描里的那处，所以让 B 面跳过正文、直接进扫描。
+    const session = fakeSession("s-abort-mid", readEvents(target));
+    const args = editArgs(target);
+    const decision = await preflightOf(ctx, {
+      name: "edit",
+      arguments: args,
+      signal: controller.signal,
+      agent: fakeAgent(session),
+    });
+    assert.deepEqual(decision, ALLOW, "扫描被取消 ⇒ 整趟作废，B 面不拦");
+    assert.ok(
+      guardOf(ctx, { name: "edit", args, session }) !== undefined,
+      "整趟作罢 ⇒ 退回拒绝路径（而不是静默放行）",
+    );
+  });
+
+  it("某一层起点解析不出来 ⇒ 遍历标成不完整（不是静默当它不存在），而 guard 照旧拒", async () => {
+    const ctx = createMockCtx();
+    ctx.value.smallEditChars = 10;
+    // 目标所在目录那一层（level 0）解析失败：它的子树没被走过，所以这趟扫描不能算完整
+    //（`capped` 必须被置位 —— 静默当它不存在就是让"零命中"冒充一条结论）。
+    ctx.fsFace = localFsFace({ resolveThrows: path.dirname(target) });
+    apply(ctx);
+    const session = fakeSession("s-level-unresolvable", []);
+    const args = editArgs(target);
+    // ⚠ 这里**不能**断言 B 面拒：扫描被截断且零命中 = "什么都没挣到"，B 面那一趟本来就
+    // 整趟让路（递一份"已扫范围内零命中"给模型的价值低于让它照旧走拒绝路径）。
+    // 要钉的是**下游**：让路之后 guard 照旧拒，而不是静默放行。
+    assert.deepEqual(
+      await preflightOf(ctx, { name: "edit", arguments: args, agent: fakeAgent(session) }),
+      ALLOW,
+      "什么都没挣到 ⇒ B 面让路",
+    );
+    assert.ok(
+      guardOf(ctx, { name: "edit", args, session }) !== undefined,
+      "层起点解析不出来 ⇒ 退回拒绝路径（而不是静默放行）",
+    );
   });
 });

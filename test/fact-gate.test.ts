@@ -542,6 +542,10 @@ describe("取证指令双语（文案表按语言渲染）", () => {
     "gapTestNarrow",
     "gapE2e",
     "gapDocs",
+    // 出路那两枚也带 {values}，同样要过"两语占位符集合一致"这道（否则 en 侧会把
+    // 词面原样插进去、模型看到的是一段没被替换的 `{values}`）。
+    "fixBypassFlag",
+    "fixDisasterTarget",
   ] as const;
 
   it("两语模板的 {占位符} 集合一致（翻译不会漏掉插值）", () => {

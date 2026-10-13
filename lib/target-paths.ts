@@ -143,3 +143,47 @@ export async function rememberOfficialTargetsOf(
 export function clearOfficialPaths(): void {
   officialPaths.clear();
 }
+
+/** 宿主注入的**本机形**解析：`realpathSync` 那一形。
+ *  形状即 host.ts 的 `realpathOf`（解析不出来交 `undefined`）。注入而不是 import：
+ *  本模块不 import `node:fs`（见文件头），而它正是"宿主这一层付得起的同步解析"。 */
+export type LocalRealpath = (target: string, cwd: string | undefined) => string | undefined;
+
+/**
+ * 声明目标的解析形表（`声明原文 → 真实路径**清单**`）：宿主注入的本机形与官方后端形并列，
+ * **判定取并集**——两形从不互相替换，所以"官方那一形陈旧/缺席"只会少拦不会多放。
+ *
+ * 为什么单列到本模块：它归属的关注点正是本模块的名字（"不是模型字面量的那两种形"），
+ * 而此前它长在 host.ts 里只为了一枚 `realpathOf`。搬过来之后 host 只负责"把本机那枚
+ * 解析注入进来"，判定侧（读并集）与这里同处一份文件，键形不同源的空间就没了。
+ *
+ * 一形都没到手的目标**不占键**：读侧据此分得清"没有解析形"与"有一枚空清单"，
+ * 而占着键交空数组会把这两件事说成同一件。
+ *
+ * @param targets - 一次调用声明的目标（声明形，未归一）。
+ * @param cwd - 会话工作目录（相对目标按它归一）。
+ * @param localRealpath - 宿主注入的本机形解析。
+ * @returns 目标 → 解析形清单；无解析形的目标不出现在表里。
+ */
+export function resolvedFormsOf(
+  targets: readonly string[],
+  cwd: string | undefined,
+  localRealpath: LocalRealpath,
+): Record<string, string[]> {
+  const forms: Record<string, string[]> = {};
+  for (const target of targets) {
+    const union = new Set<string>();
+    const local = localRealpath(target, cwd);
+    if (local !== undefined) {
+      union.add(local);
+    }
+    const official = officialPathOf(target, cwd);
+    if (official !== undefined) {
+      union.add(official);
+    }
+    if (union.size > 0) {
+      forms[target] = [...union];
+    }
+  }
+  return forms;
+}
