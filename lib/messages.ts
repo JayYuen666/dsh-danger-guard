@@ -109,6 +109,8 @@ export interface DangerGuardMessages {
   /** 首次拒绝的头部。 */
   readonly headFirst: string;
   /** 已确认项清单行（槽位 done）。 */
+  /** 配额被扣下时多一行（缺项里还有 `read`：配额只免上层探查，read 不在豁免内）。 */
+  readonly quotaWithheld: string;
   readonly confirmedLine: string;
   /** 已确认项与检索工具名清单的连接号。 */
   readonly listSeparator: string;
@@ -296,6 +298,8 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
     headRetry: "[fact-gate] 第 {attempt} 轮仍未放行——只缺这 {count} 项（已确认的不再要求）：",
     headNewFile: "[fact-gate] 新建文件免 read，但引用面仍须探（缺一项就一直拒）：",
     headFirst: "[fact-gate] 编辑前先取证（强校验：补齐才放行，缺一项就一直拒）：",
+    quotaWithheld:
+      "· 注意：配额放行只免**上层探查**（引用面与各层），read 不在豁免内——先读过目标原文再重试即可（读一次就够）。",
     confirmedLine: "✓ 已确认：{done}",
     listSeparator: "、",
     clauseSeparator: "；",
@@ -492,6 +496,8 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
     headFirst:
       "[fact-gate] Gather the facts before editing (strict: allowed only when complete, denied " +
       "while any item is missing):",
+    quotaWithheld:
+      "· Note: the release quota only waives the **higher probes** (references and each layer); read is never waived - read the target once, then retry.",
     confirmedLine: "✓ confirmed: {done}",
     listSeparator: ", ",
     clauseSeparator: "; ",

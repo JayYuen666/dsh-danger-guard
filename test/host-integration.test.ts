@@ -30,10 +30,10 @@ import type { ContextFormed } from "@deepseek-ai/dsh-llm";
 import { MESSAGES } from "../lib/messages.ts";
 import { PREFLIGHT_MAX_BYTES, scanReferences } from "../lib/preflight-scan.ts";
 import {
+  ALPHA_BODY,
   TOOL_BASH,
   TOOL_EDIT,
   TOOL_READ,
-  ALPHA_BODY,
   addSource,
   bootSpine,
   capTree,
@@ -45,7 +45,11 @@ import {
   markOf,
   midBlind,
   readDisk,
+  registerModel,
+  runTurn,
   sessionEventCount,
+  textReply,
+  toolCallReply,
   writeDisk,
 } from "./host-spine.ts";
 import type { Spine } from "./host-spine.ts";
@@ -435,7 +439,19 @@ describe("真实 spine 下的接线与物化", () => {
     const file = await addSource(spine, "quota.ts");
     const first = await dispatch(spine, agent, "d1", TOOL_EDIT, highBlind(file, "a"));
     assert.equal(first.isError, true);
-    const second = await dispatch(spine, agent, "d2", TOOL_EDIT, highBlind(file, "b"));
+    // 决策 ④：缺项里还有 read ⇒ 达上限也**扣下配额**（真实轮次里也一样）。
+    const withheld = await dispatch(spine, agent, "d2", TOOL_EDIT, highBlind(file, "b"));
+    assert.equal(withheld.isError, true, "缺 read 时配额不得放行");
+    assert.match(modelText(withheld), /配额放行只免/u, "理由要说清配额免的是上层探查");
+    // 读过目标 ⇒ read 不再是缺项，剩下的只落在上层探查 ⇒ 配额这条路才打开。
+    // ⚠ 这一次读取必须走**真回合**（脚本模型 + runTurn），不能 `dispatch`：直接 dispatch
+    // 不落会话日志（本文件另有用例钉着这条边界），而事实门的 read 证据正是从会话日志里读的
+    // —— 用 dispatch 的话这次读取对门禁等于没发生，配额会被一直扣着（本轮实测踩过）。
+    registerModel(spine, [toolCallReply("r1", TOOL_READ, { file_path: file }), textReply("read")]);
+    await runTurn(spine, agent, "先读一眼目标");
+    const again = await dispatch(spine, agent, "d3", TOOL_EDIT, highBlind(file, "c"));
+    assert.equal(again.isError, true, "缺项变小 ⇒ 计数重置，先按正常过门再拒一轮");
+    const second = await dispatch(spine, agent, "d4", TOOL_EDIT, highBlind(file, "d"));
     assert.equal(second.isError, false, "熬满 maxDenies 换一次放行");
     assert.match(loggedText(), /maxDenies/u, "放行必须出声");
   });

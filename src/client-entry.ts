@@ -32,7 +32,7 @@ import {
 // 名单默认值与 host 的取证判据、指令文案兜底同源（lib/ref-search-policy.ts），卡片只是回退显示它。
 import { DEFAULT_REF_SEARCH_TOOLS } from "../lib/ref-search-policy.ts";
 import { createStatsReader, topLines } from "./stats-reader.ts";
-import type { RemoteFace, StatsLine } from "./stats-reader.ts";
+import type { StatsLine } from "./stats-reader.ts";
 // 形状从**叶子**模块取（见 src/stats-reader.ts 的说明：judge-stats 带 node:os/node:path）。
 import type { StatsSnapshot } from "../lib/stats-shape.ts";
 import { UI_MESSAGES } from "./ui-messages.ts";
@@ -911,10 +911,10 @@ export interface ClientCtx {
     register: (ns: typeof NS, dicts: LocaleCatalog) => () => void;
     bind: (ns: typeof NS) => Translate;
   };
-  /** 官方 Typert Remote 的客户端面。**可选**：没装它的部署读不到宿主侧统计，
-   *  卡片照常渲染（那一段显示"读不到"）。与 host 侧可选读面同一条纪律 ——
-   *  一枚读数面的缺席绝不能让整张卡挂不上。 */
-  remote?: RemoteFace;
+  /** 显式读一个**可选**服务（`ctx.get`，不受 cordis 的 inject 门禁约束）。本卡只用它读远程面：
+   *  **不能**把 `remote` 写进 `inject` —— 那会把整条 client 入口绑死在远程面上，而它是一枚
+   *  可选读面（没装它的部署里卡片仍要照常渲染）。为什么与怎么读，见 src/stats-reader.ts 文件头。 */
+  get?: (name: string, strict?: boolean) => unknown;
 }
 
 function cardStore(form: EntryForm): {
@@ -975,7 +975,8 @@ function apply(ctx: ClientCtx): void {
   // 故注册项数与回收范围都不变，只是由一枚效应承载（旧写法要自己拼两个 disposer）。
   ctx.effect(() => ctx.locale.register(NS, UI_MESSAGES), "danger-guard-card: locale dictionaries");
   const t = ctx.locale.bind(NS);
-  const readStats = ctx.remote === undefined ? undefined : createStatsReader(ctx.remote);
+  // 读取器自己判"当前部署有没有远程面"（没有就交 undefined ⇒ 卡片那段显示「读不到」）。
+  const readStats = createStatsReader(ctx);
   ctx.slots.inject("plugins.bundle.config", () => {
     const unregister = ctx.slots.register(
       {

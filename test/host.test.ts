@@ -422,13 +422,28 @@ describe("danger-guard host 接线", () => {
     // 配额设为 1：首次拒（FACT_MESSAGE）→ 第 2 次达配额放行。
     ctx.value.maxDenies = 1;
     const target = "/w/proj/src/cfg.ts";
-    // 本用例三次调用都显式带 "m1"，defaultId 只是与其余三例同形的那一位
+    // 本用例几次调用都显式带 "m1"，defaultId 只是与其余三例同形的那一位
+    const withLog = makeWithLog(target, "m1");
+    // ⚠ 决策 ④：配额只免上层探查、**不免 read** ⇒ 事件流里先有一次成功的 read，
+    // 否则达上限时配额会被扣下（那条路另有专门的用例）。
+    const events = makeEvents();
+    const log = [events.call("read", { file_path: target }), events.ok()];
+    assert.ok(ctx.guardInstalled!.fn(withLog(log, "m1")) !== undefined, "首次拒");
+    // 第 2 次达 maxDenies=1 配额 → 放行（不再返回拒绝串）
+    assert.equal(ctx.guardInstalled!.fn(withLog(log, "m1")), undefined, "达配额放行");
+    // 之后永久通过（released）
+    assert.equal(ctx.guardInstalled!.fn(withLog(log, "m1")), undefined, "配额放行后不再拒");
+  });
+
+  it("决策 ④：read 没补上时配额被扣下——达上限仍拒，文案点明配额免的是什么", () => {
+    ctx.value.maxDenies = 1;
+    const target = "/w/proj/src/cfg.ts";
     const withLog = makeWithLog(target, "m1");
     assert.ok(ctx.guardInstalled!.fn(withLog([], "m1")) !== undefined, "首次拒");
-    // 第 2 次达 maxDenies=1 配额 → 放行（不再返回拒绝串）
-    assert.equal(ctx.guardInstalled!.fn(withLog([], "m1")), undefined, "达配额放行");
-    // 之后永久通过（released）
-    assert.equal(ctx.guardInstalled!.fn(withLog([], "m1")), undefined, "配额放行后不再拒");
+    // 达上限，但缺项里还有 read ⇒ 照常拒（不是放行），且理由里多一行说明。
+    const withheld = ctx.guardInstalled!.fn(withLog([], "m1"));
+    assert.ok(withheld !== undefined, "read 未补上，配额不得放行");
+    assert.match(withheld, /配额放行只免/u, "文案要说清配额免的是上层探查");
   });
 
   it("密钥路径编辑被拒", () => {
@@ -1250,8 +1265,12 @@ describe("设置读取的防御面（值面不合型时运行路径自己收敛�
     poke(ctx.value, "smallEditChars", Number.NaN);
     poke(ctx.value, "bigEditChars", "2000");
     const target = "/w/proj/src/quota.ts";
+    // 决策 ④：配额只免上层探查、不免 read ⇒ 事件流里先有一次成功的 read，
+    // 否则第 3 轮会被"扣下配额"，本用例要看的"回落的是默认值而不是脏值"就无从体现。
+    const events = makeEvents();
+    const log = [events.call("read", { file_path: target }), events.ok()];
     const call = (): unknown =>
-      ctx.guardInstalled!.fn(editOn(target, [], "quota-session", { content: "x" }));
+      ctx.guardInstalled!.fn(editOn(target, log, "quota-session", { content: "x" }));
     assert.notEqual(call(), undefined, "第 1 轮无证据拒绝");
     assert.notEqual(call(), undefined, "第 2 轮仍拒：maxDenies=0 没被当成「首拒即放行」");
     assert.equal(call(), undefined, "第 3 轮按内置配额 2 放行（回落的是默认值，不是脏值）");

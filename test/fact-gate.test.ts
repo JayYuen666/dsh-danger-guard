@@ -148,9 +148,13 @@ describe("factGate：强校验状态机", () => {
 
   it("配额放行按文件共享：edit 熬满配额后 write 免证据放行", () => {
     // 默认 maxDenies=2：deny → deny → 第 3 次配额放行；随后换工具名不再重拦。
-    gate.check("edit", PROJECT_TARGET_FILE, undefined, lack(["read"]));
-    gate.check("edit", PROJECT_TARGET_FILE, undefined, lack(["read"]));
-    assert.equal(gate.check("edit", PROJECT_TARGET_FILE, undefined, lack(["read"])).kind, "quota");
+    // ⚠ 缺项必须**不含 read**：决策 ④ 之后，缺 read 时配额会被扣下（见下一条用例）。
+    gate.check("edit", PROJECT_TARGET_FILE, undefined, lack(["refs", "test"]));
+    gate.check("edit", PROJECT_TARGET_FILE, undefined, lack(["refs", "test"]));
+    assert.equal(
+      gate.check("edit", PROJECT_TARGET_FILE, undefined, lack(["refs", "test"])).kind,
+      "quota",
+    );
     assert.equal(
       gate.check("write", PROJECT_TARGET_FILE).kind,
       "allow",
@@ -169,16 +173,49 @@ describe("factGate：强校验状态机", () => {
 
   it("连续无证据拒绝达 maxDenies 次 → 配额放行（防死锁）+ 标记 quota", () => {
     const quotaGate = new FactGate({ maxDenies: 2 });
+    // 缺项只落在**上层探查**（read 已确认）：这才是配额要免的那一半。
+    const upper = lack(["refs", "test"]);
     // 首次 DENY（记 1 次）
-    assert.equal(quotaGate.check("edit", "/w/a.ts").kind, "deny");
+    assert.equal(quotaGate.check("edit", "/w/a.ts", undefined, upper).kind, "deny");
     // 第 1 次重试无证据：DENY（记 2 次）
-    assert.equal(quotaGate.check("edit", "/w/a.ts").kind, "deny");
+    assert.equal(quotaGate.check("edit", "/w/a.ts", undefined, upper).kind, "deny");
     // 第 2 次重试无证据：达上限 → 配额放行
-    const result = quotaGate.check("edit", "/w/a.ts");
+    const result = quotaGate.check("edit", "/w/a.ts", undefined, upper);
     assert.equal(result.kind, "quota", "配额放行须标 kind=quota 供 host 警告");
     // 之后永久放行，配额不再拒
     const okLater = pass(quotaGate.check("edit", "/w/a.ts"));
     assert.equal(okLater, true);
+  });
+
+  it("决策 ④：配额**只免上层探查**，缺 read 时扣下配额照常拒（文案点明这件事）", () => {
+    const quotaGate = new FactGate({ maxDenies: 1 });
+    const lower = lack(["read", "test"]);
+    assert.equal(quotaGate.check("edit", "/w/b.ts", undefined, lower).kind, "deny", "首次拒");
+    // 越过上限了，但缺项里还有 read ⇒ 配额被扣下：仍然拒，且文案多一行说明。
+    const withheld = quotaGate.check("edit", "/w/b.ts", undefined, lower);
+    assert.equal(withheld.kind, "deny", "read 未补上，配额不得放行");
+    const text = denyMessage(withheld);
+    assert.match(text, /配额放行只免/iu, "文案要说清配额免的是什么");
+    assert.match(text, /read/iu, "文案要指向那一步");
+    // 再试一次仍是拒（这条不放行的路不会因为重试次数变多而自行打开）
+    assert.equal(quotaGate.check("edit", "/w/b.ts", undefined, lower).kind, "deny");
+  });
+
+  it("决策 ④：补上 read 之后配额立刻兑现（上层探查仍免）", () => {
+    const quotaGate = new FactGate({ maxDenies: 1 });
+    const lower = lack(["read", "test"]);
+    quotaGate.check("edit", "/w/c.ts", undefined, lower);
+    assert.equal(quotaGate.check("edit", "/w/c.ts", undefined, lower).kind, "deny");
+    // 读过目标 ⇒ read 不再是缺项；上层那几项照旧没做 ⇒ 走配额（越过上限即兑现）。
+    const afterRead = lack(["test"]);
+    assert.equal(
+      quotaGate.check("edit", "/w/c.ts", undefined, afterRead).kind,
+      "deny",
+      "缺项变小 → 计数重置，先按正常过门再拒一轮",
+    );
+    const released = quotaGate.check("edit", "/w/c.ts", undefined, afterRead);
+    assert.equal(released.kind, "quota", "越过上限且 read 已确认 ⇒ 配额兑现");
+    assert.equal(pass(quotaGate.check("edit", "/w/c.ts")), true, "之后按文件共享放行");
   });
 
   it("证据判定不可行（determinate=false）→ 返回 indeterminate 走交互式确认", () => {
@@ -453,19 +490,15 @@ describe("引用探查指令从生效策略派生（指令与实际认的工具�
 describe("factGate：配额放行的失效条件（不变式，见 SessionState.released 注释）", () => {
   it("放行水位之后目标被改过（fileEditSeq 抬升）→ 配额过期，重新过门", () => {
     const gate = new FactGate({ maxDenies: 1 });
-    assert.equal(gate.check("edit", "/w/q.ts", "sq").kind, "deny", "首拒");
+    // 缺项只落在上层探查：决策 ④ 之后缺 read 时配额会被扣下，那条路走不到"放行水位"。
+    const upper = lack(["refs"]);
+    assert.equal(gate.check("edit", "/w/q.ts", "sq", upper).kind, "deny", "首拒");
     // maxDenies=1：第 2 次无证据拒绝达配额 → 放行
-    assert.equal(
-      gate.check("edit", "/w/q.ts", "sq", lack(["read", "refs"], { logSeq: 5 })).kind,
-      "quota",
-    );
+    assert.equal(gate.check("edit", "/w/q.ts", "sq", lack(["refs"], { logSeq: 5 })).kind, "quota");
     // 目标未变（fileEditSeq 仍早于放行水位）→ 持续放行（host 只在确属外部改动时抬升它）
-    assert.equal(
-      gate.check("edit", "/w/q.ts", "sq", lack(["read", "refs"], { logSeq: 6 })).kind,
-      "allow",
-    );
+    assert.equal(gate.check("edit", "/w/q.ts", "sq", lack(["refs"], { logSeq: 6 })).kind, "allow");
     // 目标在放行水位之后被改过 → 放行作废，回到正常过门（重新计数）
-    const after = gate.check("edit", "/w/q.ts", "sq", lack(["read", "refs"], { fileEditSeq: 99 }));
+    const after = gate.check("edit", "/w/q.ts", "sq", lack(["refs"], { fileEditSeq: 99 }));
     assert.equal(after.kind, "deny", "外部改动使配额放行过期");
     assert.match(denyMessage(after), /fact-gate/iu);
   });

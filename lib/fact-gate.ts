@@ -109,6 +109,9 @@ export interface FactDenial {
   attempt: number;
   /** 目标是否新建（新建走"免 read 但引用面仍要探"的头部）。 */
   newFile: boolean;
+  /** 本轮**配额被扣下**：缺项里还有 `read`（见 `decideAfterFirstDeny` 的决策 4 说明）。
+   *  渲染时据此多一行——配额只免上层探查，`read` 不在豁免内。 */
+  quotaWithheld?: true;
   /** host 现算的具体上下文（目标名/起点/生效检索名单）。 */
   ctx?: FactGapContext;
 }
@@ -120,11 +123,13 @@ const denialOf = (
   done: FactNeed[],
   attempt: number,
   input: FactEvidenceInput | undefined,
+  quotaWithheld = false,
 ): FactDenial => ({
   gaps,
   done,
   attempt,
   newFile: input?.newFile === true,
+  ...(quotaWithheld ? { quotaWithheld: true as const } : {}),
   ...(input?.ctx === undefined ? {} : { ctx: input.ctx }),
 });
 
@@ -146,6 +151,9 @@ export function renderDenyMessage(denial: FactDenial, messages: DangerGuardMessa
   const lines = gaps.map((gap) => `· ${gapLine(gap, ctx, messages)}`);
   if (done.length > 0) {
     lines.push(fillTemplate(messages.confirmedLine, { done: done.join(messages.listSeparator) }));
+  }
+  if (denial.quotaWithheld === true) {
+    lines.push(messages.quotaWithheld);
   }
   return [head, ...lines, messages.declareTail].join("\n");
 }
@@ -294,7 +302,15 @@ export class FactGate {
       this.note(st, filePath, 1, needsKey(gaps));
       return { kind: "deny", denial: denialOf(gaps, done, 1, input) };
     }
-    return this.decideAfterFirstDeny(st, filePath, prev, maxDenies, { input, gaps, done });
+    return this.decideAfterFirstDeny(st, filePath, prev, maxDenies, {
+      input,
+      gaps,
+      done,
+      // 配额水位锚点。`input` 缺席（无证据）时按 0 起算 —— 与旧写法同一个兜底，只是挪到**这里**
+      // 算：放行那一步现在必然有 input（决策 ④：要兑现配额就得"read 已确认"，而 read 是算出来
+      // 的证据，缺省那份 [read, refs] 永远兑现不了），兜底留在那条路上就成了走不到的分支。
+      logSeq: input?.logSeq ?? 0,
+    });
   }
 
   public dropSession(sessionId: unknown): void {
@@ -352,9 +368,15 @@ export class FactGate {
     filePath: string,
     prev: { denials: number; lastNeeds: string },
     maxDenies: number,
-    req: { input: FactEvidenceInput | undefined; gaps: FactGap[]; done: FactNeed[] },
+    req: {
+      input: FactEvidenceInput | undefined;
+      gaps: FactGap[];
+      done: FactNeed[];
+      /** 配额水位锚点（`check` 现算，见那里的说明）。 */
+      logSeq: number;
+    },
   ): FactDecision {
-    const { input, gaps, done } = req;
+    const { input, gaps, done, logSeq } = req;
     // 4) 重试仍无法判定 → 交互式确认（不消耗配额；逃生口文案见消息表的 indeterminate 键）。
     if (input !== undefined && !input.determinate) {
       return { kind: "indeterminate" };
@@ -366,10 +388,19 @@ export class FactGate {
     //    故定死：真子集才重置，其余（含不变、换项、变多）一律计数。
     const key = needsKey(gaps);
     const denials = isStrictSubset(key, prev.lastNeeds) ? 1 : prev.denials + 1;
+    // 6) 决策 ④：配额**只免上层探查，不免 `read`**。达上限却仍缺 `read` 时扣下配额、照常拒
+    //    （文案多一行点明这件事），于是"防死锁"只保住贵的那几项搜索；而 `read` 是最便宜、
+    //    也最不可替代的一步证据 —— 放行它等于给一个**从未看过原文**的目标开长期免检，
+    //    后面每次编辑都不会再被要求看过文件。补上 read 后下一个回合就会放行（缺项集合变成
+    //    真子集，计数重置；下一轮再次越过上限即放行），所以这条路不会把模型困死。
+    if (denials > maxDenies && gaps.some((gap) => gap.need === "read")) {
+      this.note(st, filePath, denials, key);
+      return { kind: "deny", denial: denialOf(gaps, done, denials, input, true) };
+    }
     let decision: FactDecision;
     if (denials > maxDenies) {
       st.pending.delete(filePath);
-      this.lruSet(st.released, filePath, input?.logSeq ?? 0);
+      this.lruSet(st.released, filePath, logSeq);
       decision = { kind: "quota" };
     } else {
       this.note(st, filePath, denials, key);

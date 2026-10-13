@@ -266,6 +266,33 @@ function cardWrites(form: ConfigFormMock): {
   };
 }
 
+/** 真宿主里**别人 provide 的服务**（客户端 profile 常驻的那一批）。不在本条目 `inject` 清单
+ *  里的那些，读即抛 —— 这份名单只需覆盖"读错会炸"的那几枚，不必穷举。 */
+const PROVIDED_SERVICES = new Set([
+  "remote",
+  "connection",
+  "sessions",
+  "commandUi",
+  "settingsSchema",
+  "agentPresets",
+]);
+
+/** 给 ctx 桩件套上 cordis 的 inject 门禁（见调用点那段说明）。 */
+function guardUndeclaredServices<Shape extends object>(target: Shape): Shape {
+  return new Proxy(target, {
+    get(source, prop, receiver) {
+      const name = typeof prop === "string" ? prop : "";
+      const declared = typeof prop === "symbol" || Reflect.has(source, prop);
+      if (!declared && PROVIDED_SERVICES.has(name)) {
+        throw new Error(`cannot get property "${name}" without inject`);
+      }
+      // 单 return：未声明的普通属性走 `Reflect.get` 也是 undefined（不在 target 上），
+      // 与"读不到"同一个结果，但不必再写一个 `undefined` 字面量。
+      return Reflect.get(source, prop, receiver);
+    },
+  });
+}
+
 async function loadCard(): Promise<{
   DgCardForTest: React.ComponentType<DgCardHandlers>;
   makeScope: (
@@ -292,6 +319,8 @@ async function loadCard(): Promise<{
   slotCleanups: (() => void)[];
   /** 入口的 inject 清单（装配契约）。 */
   injectList: string[];
+  /** 套了 inject 门禁的 ctx（负向对照用：确认这层门禁真的会抛）。 */
+  guardedCtx: object;
 }> {
   const mod = await import("../src/client-entry.ts");
   const exported = mod as unknown as Record<string, unknown>;
@@ -402,7 +431,14 @@ async function loadCard(): Promise<{
       bind: () => tZh,
     },
   };
-  (exported["apply"] as (ctx: unknown) => void)(fakeCtx);
+  // ⚠ 桩件外套一层 **cordis 的 inject 门禁**：真宿主里"别人 provide 的服务"若不在本条目的
+  // `inject` 清单里，读它就是**抛错**（`cannot get property "x" without inject`，
+  // vendor/cordis/src/reflect.ts:144）。普通对象桩件不套这层，就会让"未 inject 就取服务"
+  // 这类错误一路绿 —— 0.1.3 正是这么发出去的：`ctx.remote` 一读就抛，web boot 直接失败
+  // （页面卡在错误页），而当时的产物与全部用例都是绿的。套上之后，任何一次这样的读取都会
+  // 在这里当场炸掉。
+  const guardedCtx = guardUndeclaredServices(fakeCtx);
+  (exported["apply"] as (ctx: unknown) => void)(guardedCtx);
   assert.ok(capturedView !== null, "slots.register 捕获到卡片 view");
   return {
     DgCardForTest: capturedView as React.ComponentType<DgCardHandlers>,
@@ -414,6 +450,7 @@ async function loadCard(): Promise<{
     slotCleanups,
     payload: capturedPayload,
     injectList: exported["inject"] as string[],
+    guardedCtx,
     makeScope: (initial: Snap, calls: { field: string; value: unknown }[]) => {
       let current: Snap = initial;
       const listeners = new Set<() => void>();
@@ -988,8 +1025,15 @@ describe("b11：danger-guard 设置卡", () => {
 
   // ── 0.1.7 装配契约：入口从 settingsScope 换成 ctx.configForms（迁移回归锚点）────
   it("0.1.7 装配：inject 列 configForms；表单按设置条目 id 取；payload 落到那张表单；disposer 不销毁表单", async () => {
-    const { injectList, formEntryIds, formWrites, slotDescs, slotCleanups, payload } =
+    const { injectList, formEntryIds, formWrites, slotDescs, slotCleanups, payload, guardedCtx } =
       await loadCard();
+    // 负向对照：这层 inject 门禁**真的会抛**（否则"apply 不抛"那条判据等于没判）。
+    // 0.1.3 就是在这一条上发出去的：`ctx.remote` 未 inject ⇒ 读即抛 ⇒ web boot 失败、页面卡死。
+    assert.throws(
+      () => (guardedCtx as { remote?: unknown }).remote,
+      /without inject/u,
+      "门禁桩件必须能复现真宿主的 inject 拒绝",
+    );
     // inject 清单就是装配契约：`settingsScope` 在 installed 0.1.7 全树零命中，留着它整条
     // client 入口挂不上（症状正是"设置卡静默消失"）。替代面 = configForms（installed
     // dsh-client-ui-settings/lib/types/client/config-form.d.ts:94-98 的 Context 增强、

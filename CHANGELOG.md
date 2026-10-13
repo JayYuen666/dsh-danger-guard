@@ -2,6 +2,32 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.4
+
+⚠ **0.1.3 不可用**（已发布，请勿安装）：它的 client 入口读了一枚**未 `inject`** 的服务，cordis 读即抛
+⇒ web boot 失败、页面卡在错误页（`web boot: 1 entry did not activate`）。**host 半（真正的拦截）不受影响**，
+坏的是设置卡那一条 client 入口。本版修掉它，并把这类错误钉进两道门禁。
+
+### Fixed
+
+- **client 入口不再触碰未 inject 的服务（0.1.3 的致命回归）。** 根因：`apply` 里那句
+  `ctx.remote === undefined ? …` 一读就抛 —— cordis 对**未写进 `inject` 清单的服务**读取是**抛错**
+  （`cannot get property "remote" without inject`，vendor/cordis/src/reflect.ts:144）。官方消费者
+  （`ui-permission-presets`）把 `'remote'` 与 `'remote.<命名空间>'` 都写进 inject，而本包这条读面是
+  **可选**的（没装远程面的部署里卡片仍要照常渲染）⇒ 不能那么写。修法：走 **`ctx.get("remote")`**
+  （显式读取，不受 inject 门禁约束；官方网关自己也是这么读可选服务的），挂载后再按网关的服务键
+  **`remote.dangerGuardStats`** 取命名空间。
+- 两道新门禁：卡片用例的 ctx 桩件套上 **cordis 的 inject 门禁**（读未声明服务即抛，且带负向对照
+  证明这层门禁真的会抛），读面另有 4 条单元用例（挂载幂等 / 按 `remote.<ns>` 读 / 失败如实抛）。
+  0.1.3 之所以能发出去，正是因为当时的桩件是普通对象、不模拟这门禁。
+
+### Changed
+
+- **配额放行只免上层探查，不免 `read`（决策 ④）。** 此前熬满 `maxDenies` 的目标会被**整体**放行，
+  包括 `read` —— 那等于给一个**从未看过原文**的目标开长期免检，后面每次编辑都不再要求读过文件。
+  现在达上限而缺项里仍有 `read` 时**扣下配额、照常拒**（文案多一行点明"配额只免上层探查"），
+  补上 `read` 后下一轮即兑现。防死锁仍然成立：贵的那几项（引用面与各层探查）照样免。
+
 ## 0.1.3
 
 判定面与**宿主官方保护面**对齐，并给拒绝理由补上"照做得到"的出路。判据表新增两族

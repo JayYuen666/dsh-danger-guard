@@ -9,9 +9,19 @@
 // 也不需要 `create()`，而那两样正是生成器存在的理由。手写这一枚 descriptor 比引入一条构建期
 // 代码生成链（外加生成物随包发布）便宜得多。
 //
+// ⚠ **为什么走 `ctx.get("remote")` 而不是把 `remote` 写进 `inject`**：cordis 对**未 inject 的
+// 服务**读取是**抛错**（`cannot get property "remote" without inject`，
+// vendor/cordis/src/reflect.ts:144）。而本包的卡片在"没装远程面"的部署里也必须照常渲染（那是
+// 一枚可选读面），`inject: ["remote", …]` 却会把整条 client 入口绑死在远程面上 —— 缺它就不激活。
+// 本轮实测踩过这一脚：web boot 报 `1 entry did not activate: @jayyue66/dsh-danger-guard: failed`，
+// 而产物本身完全正常（语法、导出、`apply` 都跑得通），抛的就是上面那条 inject 错误。
+// `ctx.get` 是**显式读取**，不受 inject 门禁约束 —— 官方网关自己也是这么读可选服务的
+// （packages/api/gateway/src/client/index.ts 的 `this.ownerCtx.get('connection')`）。
+//
 // ⚠ 类型一律 `import type`（产物里零新说明符）：发布面那条纪律要求 `@deepseek-ai/*` 只作
 // 类型消费，值导入面只有四枚（schemastery / shared / dsh-brand / zod）。
 import type { InvocationDescriptor, RemoteResult } from "@deepseek-ai/dsh-typert-protocol";
+import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 // 形状从**叶子**模块取，不从 lib/judge-stats.ts：后者带 node:os/node:path，
 // 那会把它们拖进客户端类型程序（实测 TS2591）。
@@ -21,6 +31,11 @@ import type { StatsSnapshot } from "../lib/stats-shape.ts";
  *  两侧各自内联 `lib/` 的那一份是**两个产物**，所以这个串在两处各写一次是必然的 —— 而它一旦
  *  分叉，读侧会拿到"未知命名空间"而不是静默错值（网关按命名空间路由）。 */
 const STATS_NAMESPACE = "dangerGuardStats";
+
+/** 网关给命名空间注册的**服务键**：`remote.<namespace>`（`remoteServiceKey`，
+ *  packages/api/gateway/src/client/index.ts:752）。它在 `$mount` 完成之后才存在，所以只能
+ *  在挂载后按这个键去读，而不是提前 inject。 */
+const STATS_SERVICE_KEY = `remote.${STATS_NAMESPACE}`;
 
 /** 卡片所在 bundle 的包名（`$mount` 的 `package` 位与槽位键同源，见 client-entry.ts 的 BUNDLE_PKG）。 */
 const PACKAGE_NAME = "@jayyuen66/dsh-danger-guard";
@@ -40,29 +55,58 @@ export const STATS_DESCRIPTORS: readonly InvocationDescriptor[] = [
   },
 ];
 
-/** `ctx.remote` 的读取面：本卡只用 `$mount` 一位 + 挂上之后的那个命名空间。
- *  按方法面投影而不是收整条官方接口：官方 `TypertClientRemote` 还带 `$on` 与每一门命名空间的
- *  索引签名，而本卡不订阅任何转发事件（见下面的读取策略）。 */
-export interface RemoteFace {
+/** 客户端上下文里本模块用到的那一位：**显式读取**一个可选服务（见文件头为什么不用 inject）。 */
+export interface RemoteHost {
+  get?: (name: string, strict?: boolean) => unknown;
+}
+
+/** 官方网关的客户端服务面：本卡只用 `$mount` 一位（挂载一枚手写贡献）。 */
+interface RemoteMounter {
   $mount: (contribution: {
     package: string;
     descriptors: readonly InvocationDescriptor[];
   }) => Promise<unknown>;
-  dangerGuardStats: {
-    stats: () => Promise<RemoteResult<StatsSnapshot>>;
+}
+
+/** 挂载后由网关提供的命名空间服务面。 */
+interface StatsNamespace {
+  stats: () => Promise<RemoteResult<StatsSnapshot>>;
+}
+
+/** 这个值能当远程面用吗（只核我们要调的那一位；服务来自别的实现或版本时保守当作没有）。 */
+const isRemoteMounter = (value: unknown): value is RemoteMounter =>
+  isRecord(value) && typeof value["$mount"] === "function";
+
+/** 同上：命名空间服务（挂载之后才有，缺它说明网关没认这枚贡献）。 */
+const isStatsNamespace = (value: unknown): value is StatsNamespace =>
+  isRecord(value) && typeof value["stats"] === "function";
+
+/**
+ * 造出真正的读取器（挂载一次 + 每次读命名空间服务）。
+ * @param ctx - 客户端上下文
+ * @param remote - 已核过形状的远程面
+ * @returns 读取器
+ */
+function buildStatsReader(ctx: RemoteHost, remote: RemoteMounter): () => Promise<StatsSnapshot> {
+  let mounted: Promise<unknown> | undefined;
+  return async () => {
+    mounted ??= remote.$mount({ package: PACKAGE_NAME, descriptors: STATS_DESCRIPTORS });
+    await mounted;
+    const namespace = ctx.get?.(STATS_SERVICE_KEY, false);
+    if (!isStatsNamespace(namespace)) {
+      throw new Error(`${STATS_SERVICE_KEY} 未提供：宿主网关没有挂上这枚命名空间`);
+    }
+    const result = await namespace.stats();
+    if (!result.ok) {
+      throw new Error(`${result.error.code}: ${result.error.message}`);
+    }
+    return result.value;
   };
 }
 
-/** 声明进官方的命名空间映射（与 `SlotMap` / `LocaleNamespaceMap` 同一条：合并式扩展）。
- *  生成器发射的就是这一条，我们手写它 —— 少了它 `ctx.remote.dangerGuardStats` 不成立。 */
-declare module "@deepseek-ai/dsh-typert-protocol" {
-  interface TypertRemoteNamespaceMap {
-    dangerGuardStats: RemoteFace["dangerGuardStats"];
-  }
-}
-
 /**
- * 读一次宿主侧的判定统计。
+ * 造一个"读一次宿主侧判定统计"的读取器；**当前部署没有远程面时返回 `undefined`**（卡片那一段
+ * 显示「读不到」，其余照常 —— 与 host 侧可选读面同一条口径）。
  *
  * **读取策略：按需拉取，不订阅、不缓存跨连接的旧值。** 官方那套（`ui-permission-presets`
  * 的 catalog）要处理连接代际失效，是因为它**缓存**一份进程级目录并在 UI 上长期显示；本卡这份
@@ -73,20 +117,14 @@ declare module "@deepseek-ai/dsh-typert-protocol" {
  * `$mount` 是**幂等**的（挂进本 fiber，随卡片卸载自动撤），所以这里缓存那枚 promise：
  * 同一次会话里刷新多次只挂一次。
  *
- * @param remote - 客户端上下文里的远程面（`ClientCtx.remote`）
- * @returns 宿主侧统计快照
+ * @param ctx - 客户端上下文（只用 `get` 一位）
+ * @returns 读取器；没有远程面时 `undefined`
  */
-export function createStatsReader(remote: RemoteFace): () => Promise<StatsSnapshot> {
-  let mounted: Promise<unknown> | undefined;
-  return async () => {
-    mounted ??= remote.$mount({ package: PACKAGE_NAME, descriptors: STATS_DESCRIPTORS });
-    await mounted;
-    const result = await remote.dangerGuardStats.stats();
-    if (!result.ok) {
-      throw new Error(`${result.error.code}: ${result.error.message}`);
-    }
-    return result.value;
-  };
+export function createStatsReader(ctx: RemoteHost): (() => Promise<StatsSnapshot>) | undefined {
+  const remote = ctx.get?.("remote");
+  // 单 return（三元的另一支是 `undefined`）：`consistent-return` 不接受"早退 undefined + 晚退函数"
+  // 这种混合形状，而这里两种结果本来就是同一件事的两面。
+  return isRemoteMounter(remote) ? buildStatsReader(ctx, remote) : undefined;
 }
 
 /** 把一份快照折成一行行"面 · 次数"的读数（渲染归卡片，这里只做**排序与裁剪**的纯活）。

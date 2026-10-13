@@ -19,6 +19,7 @@ import type { Agent } from "@deepseek-ai/dsh-agent";
 import { MESSAGES } from "../lib/messages.ts";
 import {
   PREFLIGHT_SOURCE_KIND,
+  TOOL_READ,
   addSource,
   bootSpine,
   callResultOf,
@@ -224,13 +225,21 @@ describe("预检 B 面的实证：带证据的拒绝在真回合里一轮就够"
     registerModel(spine, [
       toolCallReply("e1", "edit", highBlind(file, "a")),
       toolCallReply("e2", "edit", highBlind(file, "b")),
+      // 决策 ④：配额只免上层探查、不免 read ⇒ 先补上 read，配额这条路才打开。
+      toolCallReply("r1", TOOL_READ, { file_path: file }),
+      toolCallReply("e3", "edit", highBlind(file, "c")),
+      toolCallReply("e4", "edit", highBlind(file, "d")),
       textReply("done"),
     ]);
-    await runTurn(spine, agent, "连续两次盲改");
+    await runTurn(spine, agent, "两次盲改 → 读过 → 再两次");
     const first = callResultOf(agent, "e1");
     assert.equal(first.isError, true);
     assert.ok(first.text.includes(LIST_MARK), `应走行动清单，实际：${first.text.slice(0, 200)}`);
-    assert.equal(callResultOf(agent, "e2").isError, false, "熬满 maxDenies 换一次放行");
+    const withheld = callResultOf(agent, "e2");
+    assert.equal(withheld.isError, true, "缺 read 时达上限也扣下配额");
+    assert.match(withheld.text, /配额放行只免/u, "理由要说清配额免的是上层探查");
+    assert.equal(callResultOf(agent, "e3").isError, true, "补 read 后先按正常过门再拒一轮");
+    assert.equal(callResultOf(agent, "e4").isError, false, "熬满 maxDenies 换一次放行");
     assert.match(loggedText(), /maxDenies/u, "放行必须出声");
   });
 });

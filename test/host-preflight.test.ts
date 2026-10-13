@@ -1120,8 +1120,11 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       // 先把目标熬到配额放行：这一阶段关掉预检，让 guard 的计数正常累积。
       ctx.value.preflightEnabled = false;
       apply(ctx);
-      const session = fakeSession("s-quota", []);
-      const args = editArgs(disposeTarget);
+      // 决策 ④：配额只免**上层探查**、不免 read ⇒ 这里得让 read 已是证据、缺的只是引用面
+      // （所以会话日志里放一次成功的 read，且把编辑升到"触及导出面"那一档——低档只要求 read，
+      //  read 一满足就直接放行了，根本走不到配额）。
+      const session = fakeSession("s-quota", readEvents(disposeTarget));
+      const args = { ...editArgs(disposeTarget), new_string: "export const value = 2" };
       assert.ok(guardOf(ctx, { name: "edit", args, session }) !== undefined, "首拒给清单");
       assert.equal(guardOf(ctx, { name: "edit", args, session }), undefined, "达上限 → 配额放行");
       // 重开预检：免检中的目标不能再被停一次。

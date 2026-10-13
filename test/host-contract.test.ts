@@ -169,6 +169,19 @@ const editExecWithEvidence = (id: string): GuardExecParam => ({
   agent: { session: { id, header: { cwd: "/w/proj" }, snapshotEvents: () => evidenceLog() } },
 });
 
+/** 只有 read 证据的会话日志：缺项只落在**上层探查** —— 决策 ④ 之后配额要免的正是那一半，
+ *  所以"数配额轮次"的用例都得用它（缺 read 时配额会被扣下，见 test/fact-gate.test.ts）。 */
+function readOnlyLog(): SessionEvent[] {
+  return [fxCall("r1", "read", JSON.stringify({ file_path: EDIT_TARGET_PATH })), fxResult("r1")];
+}
+
+/** 只做过 read 的 edit 调用（配额路径）。 */
+const editExecReadOnly = (id: string): GuardExecParam => ({
+  name: "edit",
+  arguments: { file_path: EDIT_TARGET_PATH },
+  agent: { session: { id, header: { cwd: "/w/proj" }, snapshotEvents: () => readOnlyLog() } },
+});
+
 /** 零证据的 edit 调用（必拒路径）：降级用例用它数内置 maxDenies 的配额轮次。 */
 const editWithoutEvidence = (id: string): GuardExecParam => ({
   name: "edit",
@@ -501,13 +514,13 @@ describe("session/disposed 释放 fact-gate 会话分片", () => {
   it("会话销毁不影响其它会话的分片（隔离性）", () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
-    // 会话 s-b 两次无证据拒绝
-    ctx.guardInstalled!.fn(editExecWithEvents("s-b"));
-    ctx.guardInstalled!.fn(editExecWithEvents("s-b"));
+    // 会话 s-b 两次"只缺上层"的拒绝（决策 ④：缺 read 时配额会被扣下，数不到放行）
+    ctx.guardInstalled!.fn(editExecReadOnly("s-b"));
+    ctx.guardInstalled!.fn(editExecReadOnly("s-b"));
     // 销毁其它会话 s-x
     emitDisposed(ctx, "s-x");
-    // s-b 第三次无证据拒绝 → 达配额放行（undefined；说明 s-b 分片仍计数到 3 > maxDenies=2）
-    const res = ctx.guardInstalled!.fn(editExecWithEvents("s-b"));
+    // s-b 第三次 → 达配额放行（undefined；说明 s-b 分片仍计数到 3 > maxDenies=2）
+    const res = ctx.guardInstalled!.fn(editExecReadOnly("s-b"));
     assert.equal(res, undefined);
   });
 
@@ -587,12 +600,12 @@ describe("设置面故障时闸门必须 fail closed（bulkhead 隔舱后）", (
       blocked = ctx.guardInstalled.fn(bashExec);
       assert.equal(typeof blocked, "string", "降级后闸门仍然拦危险命令");
       // 事实门配额走内置默认（maxDenies 99 是"用户写坏的那份"，绝不能被读到）
-      assert.notEqual(ctx.guardInstalled.fn(editWithoutEvidence("fb-1")), undefined, "无证据首拒");
-      second = ctx.guardInstalled.fn(editWithoutEvidence("fb-1"));
+      assert.notEqual(ctx.guardInstalled.fn(editExecReadOnly("fb-1")), undefined, "缺上层探查首拒");
+      second = ctx.guardInstalled.fn(editExecReadOnly("fb-1"));
       assert.equal(typeof second, "string", "内置 maxDenies=2 → 第二轮仍是拒绝（不是交互确认）");
       // 第 3 次达内置配额放行 ⇒ 读到的确实是内置 2，而不是用户写坏的 99
       assert.equal(
-        ctx.guardInstalled.fn(editWithoutEvidence("fb-1")),
+        ctx.guardInstalled.fn(editExecReadOnly("fb-1")),
         undefined,
         "第三轮按内置 maxDenies=2 配额放行（99 那份坏值没进判定链）",
       );
@@ -677,11 +690,11 @@ describe("pass 信号上报的完整契约（总线同时提供 report/pass）",
       ),
       "pass 同步抛错也要留下降级日志（异步化后不许退化）",
     );
-    // 配额放行（第 3 次无证据拒绝）不报 pass——它不是"遵守规则"
+    // 配额放行（第 3 次"只缺上层"的拒绝）不报 pass——它不是"遵守规则"
     const other = "s-quota-nopass";
-    ctx.guardInstalled!.fn(editExecWithEvents(other));
-    ctx.guardInstalled!.fn(editExecWithEvents(other));
-    assert.equal(ctx.guardInstalled!.fn(editExecWithEvents(other)), undefined, "达配额放行");
+    ctx.guardInstalled!.fn(editExecReadOnly(other));
+    ctx.guardInstalled!.fn(editExecReadOnly(other));
+    assert.equal(ctx.guardInstalled!.fn(editExecReadOnly(other)), undefined, "达配额放行");
     assert.equal(factgatePasses(passes).length, 1, "配额放行不追加 pass 信号");
   });
 
