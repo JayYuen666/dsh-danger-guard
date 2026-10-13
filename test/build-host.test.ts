@@ -30,6 +30,14 @@ describe("danger-guard 两份 host 产物的外部化", () => {
       host.includes('from "@jayyuen66/dsh-plugin-shared/lib/record"'),
       "shared/record 必须外部化（isRecord 是跨包单点）",
     );
+    // 预检（Phase 2）新增的第二枚值导入：注入消息用官方 createUserMessage。它落在
+    // peerDependencies（与 dsh-brand 同一口径），所以说明符必须在、函数体必须不在——
+    // 内联的代价和 brandNumber 一样：每包各持一份官方实现（这里是消息 id 铸造与深冻结）。
+    assert.ok(
+      host.includes('from "@deepseek-ai/dsh-llm"'),
+      "dsh-llm 必须外部化（预检注入用它的 createUserMessage）",
+    );
+    assert.ok(!/^function createUserMessage\(/mu.test(host), "host.js 不得内联官方消息构造器");
     assert.equal(LOCAL_TS_IMPORT.test(host), false, "不得残留 ./x.ts 说明符");
   });
 

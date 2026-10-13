@@ -450,12 +450,26 @@ describe("editTargetPath：事实门专用的严格写类口径（与密钥面�
   });
 });
 
-describe("密钥面的解析形：宿主 realpath 一起参与判定", () => {
+describe("密钥面的解析形清单：本机 realpath 与官方后端那一形并列参与判定", () => {
   it("声明形无害、解析形落在凭据目录 ⇒ 拦（软链不再是出路）", () => {
     assert.equal(
       editDanger(
         { file_path: "/w/proj/config" },
-        { resolvedPaths: { "/w/proj/config": "/Users/x/.ssh/config" } },
+        { resolvedPaths: { "/w/proj/config": ["/Users/x/.ssh/config"] } },
+      )?.key,
+      "secretPath",
+    );
+  });
+
+  it("并集：本机那一形无害、官方那一形落在凭据目录 ⇒ 照样拦（两形从不互相替换）", () => {
+    assert.equal(
+      editDanger(
+        { file_path: "/w/proj/config" },
+        {
+          resolvedPaths: {
+            "/w/proj/config": ["/real/proj/config", "/sandbox/home/x/.ssh/config"],
+          },
+        },
       )?.key,
       "secretPath",
     );
@@ -465,11 +479,18 @@ describe("密钥面的解析形：宿主 realpath 一起参与判定", () => {
     assert.equal(editDanger({ file_path: SSH_ID_RSA }, { resolvedPaths: {} })?.key, "secretPath");
   });
 
+  it("空清单与缺席一视同仁（host 侧一形都没到手时干脆不占键）：声明形照判", () => {
+    assert.equal(
+      editDanger({ file_path: SSH_ID_RSA }, { resolvedPaths: { [SSH_ID_RSA]: [] } })?.key,
+      "secretPath",
+    );
+  });
+
   it("两形都无害 ⇒ 放行；解析形自己也不倒推成危险", () => {
     assert.equal(
       editDanger(
         { file_path: "/w/proj/main.rs" },
-        { resolvedPaths: { "/w/proj/main.rs": "/real/repo/main.rs" } },
+        { resolvedPaths: { "/w/proj/main.rs": ["/real/repo/main.rs", "/sandbox/repo/main.rs"] } },
       ),
       undefined,
     );

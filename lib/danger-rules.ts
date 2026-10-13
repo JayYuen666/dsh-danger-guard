@@ -24,7 +24,8 @@
 //   四类规则对递归取出的体内命令同样适用（下钻深度有界）；段头是 PowerShell 家族时，
 //   它的 `-c`/`-Command` 体按 join 语义取出并**强制按 Windows 读法判**（段头就是执行器身份）；
 // - 密钥面的目标按**键形**认（`file_path`/`path`/`notebook_path`…），不按工具名认；
-//   真实路径（realpath）由宿主解析后一并送进来，lib 侧不 import `node:fs`。
+//   真实路径（realpath / 后端进程路径）由本包的宿主侧（host.ts）解析后一并送进来，
+//   lib 侧不 import `node:fs`——判定因此始终是纯函数，"解析这一步出过错"也算不进结论里。
 
 import os from "node:os";
 import path from "node:path";
@@ -1975,12 +1976,16 @@ export interface EditDangerOptions {
    *  **调用点上下文，不是用户配置**——宿主从 `session.header.cwd` 拿（host 侧已有
    *  `resolveTarget` 同一来源），lib 侧不碰 `process.cwd()`，纯函数口径不变。 */
   cwd?: string;
-  /** 宿主解析过的**真实路径**（`目标 → realpath`，host 侧 `node:fs` 解好后一并带进来）。
-   *  有这一形，"目录本身是软链"与"`~/.ssh/authorized_keys` 是指向别处的符号链接"就不再是
-   *  覆盖外——判定同时看声明形与解析形，任一命中即拒。lib 侧不 import `node:fs`：
-   *  纯函数口径守住，I/O 留在宿主那一层，缺这一形时判定退回词法侧（少的是软链面，不是全部）。
+  /** 宿主给的**解析形清单**（`目标 → 真实路径们`；解析留在 host.ts 那一层，lib 侧不 import
+   *  `node:fs`，纯函数口径守住）。一枚目标可能同时有两形：本机 `realpathSync` 解出的那一形，
+   *  以及官方后端交出的那一形（`ctx.fs.resolve` + `processPath`，或 `fs/observed` 里后端自己
+   *  报的 target）——非本地执行世界（sandbox / ssh / e2b）下只有后者说的是同一份盘。
+   *  判定取**并集**：声明形与每一枚解析形各自过一遍词法形态，任一命中即拒。多一形只可能多拦，
+   *  方向与本包口径一致；少一形才是漏（所以两形从不互相替换）。
+   *  有这一位，"目录本身是软链"与"`~/.ssh/authorized_keys` 是指向别处的符号链接"就不再是
+   *  覆盖外。缺席时判定退回词法侧（少的是软链面，不是全部）。
    *  注意 TOCTOU 只是**收窄**而不是消除：解析与真实写入之间仍可能被换目标。 */
-  resolvedPaths?: Readonly<Record<string, string>>;
+  resolvedPaths?: Readonly<Record<string, readonly string[]>>;
 }
 
 /** 用户扩展模式的编译结果（合法的要能用、非法的要知道是哪条——静默跳过等于让用户以为保护已生效）。 */
@@ -2043,11 +2048,10 @@ function targetForms(target: string, cwd: string | undefined): string[] {
   return [...forms];
 }
 
-/** 一枚目标的全部待判形态：声明形与宿主给的解析形（缺席时只有声明形），各自再过一遍词法形态。 */
+/** 一枚目标的全部待判形态：声明形与宿主给的每一枚解析形（缺席时只有声明形），各自再过一遍词法形态。 */
 function formsToJudge(targetPath: string, opts: EditDangerOptions | undefined): string[] {
-  const resolved = opts?.resolvedPaths?.[targetPath];
-  const candidates = resolved === undefined ? [targetPath] : [targetPath, resolved];
-  return candidates.flatMap((candidate) => targetForms(candidate, opts?.cwd));
+  const resolved = opts?.resolvedPaths?.[targetPath] ?? [];
+  return [targetPath, ...resolved].flatMap((candidate) => targetForms(candidate, opts?.cwd));
 }
 
 /**
@@ -2074,6 +2078,20 @@ function secretPathDeny(targetPath: string, opts?: EditDangerOptions): EditDenia
 export interface EditDenial {
   key: EditDenialKey;
   target: string;
+}
+
+/**
+ * 单枚路径的密钥面判定（`editDanger` 的同一把词表，只是不收整份调用参数）。
+ * 为什么单独出口：预检的**引用扫描**要按路径决定"这份文件的正文能不能抄给模型"，
+ * 而它手上只有一枚磁盘路径，没有 `file_path`/`path` 那层参数形状。两处必须同源——
+ * 否则"编辑时算凭据、扫描时把它的正文当引用证据抄出去"就是同一把词表的两个读数，
+ * 而那正是本包最不该有的那种漂。
+ * @param target - 待判路径（绝对或相对；相对形按 `opts.cwd` 补一种绝对形态）。
+ * @param opts - 与密钥闸同一份配置（用户追加的模式 + 会话目录）。
+ * @returns 命中密钥面（含"长到判不了"那一档保守结论）时为 true。
+ */
+export function isSecretPath(target: string, opts?: EditDangerOptions): boolean {
+  return secretPathDeny(target, opts) !== undefined;
 }
 
 /**

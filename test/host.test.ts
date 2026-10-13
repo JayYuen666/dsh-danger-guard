@@ -308,6 +308,7 @@ describe("danger-guard host 接线", () => {
     assert.deepEqual(resolvedRow({}), {
       enabled: true,
       factGateEnabled: true,
+      preflightEnabled: true,
       judgeStats: true,
       maxDenies: 2,
       strictMode: false,
@@ -322,7 +323,7 @@ describe("danger-guard host 接线", () => {
     });
   });
 
-  it("volatile 投影：宿主为本条目投影出的可编辑字段集恰为这十三项", () => {
+  it("volatile 投影：宿主为本条目投影出的可编辑字段集恰为这十四项", () => {
     // 少一项 → 那项写不进（`is not volatile`）；一项都没有 → describe() 整条跳过、
     // 卡片页消失（settings/index.ts:308-309、:386）。
     assert.deepEqual(volatileMarkedFields(ConfigSchema).toSorted(), [
@@ -335,6 +336,7 @@ describe("danger-guard host 接线", () => {
       "factGateEnabled",
       "judgeStats",
       "maxDenies",
+      "preflightEnabled",
       "refSearchStrictTools",
       "refSearchTools",
       "smallEditChars",

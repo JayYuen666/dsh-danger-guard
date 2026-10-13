@@ -108,6 +108,15 @@ overrides:
   "@deepseek-ai/schemastery": 3.18.5-alpha.1
   "@deepseek-ai/dsh-client-shortcuts": 0.2.1-alpha.2
 # esbuild 由 vite 传递引入，其安装脚本负责落下当前平台的二进制；本仓没有包直接依赖它。
+# koffi 是 @deepseek-ai/dsh-fs-local 的直接依赖（真 spine 那两层测试要真 FsLocal 才装它），
+# 而它只被 dsh-fs-local 的 win32 那一支**懒加载**（GetFileSecurityW / SetFileSecurityW /
+# ReplaceFileW；官方模块注释原话 "non-Windows processes never open Win32 libraries"）。
+# 发布流水线只有 ubuntu-latest 一枚 runner，本仓开发也不在 Windows 上，那枚原生构建脚本
+# 对我们没有任何用处——所以这里给的是**显式拒绝**，不是默默忽略：pnpm 12 对"没做过决定"的
+# 依赖直接 ERR_PNPM_IGNORED_BUILDS，装依赖这一步就失败（发布流程卡在这里），而顺手放行一枚
+# 第三方构建脚本又不是必要的。将来若真在 Windows 上跑真 FsLocal 的后端面，改成 true 即可，
+# 别无其它改动。
 allowBuilds:
   esbuild: true
+  koffi: false
 minimumReleaseAge: 0

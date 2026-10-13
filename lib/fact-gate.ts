@@ -157,8 +157,11 @@ const EDIT_TOOLS = new Set(["edit", "write", "str_replace_editor"]);
 /** 明确放行的文件面：仅**文档类**扩展名（md/markdown/txt/rst/adoc）。
  *  test/ 目录**不再跳过**（收紧）：原 SKIP_PATH_RE 让模型可把改动挂到
  *  test/ 下躲过取证——旁路已堵，测试文件编辑同样过门。
- *  不对称是故意的：改文档零摩擦（非执行面），但改代码要探文档层。 */
-const SKIP_EXT_RE = /\.(?:md|markdown|txt|rst|adoc)$/iu;
+ *  不对称是故意的：改文档零摩擦（非执行面），但改代码要探文档层。
+ *  **导出**是给 host 侧的预检用（`runPreflight` 与 `attachRefsOnRead` 两个触发点共用这同一道
+ *  跳过判据）：预检要在门禁之前就决定"这次的编辑面根本不判"，两处各写一份正则迟早会漂——
+ *  漂了就是"门禁不判、预检却代跑了一次扫描"（或反过来：模型以为预检覆盖了，实际门禁照拒）。 */
+export const SKIP_EXT_RE = /\.(?:md|markdown|txt|rst|adoc)$/iu;
 
 /** 会话分片数上限（与 maxFiles 分离——旧实现同一常量两用，实际界是二次方）。 */
 const DEFAULT_MAX_SESSIONS = 64;
@@ -299,6 +302,20 @@ export class FactGate {
     if (key !== FactGate.DEFAULT_SESSION) {
       this.sessions.delete(key);
     }
+  }
+
+  /**
+   * 只读查询：该目标此刻是否处于**配额放行**态（防死锁承诺）。
+   * 与 `tryRelease` 同一条判据（放行位不早于目标最近一次外部改动），但**一个状态都不改**：
+   * 不建分片、不 touch、不删过期项——那些留给真正的 `check()`。
+   * 存在的理由：预检的「带证据拦一次」（host.ts 的 B 面）跑在 `tools/pre-execute`，而
+   * guard 在其之后才跑。已经熬满 maxDenies 拿到免检的目标若被预检再停一次，等于把
+   * 「防死锁」换成「插件自己新加的拒绝」——那是这道配额存在的反面。预检先问这一句，
+   * 命中就整趟让路。
+   */
+  public releasedFor(sessionId: unknown, filePath: string, fileEditSeq: number): boolean {
+    const releaseSeq = this.sessions.get(FactGate.keyOf(sessionId))?.released.get(filePath);
+    return releaseSeq !== undefined && fileEditSeq <= releaseSeq;
   }
 
   /** 清空全部记忆（插件停用时）。 */

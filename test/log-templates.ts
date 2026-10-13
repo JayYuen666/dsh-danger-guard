@@ -12,6 +12,8 @@ export const LOG_TEMPLATES: readonly string[] = [
   "[danger-guard] settings 数组含",
   "[danger-guard] 设置面（条目 danger-guard-settings）不可用，本轮回落内置默认底座；",
   "[danger-guard] 跳过非法的 extraSecretPatterns 正则:",
+  // 预检（Phase 2）：预检整趟被兜底 try/catch 吞掉时的告警（tools/pre-execute 里）。
+  "[danger-guard] 预检失败",
   "个非字符串项，已忽略",
   "连续无证据拒绝达上限，配额放行（maxDenies）",
 ];

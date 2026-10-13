@@ -4,7 +4,15 @@
 //   1. bashDanger  — ECC block-no-verify / dev-server-block / curl|sh / rm -rf 移植
 //   2. editDanger  — 密钥/凭据路径拦截：目标按**键形**认（file_path/path/notebook_path…），
 //     不按工具名认（工具名随 provider 与版本漂移，猜名字等于静默失效）；只读动词跳过。
-//     宿主另把 realpath 解析形一起送进判定，软链面因此也可见（TOCTOU 只是收窄，未消除）。
+//     宿主**不**替我们解析路径：guard 拿到的是模型字面量（深冻结的 arguments，官方明确排除
+//     输入改写，installed dsh-tools `PreToolDecision` 注释），解析发生在工具体内
+//     （`packages/fs/tool-fs/src/read-target.ts:25`），晚于整条策略链；全仓 grep `resolvedPaths`
+//     零命中。所以真实路径由本包自己取，`resolvedFormsOf` 交出的是**并集**：
+//       · 本机 `realpathSync`（`realpathOf`，同步——guard 是同步谓词，这是它当场唯一付得起的）；
+//       · 官方后端那一形（`ctx.fs.resolve` + `processPath`）：预检 B 面在判定前 async 问一次，
+//         `fs/observed` 顺手记后端自己报的那一枚，两处都写进 `officialPaths` 供同步侧读。
+//     非本地执行世界（fs-sandbox / ssh / e2b）下只有后者说的是同一份盘；两形从不互相替换，
+//     所以官方那一形缺席或陈旧只会少拦不会多放。软链面因此可见，TOCTOU 只是收窄，未消除。
 //   3. FactGate    — gateguard 事实强制门（ECC A/B +2.25 分实证机制）
 // 宿主拒绝路径已核实：guardReason → tool result "Error: <理由>" isError:true，
 // 模型收到可行动的指令而非静默失败。
@@ -32,6 +40,11 @@ import type { Context, Events } from "@deepseek-ai/cordis";
 // 都不再重述它们的签名。dsh-tools 是 devDependency，产物里不能出现对它的运行时引用。
 import type { ToolExecution, ToolRuntime } from "@deepseek-ai/dsh-tools";
 import type { SettingsForms } from "@deepseek-ai/dsh-settings";
+// 官方文件系统面（type-only）：预检的取证 I/O 全部走它，不再假定"本地盘就是工具的那个执行世界"
+//（理由见 lib/preflight-scan.ts 的 PreflightFs 注释）。本包只读六位，故连类型一起用投影；
+// `FsTarget` 在这里出现只为了"同一次调用里复用的那枚已解析身份"与 `fs/observed` 的载荷形，
+// **从不**解析 `targetKey`（官方明令它 opaque："Consumers MUST NOT parse it"）。
+import type { FsTarget, FsVersion } from "@deepseek-ai/dsh-fs";
 // 设置面 schema 单源在 lib/settings-schema.ts：设置条目（settings-host.ts）持有它，
 // 本文件只读那个条目挂出的读数口（见 settingsConfig）。
 import { BUILTIN_BASE, SETTINGS_READER } from "./lib/settings-schema.ts";
@@ -41,17 +54,49 @@ import {
   declaredTargets,
   editDanger,
   editTargetPath,
+  isSecretPath,
   partitionSecretPatterns,
 } from "./lib/danger-rules.ts";
 import type { BashDenialKey, BashDangerOptions, EditDangerOptions } from "./lib/danger-rules.ts";
 import {
   FactGate,
   renderDenyMessage,
+  // 预检的跳过判据与门禁同源（见 lib/fact-gate.ts 那个导出的注释）：两处各写一份正则
+  // 迟早会漂，漂了就是"门禁不判、预检却代跑一次扫描"或反过来。
+  SKIP_EXT_RE,
   DEFAULT_MAX_DENIES,
   DEFAULT_SMALL_EDIT_CHARS,
   DEFAULT_BIG_EDIT_CHARS,
 } from "./lib/fact-gate.ts";
 import type { FactDenial, FactEvidenceInput, FactGap, FactNeed, NeedWhy } from "./lib/fact-gate.ts";
+// 预检的取证 I/O 与证据渲染单源在 lib/preflight-scan.ts（那边不碰会话键、不碰状态机）。
+// 扫描起点与匹配词**不在**那边算：root 用本文件的 projectRootOf（与拒绝理由里的检索起点
+// 同一枚），needles 用本文件的 buildStems/MIN_STEM（与门禁记账的引用签名同一条口径）——
+// 这两处一旦各自另算，"预检扫的"与"门禁认的"就成了两套，模型照提示做也拿不到凭证。
+import {
+  readTargetContent,
+  renderAttach,
+  renderHandoff,
+  scanReferences,
+  targetOrResolveOf,
+} from "./lib/preflight-scan.ts";
+import type {
+  LayerFinding,
+  PreflightEvidence,
+  PreflightFs,
+  RefScan,
+} from "./lib/preflight-scan.ts";
+// 台账容量与 LRU 写入口径单源在 lib/lru.ts（host 这几张表与官方真实路径表共用一条上限）。
+import { lruPut } from "./lib/lru.ts";
+// 目标路径的归一形与**官方通道**那一形单源在 lib/target-paths.ts：写口在 async 的一侧
+//（预检 B 面、`fs/observed`），读口在同步的 guard 谓词里，键形必须逐字同源，所以收在一处。
+import {
+  clearOfficialPaths,
+  officialPathOf,
+  rememberObservedPath,
+  rememberOfficialTargetsOf,
+  resolveTarget,
+} from "./lib/target-paths.ts";
 // 引用取证的口径面单源在 lib/ref-search-policy.ts：名单默认值与派生映射都在那里，
 // 本文件每次判定现读设置算出策略，指令渲染侧（lib/gap-directives.ts）吃同一份。
 import {
@@ -95,6 +140,15 @@ import type { ToolLedger } from "./lib/tool-ledger.ts";
 // `SessionLogOffset` 是品牌数，`brandNumber` 是它唯一的合法构造口（见文件头）。
 import { brandNumber } from "@deepseek-ai/dsh-brand";
 import type { Session, SessionLogOffset } from "@deepseek-ai/dsh-session";
+// 预检注入用官方的消息构造器（**值导入**）：注入必须是一条真会话事件，自己拼一个
+// `{role:"user", content, source}` 字面量等于绕开官方的 id 铸造与深冻结——那两件事都不是
+// 本包该复刻的（`MessageId` 是幻影品牌，`createMessage` 才是它唯一的合法构造口）。
+// 它是 @deepseek-ai/* 家族里本文件的**第二处**值导入：必须外部化（落 peerDependencies，
+// 与 dsh-brand 同一口径），否则 rolldown 会把 createUserMessage 连同它引用的
+// dsh-util-values / dsh-util-crypto / dsh-brand 一起内联进 host.js——每个消费方各持一份
+// 官方实现，而 test/build-host.test.ts 有一条断言专门钉"裸说明符在、函数体不在"。
+import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import type { ContextFormed, UserMessage } from "@deepseek-ai/dsh-llm";
 // lesson bus 收口：lesson-loop 的 report/pass 以异步落库（返回 Promise），
 // 只包一层同步 try/catch 抓不到 rejection——失败会被静默吞掉，还给宿主进程留一枚
 // 未处理拒绝。同步抛错与异步拒绝共用这一个出口（三个包的调用点降级口径一致）。
@@ -109,11 +163,11 @@ import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
  *  不丢信息。 */
 const FACTGATE_SIGNATURE = "edit-before-factgate";
 
-/** 嵌套 shell `-c` 体**未被检查**（引号不闭合 / 超出下钻上限）的类别级稳定签名。
- *  它与"命中危险模式"的拒绝共用 dangerous-bash 分类，但签名必须分开：前者教的是
- *  「认不准就先找人确认」，后者教的是「换掉那个危险形态」。用命令原文当前者的签名，
- *  只会把同一条教训按套娃长度碎成无数张卡（每次输入都不重复，永远攒不到 armed）。 */
-const NESTED_UNCONFIRMED_SIGNATURE = "bash-nested-shell-unconfirmed";
+// 旧版这里有一枚 `NESTED_UNCONFIRMED_SIGNATURE` 常量，给"`-c` 体未被检查"那一类当稳定签名
+// （理由是命令原文会把同一条教训按套娃形态碎成无数张卡）。那条理由现在由 **lesson-loop 的
+// 类别级归并**承担（`CATEGORY_SIGNATURES` 把 `dangerous-bash` 折成一个稳定键，命令原文改落
+// `evidence.signature`），故上报侧不再需要它：一律传命令原文，既保住"一张卡"，又让人审时
+// 看得见到底是哪条命令触发的。是否需用户确认由 `evidence.needsUserConfirmation` 承载。
 
 /** 成本样本的上报类别：每次判定一条 pass，载荷只有面名/耗时/输入长度三枚数值。
  *  开关联动 `judgeStats`（默认开），关掉就一条都不出域。 */
@@ -154,8 +208,39 @@ type GuardExecution = Pick<ToolExecution, "name" | "arguments"> & {
  *  `Readonly<ToolExecution>`；`Context.tools: ToolRuntime` 的官方增强在 `:34`）。
  *  于是 guard 谓词的入参与撤销句柄的返回都跟着官方成员走：官方加一枚必填参数或换掉载荷类型，
  *  本文件当场是编译错误，而不是镜像照样编译通过、调用点静默拿到错形状。
- *  （`ocr-review` / `zvec-grep` 还额外 `Pick` 了 `register`——它们注册工具；本包不注册。） */
-type GuardService = Pick<ToolRuntime, "guard">;
+ *  （`ocr-review` / `zvec-grep` 还额外 `Pick` 了 `register`——它们注册工具；本包不注册。）
+ *  ⚠ `get` 挂在 **Partial** 上而不是并列的 `Pick`：它只用于探测"这条工具名在不在"（见
+ *  `toolPresentOf`），缺席不该让闸门少一条凭证。官方原文在同文件 `:164`
+ *  `get(name: string, scope?: ScopeKey): ToolDefinition | undefined`。 */
+type GuardService = Pick<ToolRuntime, "guard"> & Partial<Pick<ToolRuntime, "get">>;
+
+/** 「这条检索工具名在这台宿主上注册着吗」的探测口（指令点名专用）。 */
+export type ToolPresent = (name: string) => boolean;
+
+/** 探测不了时的答复：一律算"在"。多点名一个名字只是让模型白烧一次调用，
+ *  而少点名一个真存在的工具是把模型要走的门关上——两个错的方向不一样。 */
+const TOOLS_UNKNOWN: ToolPresent = () => true;
+
+/** 由 `ctx.tools` 的服务面造探测口。
+ *  为什么需要它：默认名单里的 `grep`/`glob` 来自宿主 stock 目录（docs/tool-catalog.md +
+ *  packages/fs/tool-fs-search），而 `zg_search`（连同它的 `root`/`query`/`fts`/`vector` 参数面）
+ *  由**另一枚插件**注册——本仓同级包 `@jayyuen66/dsh-zvec-grep`。也就是说这一位**逐台不同**：
+ *  装了它的人才走得通那条严格口径，没装的人照着拒绝理由去调只会撞"工具不存在"，缺项照旧——
+ *  本包一直在防的就是这件事：**指令不可照做**。所以点名前先问一句"这台宿主注册着吗"。
+ *  探测抛错（老宿主没有这枚成员）与探测不到一律回 true，判定面因此不受这一层影响：
+ *  多点名一个名字只是让模型白烧一次调用，少点名一个真存在的工具则是把模型要走的门关上。 */
+function toolPresentOf(tools: GuardService | undefined): ToolPresent {
+  if (typeof tools?.get !== "function") {
+    return TOOLS_UNKNOWN;
+  }
+  return (name: string): boolean => {
+    try {
+      return tools.get?.(name) !== undefined;
+    } catch {
+      return true;
+    }
+  };
+}
 
 /** 设置条目挂出的值面读数口（与 settings-host.ts 的导出形状同源，按结构本地声明：
  *  拦截半不 import 设置半，两个产物各自自包含，谁也不依赖谁的运行时）。 */
@@ -176,9 +261,77 @@ interface SettingsReader {
  */
 type SettingsFormsService = Pick<SettingsForms, "describe">;
 
+/** 预检注入消息的 `source.kind`（本包自己的生产者名）。官方 `MessageSourceMap` 是**合并式
+ *  可扩展**的和类型：每个生产者在自己模块里 `declare module` 声明自己的 kind
+ *  （dsh-tool-jobs 就是这么声明 `tool-jobs` 的，见其 lib/types/index.d.ts:13-17）。
+ *  `form: "notice"`（一次性发生的事）由官方的 `ContextFormed` 判别并要求带 `summary`
+ *  ——那条 ≤120 字的一行说明会进 UI 折叠态，也是这条注入的"标题"。 */
+declare module "@deepseek-ai/dsh-llm" {
+  interface MessageSourceMap {
+    "dangerguard-preflight": { readonly kind: "dangerguard-preflight" } & ContextFormed;
+  }
+}
+
+/** `tools/pre-execute` 的两个实参面（官方 `Events` 增强出来的那一对：exec 与 next）。
+ *  本文件不重述 [name/arguments/agent/signal] 的签名——官方任一环改名即在此编译不过。
+ *  `Parameters` 会剥掉 `this`（与下面 `session/disposed` 那条读法同一个用法）。 */
+type PreExecuteParams = Parameters<Events["tools/pre-execute"]>;
+/** 瀑布的 `next`：把决定权交给后续监听器或默认放行。预检**永远先**调它，
+ *  只在下游放行（`kind === 'allow'`）时才轮到我们递证据或拦一次——不去抢别人已经做的决定。 */
+type PreflightNext = PreExecuteParams[1];
+/** 本插件注册的预执行监听器面（B 面）：返回域即 `next()` 的返回域（`Promise<PreToolDecision>`），
+ *  不写成 `Promise<ReturnType<…>>`（那会多套一层 Promise）。 */
+type PreflightListener = (
+  exec: PreExecuteParams[0],
+  next: PreflightNext,
+) => ReturnType<PreflightNext>;
+
+/** `tools/post-execute` 的三个实参面（exec、**已冻结的那次结果**、next）；同上，不重述签名。 */
+type PostExecuteParams = Parameters<Events["tools/post-execute"]>;
+/** 结果面：官方给的是 `Readonly<ToolExecutionResult>` 判别联合，本包只读 `isError` 一位。 */
+type PostExecuteResult = PostExecuteParams[1];
+type PostflightNext = PostExecuteParams[2];
+/** A 面的监听器面：把引用块并进下游的 `PostToolDecision`（accept 附 additionalContexts，
+ *  block 也附——被改判成错误结果时，那块证据对模型仍然有用，与官方 repeat-tool-reminder 同策）。 */
+type AttachListener = (
+  exec: PostExecuteParams[0],
+  result: PostExecuteResult,
+  next: PostflightNext,
+) => ReturnType<PostflightNext>;
+
+/** 两条瀑布的返回域（各自 `next()` 的 awaited 结果）。写成别名而不是去 import
+ *  官方的 `PreToolDecision` / `PostToolDecision`：本文件对官方签名一个字都不重述，
+ *  官方任一处改名或换形状都会在这里当场编译不过，而不是让产物里留一份对不上的副本。 */
+type PreDecision = Awaited<ReturnType<PreflightNext>>;
+type PostDecision = Awaited<ReturnType<PostflightNext>>;
+
+/** 把一枚附加上下文并进下游决定。三种形状各自**重建**，不做 `{...downstream}` 展开：
+ *  官方 `PostToolDecision` 的 accept 是两个臂（`content?` 与 `value?`，另一臂标 `?: never`），
+ *  展开出来的对象字面量在判别联合上不收（`exactOptionalPropertyTypes` 下"这一位是 undefined"
+ *  与"没有这一位"是两回事）。
+ *  `block` 也附：那次调用已经被改判成错误结果，但引用面对模型仍然是有用的事实——
+ *  与官方 repeat-tool-reminder 同一条处理（其 src/index.ts:224-225）。 */
+function attachContext(downstream: PostDecision, context: UserMessage): PostDecision {
+  const contexts = [context, ...(downstream.additionalContexts ?? [])];
+  let merged: PostDecision;
+  if (downstream.kind === "block") {
+    merged = { kind: "block", feedback: downstream.feedback, additionalContexts: contexts };
+  } else if (downstream.value === undefined) {
+    merged = {
+      kind: "accept",
+      ...(downstream.content === undefined ? {} : { content: downstream.content }),
+      additionalContexts: contexts,
+    };
+  } else {
+    merged = { kind: "accept", value: downstream.value, additionalContexts: contexts };
+  }
+  return merged;
+}
+
 /** 宿主服务面（结构投影：与真实 Context 接口兼容，避免值导入 @deepseek-ai/*）。 */
 interface HostCtx {
   tools?: GuardService;
+
   settings: SettingsFormsService;
   /** 可选服务读取：本地面**故意**留着，不吃 `Context["get"]`。官方那是两枚重载
    *  （installed `@deepseek-ai/cordis/lib/types/reflect.d.ts:14`
@@ -196,7 +349,7 @@ interface HostCtx {
    *  工厂签名。⚠ 官方的返回域（`SyncEffect` / `Effect`，:49-51）**不受理 `undefined`**：
    *  「这一趟没有要清理的东西」在契约里是一枚空 disposer，见 NOOP_DISPOSER。 */
   effect: Context["effect"];
-  /** 宿主事件回调，本插件用到两种形状：
+  /** 宿主事件回调，本插件用到三种形状：
    *   - `session/disposed`：接线 fact-gate 会话分片及时回收。载荷不再手抄成 `{ id?: unknown }`：
    *     它就是官方事件的第一个实参
    *     （`session/disposed(this: Scoped<Session>, session: Session): void`，installed
@@ -204,6 +357,17 @@ interface HostCtx {
    *     故 `Parameters<Events["session/disposed"]>[0]` = 官方 `Session` 类面，本包读的那三位
    *     （`id` / `header` / `snapshotEvents`）由 `SessionLogFace` 承接。
    *   - `settings/document-updated`：locale 偏好缓存的失效信号（见 localeMessages）。
+   *   - `tools/pre-execute`：预检的 **B 面**（带证据拦一次）。它是**瀑布**事件
+   *     （`(this: Scoped<ToolRuntime>, exec: ToolExecution, next: () => Promise<PreToolDecision>)`，
+   *     installed dsh-tools :47），故监听器必须把 `next()` 的结果交回去。
+   *   - `tools/post-execute`：预检的 **A 面**（引用面随读取结果出去）。同为瀑布，多一枚
+   *     结果实参（`Readonly<ToolExecutionResult>`，installed dsh-tools :70），返回域是
+   *     `PostToolDecision`——A 面只在下游 `accept` 上并 `additionalContexts`。
+   *   - `fs/observed`：后端每观察一枚目标就报一次（`@deepseek-ai/dsh-fs` 的
+   *     `'fs/observed'(target, observation, actor)`，**emit** 模式）。本包只读第一枚实参里
+   *     后端自己解析出的 `displayPath`，把它经 `processPath` 换成该执行世界的绝对路径记进
+   *     `officialPaths`——同步、零额外 I/O。⚠ 官方明说这类监听器"throws fail the tool call"，
+   *     所以取值那一步整个包在 try 里（见 rememberObservedPath）。
    *  ⚠ 这里**不**换成 `Context["on"]`：那是全仓延后项（泛型 `on<K extends keyof Events>` 会
    *  重写每一枚监听器签名，ctx-observe/host.ts:329-336 记着同一条理由）。按重载逐枚点名，
    *  新增事件时加一条签名即可，不必把整张事件表拖进来。 */
@@ -213,15 +377,26 @@ interface HostCtx {
       listener: (session: Parameters<Events["session/disposed"]>[0]) => void,
     ): unknown;
     (event: "settings/document-updated", listener: (ns: unknown) => void): unknown;
+    (event: "tools/pre-execute", listener: PreflightListener): unknown;
+    (event: "tools/post-execute", listener: AttachListener): unknown;
+    (
+      event: "fs/observed",
+      listener: (target: Parameters<Events["fs/observed"]>[0]) => void,
+    ): unknown;
   };
   /** 注入子上下文（用它挂投影单元的注册与读口）。按**可选**收：cordis 只在依赖到位时
    *  才激活回调，没装 dsh-session-projection 的 profile 上这条路径整体不存在，闸门沿用
    *  回退扫描——写进 `isDangerGuardHost` 的硬前置等于把闸门下线（同 session-rescue 的口径：
    *  探针只能探"真会直接调的方法"）。child 面按本包用到的那一位投影。 */
-  inject?: (
-    deps: readonly string[],
-    activate: (child: { sessionProjections: ProjectionsRegistry }) => void,
-  ) => unknown;
+  /** 官方可选注入面。两枚重载按"具体在前"排：`["fs"]` 那一条的入参形状与通用条的
+   *  `{ sessionProjections }` 不互相 assignable，写反了会被通用臂吃掉。 */
+  inject?: {
+    (deps: ["fs"], activate: (child: { fs: PreflightFs }) => void): unknown;
+    (
+      deps: readonly string[],
+      activate: (child: { sessionProjections: ProjectionsRegistry }) => void,
+    ): unknown;
+  };
 }
 
 /**
@@ -417,9 +592,6 @@ interface ProjectionsRegistry {
 
 /** 可信台账读口：注册表在位时由 inject 回调装上；缺席 ⇒ 整条判定走回退扫描。 */
 type LedgerReader = (session: SessionLogFace) => ToolLedger | undefined;
-
-/** 台账容量（各台账共用；按插入序淘汰，防长驻进程无界增长）。 */
-const LEDGER_CAP = 200;
 /** 词干过短不做匹配（防 a.ts / ab.ts 这类两字母名到处顶包）。 */
 const MIN_STEM = 4;
 /**
@@ -440,33 +612,90 @@ const mtimeBySessionPath = new Map<string, number>();
  * （A 会话 len=50 写进台账，B 会话读到的 baseline 就是 A 的下标）。
  */
 const seenLenBySessionPath = new Map<string, number>();
-/** 项目根探测缓存（路径 → 根）。 */
+/** 项目根探测缓存（`会话目录|目标` → 根）。键里带 cwd 的理由见 `projectRootOf`：没有工程
+ *  标记时回落值取决于"cwd 是不是目标的祖先"，只按目标缓存会让两个会话互相吃对方的根。 */
 const rootCache = new Map<string, string>();
 
-/** LRU 写入：先删后插刷新位次；超容量按最旧淘汰。
- *  淘汰用 for-of 而非 `keys().next()` + undefined 收窄——容量判定已保证表非空，
- *  那个"取不到键"的分支永远不可达（测不到的分支就是覆盖率与可读性的双份负债）。 */
-function lruPut<Value>(map: Map<string, Value>, key: string, value: Value): void {
-  map.delete(key);
-  for (const oldest of map.keys()) {
-    if (map.size < LEDGER_CAP) {
-      break;
-    }
-    map.delete(oldest);
-  }
-  map.set(key, value);
+// ── 预检（Phase 2）的内存面：上界 + 台账 + 键形 ───────────────────────────────
+// 逻辑在下面「预检」一节（A 面 attachRefsOnRead / B 面 runPreflight），这里只放"记忆与上界"，
+// 与上面几张台账同一处——它们的生命周期一样（模块级、LRU 兜底、会话销毁时按会话键回收、
+// 插件卸载时整表清空）。
+
+/** 预检的墙钟上限（毫秒）。**必须存在**：平台不会放弃一枚挂起的 pre-execute promise
+ *  （dsh-tools 的 `tools/pre-execute` 契约原话："the registry rechecks cancellation after
+ *  they settle but never abandons their promise"），一次卡住的扫描会把整次工具调用永久挂死。
+ *  这是工程上界、不是产品策略，故不落设置面（配置面只收紧凭证，不放宽成本）。
+ *  大仓里的常态成本由 lib/preflight-scan.ts 的文件/目录**预算**先收住（截断即返），
+ *  这一枚只兜"单枚 syscall 卡住"那种罕见形状。 */
+const PREFLIGHT_TIMEOUT_MS = 3000;
+
+/** 预检投递水位：两项各自的**投递位次**（-1 = 这一项从未投递）。
+ *  拆成两位而不是 `{seq, read, refs}` 一枚：A 面只投 refs、B 面可能只投 read，两者先后落在
+ *  同一个键上——合一位要么覆盖掉对方那一项，要么把 read 的新鲜度按 refs 的位次重算，而
+ *  read 的判据要的正是**它自己那次**投递的位次（与 `staleBase` 比）。 */
+interface DeliveryWatermark {
+  readonly readSeq: number;
+  readonly refsSeq: number;
+  /** 层探查（test/e2e/docs）各自的投递位次：与 refs 同理由拆位——一次 B 面可能只覆盖其中
+   *  两层（第三层不在扫描覆盖里），合一位就会把"已投递"扩散到没覆盖的那层上。 */
+  readonly layerSeqs: Readonly<Partial<Record<FactNeed, number>>>;
 }
 
+/** 没有投递时的缺省水位：两位皆 -1——与"从未投递"在比较与短路下同形（比较恒假）。 */
+const NO_DELIVERY: DeliveryWatermark = { readSeq: -1, refsSeq: -1, layerSeqs: {} };
+
+/** 引用扫描缓存：`会话id|目标` → 结果 + 扫描时的目标 mtime。
+ *  mtime 是新旧判据（与 mtimeBySessionPath 同一条自校口径）：目标被会话外改过就重扫；
+ *  否则紧接着的另一趟直接吃这份结果——被预算截断的那份也照用（`complete` 位随结果一起
+ *  进缓存，读法侧据此决定给不给凭证）。 */
+const preflightScans = new Map<
+  string,
+  { scan: RefScan | undefined; version: FsVersion | undefined }
+>();
+/** 预检投递水位：`会话id|目标` → 两项各自的投递位次。
+ *  B 面写在 `tools/pre-execute`，而 guard 谓词**必然**在其之后同步跑（官方
+ *  `prepareExecution` 只在 `decision.kind === 'allow'` 时才走 `guardReason`），所以那次投递
+ *  它一定看得见。A 面写在 `tools/post-execute`：它的证据随读取结果一起被 loop 收下
+ *  （`agent-loop/src/tool-calls.ts:157`，"for the next step boundary"），不靠会话日志里
+ *  能不能看见——正因如此它比旧版那条 `agent.inject()` 可靠：inject 排在 next pre-step，
+ *  官方明说可能被取消/丢弃，而水位却会把它记成"补过了"。 */
+const preflightDelivered = new Map<string, DeliveryWatermark>();
+
+/** 「这次调用没有已解析的 target」那一份共享表：没有声明目标的调用用它，而不是每次 new 一枚
+ *  （pre-execute 是每次工具调用都要过的路）。只读用途，所以类型面就是 `ReadonlyMap`。 */
+const NO_TARGETS: ReadonlyMap<string, FsTarget> = new Map();
+
+/** 会话键前缀（`会话id|`）：read 的 mtime 基线、评估时的日志水位、预检的扫描缓存与投递水位
+ *  四处共用这一枚构造。一旦有一处不同源，预检写下的水位就在评估侧读不到——静默退回"仍缺项"、
+ *  整趟预检白做，而且没有任何报错（键形不同在类型上也看不出）。
+ *  分隔符让 `s1` 吃不到 `s10|…`。 */
+const sessionKeyPrefix = (sessionId: unknown): string => `${stringIdOf(sessionId)}|`;
+
+/** 会话键的**完整**形状（`会话id|目标`）：上面那枚前缀加目标绝对形。五处读法共用它——
+ *  mtime 基线（`recordReadObservation`）、外部改动水位（`evidenceFor`）、预检的扫描缓存
+ *  （`refScanOf`）与两张投递水位（A/B 面）。把拼接本身单源化，是因为"只共用前缀"仍留下
+ *  五处各自 `${prefix}${target}` 的机会：少一个分隔符、多一次 normalize 都不会编译报错，
+ *  只会让预检写下的水位在评估侧永远读不到。 */
+const sessionTargetKeyOf = (sessionId: unknown, targetN: string): string =>
+  `${sessionKeyPrefix(sessionId)}${targetN}`;
+
 /**
- * 丢掉一个会话在两张会话键台账里的分片。键形是 `会话id|目标`（buildEvalContext 的
- * sessKey 自带 `|` 收尾），故按 `会话id|` 前缀匹配就够：分隔符让 `s1` 吃不到 `s10|…`。
- * 只扫这两张——`mtimes` / `rootCache` / `layersByStart` 是路径键，与会话无关。
+ * 丢掉一个会话在四张会话键台账里的分片。键形是 `会话id|目标`（`sessionKeyPrefix` 自带 `|`
+ * 收尾），故按 `会话id|` 前缀匹配就够：分隔符让 `s1` 吃不到 `s10|…`。
+ * 只扫这四张——`mtimes` / `rootCache` / `layersByStart` 是路径键，与会话无关。
+ * 预检那两张（扫描缓存、投递水位）是会话键，必须跟着走：留着的话下一个会话拿到前一个
+ * 会话的投递水位就是**免检金牌**（门禁认的是 `会话id|目标`，但泄漏的是记忆本身）。
  * 幂等：同一会话重复 dispose 是空操作。
  * @param sessionId 会话 id（与 buildEvalContext 同一个 stringIdOf 投影）。
  */
 function dropSessionLedgers(sessionId: string): void {
   const prefix = `${sessionId}|`;
-  for (const map of [mtimeBySessionPath, seenLenBySessionPath]) {
+  for (const map of [
+    mtimeBySessionPath,
+    seenLenBySessionPath,
+    preflightScans,
+    preflightDelivered,
+  ]) {
     for (const key of map.keys()) {
       if (key.startsWith(prefix)) {
         map.delete(key);
@@ -515,7 +744,7 @@ function pathExists(targetPath: string): boolean {
   return presenceOf(targetPath).presence === "present";
 }
 
-/** 项目根：向上找工程标记（与 quality-gate gate-detect 同一族标记），否则退到会话 cwd。 */
+/** 项目根探测认的工程标记（与 quality-gate gate-detect 同一族标记）。 */
 const ROOT_MARKERS = [
   "package.json",
   "Cargo.toml",
@@ -528,25 +757,48 @@ const ROOT_MARKERS = [
 const hasRootMarker = (dir: string): boolean =>
   ROOT_MARKERS.some((marker) => pathExists(`${dir}/${marker}`));
 
+/** `candidate` 是否为 `target` 的**祖先目录**（目标自身不算）。
+ *  这是「引用取证的作用域判据」与「项目根的回落取值」共用的**同一条不变式**，故单列一处：
+ *  判定侧（`isProjectScopeOf`）只认"检索起点是目标的祖先"，而拒绝文案会把项目根当检索
+ *  起点原样递给模型（`assembleGaps` 的 `ctx.searchPath`）。两处一旦不同源，就会出现
+ *  「门禁教模型去搜的位置，门禁自己又不认」——模型怎么照做都攒不满凭证。 */
+const isAncestorDirOf = (candidate: string, target: string): boolean =>
+  candidate !== target && target.startsWith(`${candidate}/`);
+
+/** 项目根：向上找工程标记（与 quality-gate gate-detect 同一族标记）。
+ *  **找不到标记时退到目标自己的父目录，不是会话 cwd** —— 回落值必须满足
+ *  `isAncestorDirOf(回落值, targetN)`，见上一枚函数的说明。会话 cwd 与目标分处两棵树时
+ *  （最典型的是 /tmp 下的草稿脚本：整条祖先链上没有任何 ROOT_MARKER）它不是目标的祖先，
+ *  于是拒绝理由里的检索起点成了模型**无论怎么做都够不到**的位置——照着提示搜不算数，
+ *  只能连拒到 maxDenies 换一次配额放行，外加一条 stderr 警告。
+ *  cwd 只在**确实是祖先**时才用（会话就在目标所在目录树里时，它的范围比目标父目录更大、
+ *  层探查也更准）；否则一律用目标父目录——那是唯一必然仍是祖先的取值。代价仅是项目外
+ *  目标不再越过自身目录去问"有没有 tests/"（对着 /tmp 问这个本来就没有意义）。 */
 function projectRootOf(targetN: string, cwd: string | undefined): string {
-  const cached = rootCache.get(targetN);
+  // 键含 cwd：回落那一步问的正是"cwd 是不是目标的祖先"，于是**同一枚 targetN 在两个会话
+  // 目录下会得到两个不同的根**。只按 targetN 缓存的话，第二个会话吃到第一个的根——而根同时
+  // 是扫描起点、拒绝理由里递给模型的检索起点、以及层相对形（toPosixRelative）的基准，
+  // 错位就让"这层没被覆盖"变成常态（方向保守，但那是白给的摩擦）。
+  const key = `${cwd ?? ""}|${targetN}`;
+  const cached = rootCache.get(key);
   if (cached !== undefined) {
     return cached;
   }
-  let root = cwd ?? path.dirname(targetN);
-  let dir = path.dirname(targetN);
+  const parent = path.dirname(targetN);
+  let root = cwd !== undefined && isAncestorDirOf(cwd, targetN) ? cwd : parent;
+  let dir = parent;
   for (let depth = 0; depth < 12; depth += 1) {
     if (hasRootMarker(dir)) {
       root = dir;
       break;
     }
-    const parent = path.dirname(dir);
-    if (parent === dir) {
+    const next = path.dirname(dir);
+    if (next === dir) {
       break;
     }
-    dir = parent;
+    dir = next;
   }
-  lruPut(rootCache, targetN, root);
+  lruPut(rootCache, key, root);
   return root;
 }
 
@@ -584,12 +836,18 @@ interface FactLayer {
 const layersByStart = new Map<string, FactLayer[]>();
 
 /** 卸载兜底：插件换代（配置重载/重装）时把派生台账清空，不让上一代的缓存活过这一代——
- *  可换代时工作树已经变了，上一代的层探查结论是错的。`mtimes` / `rootCache` 不在此列：
- *  前者按 mtime 自校、后者是纯路径→根映射，留着无副作用，交给 lruPut 兜底即可。 */
+ *  可换代时工作树已经变了，上一代的层探查结论是错的。预检那两张（扫描缓存、投递水位）
+ *  同理：它们记的是上一代看到的引用面与投递事实，换代后一并作废。官方真实路径那张也清：
+ *  它喂的是**密钥面判定**，换代之间软链可能被重新指向，留着旧形等于拿上一代的盘判这一代。
+ *  `mtimes` / `rootCache` 不在此列：前者按 mtime 自校、后者是纯路径→根映射（只决定扫描起点），
+ *  留着无副作用，交给 lruPut 兜底即可。 */
 function clearDerivedLedgers(): void {
   mtimeBySessionPath.clear();
   seenLenBySessionPath.clear();
   layersByStart.clear();
+  preflightScans.clear();
+  preflightDelivered.clear();
+  clearOfficialPaths();
 }
 
 /** 一个目录上的层探查（`existingLayersOf` 上走链的循环体）：对**尚未命中**的每一层，
@@ -800,14 +1058,28 @@ function riskFactsOf(
   };
 }
 
-/** 无法判定证据时的保守输入：按"两项都没做过"处理（缺信息一律要更多，不要更少）。 */
-function undeterminable(determinate: boolean): FactEvidenceInput {
+/** 无法判定证据时的保守输入：缺信息一律要**更多**，按"两项都没做过"起步。
+ *  但预检的投递水位不在"没做过"之列——那是插件自己的记录（B 面当场递过正文、A 面随读取
+ *  附过引用面），**不依赖会话日志**。不剔除它就会出现"预检补完 → guard 仍按不可判定缺项
+ *  拒 → 再补 → 再拒"的死循环（配额放行只是把死循环换成免检，不是解）。
+ *  `done` 那格照 fact-gate 的口径带上，让拒绝文案能说清"已经给过的不再要求"。 */
+function undeterminable(delivered: DeliveryWatermark): FactEvidenceInput {
+  const gaps: FactGap[] = [];
+  const done: FactNeed[] = [];
+  if (delivered.readSeq >= 0) {
+    done.push("read");
+  } else {
+    gaps.push({ need: "read", why: "never" });
+  }
+  if (delivered.refsSeq >= 0) {
+    done.push("refs");
+  } else {
+    gaps.push({ need: "refs", why: "never" });
+  }
   return {
-    gaps: [
-      { need: "read", why: "never" },
-      { need: "refs", why: "never" },
-    ],
-    determinate,
+    gaps,
+    done,
+    determinate: false,
     logSeq: 0,
     fileEditSeq: -1,
   };
@@ -1007,7 +1279,9 @@ const isProjectScopeOf = (ctx: EvalCtx, targetPath: string | undefined): boolean
   if (targetPath === undefined) {
     return false;
   }
-  return targetPath !== ctx.targetN && ctx.targetN.startsWith(`${targetPath}/`);
+  // 判据与「项目根回落」同源（isAncestorDirOf）——两处必须给出同一个答案，否则门禁
+  // 会教模型去搜一个它自己随后不认的位置。
+  return isAncestorDirOf(targetPath, ctx.targetN);
 };
 
 /** 路径显示形态：有 cwd 则相对（提示里更短更可读），否则原样。 */
@@ -1020,10 +1294,6 @@ const relOf = (ctx: EvalCtx, targetPath: string): string =>
  *  空串解析出来的路径会把相对目标顶到根上，比缺失更危险）。 */
 const nonEmptyStr = (value: unknown): string | undefined =>
   typeof value === "string" && value.length > 0 ? value : undefined;
-
-/** 路径归一化：相对路径按会话 cwd 解析（模型常报相对路径）。 */
-const resolveTarget = (value: string, cwd: string | undefined): string =>
-  cwd !== undefined && !path.isAbsolute(value) ? path.resolve(cwd, value) : value;
 
 /** 会话**当前**的工作目录。
  *
@@ -1091,6 +1361,60 @@ function ledgerRows(
   return evs === undefined ? undefined : { ...scanToolEvents(evs), logSeq: evs.length };
 }
 
+/** 投递位次：读**当下**的会话事件数（投影优先、快照回落，与 guard 判定同一条读法）；
+ *  读不到（两者皆不可得）时回落本轮 `evidenceFor` 已经算出的 `logSeq`——两者同源同值，
+ *  而 `assembleGaps` 的比对正是拿它跟 `staleBase` 比。
+ *  A 面不必等这条消息落进日志：additionalContexts 随本次结果一起被 loop 收下
+ *  （`agent-loop/src/tool-calls.ts:157`「for the next step boundary」），位次取当刻即可。 */
+const deliverySeqOf = (req: PreflightRequest, input: FactEvidenceInput): number =>
+  ledgerRows(req.session, req.ledger)?.logSeq ?? input.logSeq;
+
+/** 把这次覆盖到的层盖上投递位次（其余沿用旧值）。写成函数而不是 `Array#reduce` 累积展开：
+ *  后者是本仓 lint 明令避免的形状（oxc/no-accumulating-spread），而这里要的只是"逐层赋值"。 */
+function liftLayers(
+  prev: Readonly<Partial<Record<FactNeed, number>>>,
+  layers: readonly FactNeed[],
+  seq: number,
+): Partial<Record<FactNeed, number>> {
+  const next = { ...prev };
+  for (const need of layers) {
+    next[need] = seq;
+  }
+  return next;
+}
+
+/** 记一次投递：只抬自己那一格的位次，另一格沿用旧值（见 DeliveryWatermark 的拆位理由）。
+ *  `patch` 里为 false 的那一项**不写**——投递失败绝不能把对方已挣到的位次清掉。 */
+function noteDelivery(
+  key: string,
+  seq: number,
+  patch: { read?: boolean; refs?: boolean; layers?: readonly FactNeed[] },
+): void {
+  const prev = preflightDelivered.get(key) ?? NO_DELIVERY;
+  const layers = patch.layers ?? [];
+  lruPut(preflightDelivered, key, {
+    readSeq: patch.read === true ? seq : prev.readSeq,
+    refsSeq: patch.refs === true ? seq : prev.refsSeq,
+    // 层位只抬不清：这一趟没覆盖的层沿用上一次投递到的位次（覆盖过就是覆盖过）。
+    layerSeqs: liftLayers(prev.layerSeqs, layers, seq),
+  });
+}
+
+/** 预检的投递水位读口（`会话id|目标`，与写侧共用 sessionTargetKeyOf）。
+ *  两条路都要读它：台账可得时挂在 EvalCtx 的键上（`evidenceFor` 里那一格），
+ *  台账**不可得**时（undeterminable 那条路）也要能读到——水位是插件自己的记录，
+ *  不依赖会话日志，否则"预检补完 → guard 仍按不可判定缺项拒"就成了死循环。 */
+function deliveredOf(
+  session: SessionLogFace | undefined,
+  target: string,
+  cwd: string | undefined,
+): DeliveryWatermark {
+  return (
+    preflightDelivered.get(sessionTargetKeyOf(session?.id, resolveTarget(target, cwd))) ??
+    NO_DELIVERY
+  );
+}
+
 /** 构造只读评估环境；会话不可得/两条读法都拿不到台账 → undefined（复用 undeterminable 保守输入）。
  *  `cwd` 由调用方（guard 回调经 `GuardRuntime.cwd`）传进来，不在这里现取：读时基线
  *  （`recordReadObservation`）与评估侧必须吃**同一枚**目录值，键形才逐字同源。 */
@@ -1114,7 +1438,7 @@ function buildEvalContext(
     const base = path.posix.basename(targetN);
     result = {
       ...rows,
-      sessKey: `${stringIdOf(session.id)}|`,
+      sessKey: sessionKeyPrefix(session.id),
       cwd,
       targetN,
       base,
@@ -1229,7 +1553,7 @@ function recordReadObservation(
   // 就会把基线写到另一个键上。
   const targetN = resolveTarget(target, cwd);
   const { mtimeMs } = presenceOf(targetN);
-  const lenKey = `${stringIdOf(session?.id)}|${targetN}`;
+  const lenKey = sessionTargetKeyOf(session?.id, targetN);
   lruPut(mtimes, targetN, mtimeMs);
   lruPut(mtimeBySessionPath, lenKey, mtimeMs);
 }
@@ -1466,6 +1790,9 @@ interface GapInput {
   externallyChanged: boolean;
   layers: FactLayer[];
   layerSeq: Map<FactNeed, number>;
+  /** 预检刚刚投递的证据水位（`会话id|目标` 命中时给出，否则 NO_DELIVERY）。
+   *  由 evidenceFor 现读，不让下游自己去查表——缺项裁定与投递水位的键形必须同源。 */
+  delivered: DeliveryWatermark;
 }
 
 /** refs 窄落点的 hint 文案。提成模块级函数：嵌进 gaps.push 的三元里会超
@@ -1479,11 +1806,17 @@ const narrowScopeHint = (messages: DangerGuardMessages, narrowAdds: Set<string>)
 const layerDirHint = (ctx: EvalCtx, dir: string): string =>
   fillTemplate(ctx.messages.gapLayerDir, { dir: relOf(ctx, dir) });
 
-/** read 侧裁定并落清单（判据与抽前逐字相同）：已满足的两种形态记 done —— 新建文件
- *  （无旧内容可 read）、**成功** read 晚于目标最近一次成功编辑（新鲜度）。
+/** read 侧裁定并落清单（判据与抽前逐字相同）：已满足的三种形态记 done —— 新建文件
+ *  （无旧内容可 read）、**成功** read 晚于目标最近一次成功编辑（新鲜度）、或预检的 B 面
+ *  刚把目标正文当场递给过模型（`delivered.readSeq` 晚于 `staleBase`——外部改动之后的投递
+ *  才算数，与 read 自己那条新鲜度判据逐字同源）。
  *  缺项成因优先级：外部改动 > read 失败 > 从未 read。 */
 function collectReadVerdict(input: GapInput, gaps: FactGap[], done: FactNeed[]): void {
-  if (input.newFile || input.readSeq > input.staleBase) {
+  if (
+    input.newFile ||
+    input.readSeq > input.staleBase ||
+    input.delivered.readSeq > input.staleBase
+  ) {
     done.push("read");
     return;
   }
@@ -1498,7 +1831,10 @@ function collectReadVerdict(input: GapInput, gaps: FactGap[], done: FactNeed[]):
   gaps.push({ need: "read", why: readWhy });
 }
 
-/** refs 侧裁定并落清单（已满足 = 有过一次**成功**的名单内检索，refsSeq ≥ 0）。
+/** refs 侧裁定并落清单（已满足 = 有过一次**成功**的名单内检索 `refsSeq ≥ 0`，或预检投递过
+ *  一份**扫完了整趟遍历**的引用扫描——被预算截断的那种不给凭证，见 `RefScan.capped`）。
+ *  引用面不由本文件内容决定，故预检那条也不参与新鲜度比对——
+ *  与 read 那条**刻意不同源**，理由见 fact-gate.ts 第 1 条硬原则。
  *  成因优先级：窄落点未覆盖 > refs 失败 > 从未 refs；只有 narrow 带落点 hint。 */
 function collectRefsVerdict(
   messages: DangerGuardMessages,
@@ -1506,7 +1842,7 @@ function collectRefsVerdict(
   gaps: FactGap[],
   done: FactNeed[],
 ): void {
-  if (input.refsSeq >= 0) {
+  if (input.refsSeq >= 0 || input.delivered.refsSeq >= 0) {
     done.push("refs");
     return;
   }
@@ -1535,7 +1871,8 @@ function collectLayerVerdicts(
   done: FactNeed[],
 ): void {
   for (const layer of input.layers) {
-    if (input.layerSeq.has(layer.need)) {
+    // 模型自己搜过（layerSeq）或预检从同一次扫描派生过结论（layerSeqs）都算这项已补。
+    if (input.layerSeq.has(layer.need) || (input.delivered.layerSeqs[layer.need] ?? -1) >= 0) {
       done.push(layer.need);
     } else {
       gaps.push({ need: layer.need, why: "never", hint: layerDirHint(ctx, layer.dir) });
@@ -1613,11 +1950,16 @@ function evidenceFor(
 ): FactEvidenceInput {
   const ctx = buildEvalContext(session, target, gating);
   if (ctx === undefined) {
-    return undeterminable(false);
+    // 台账不可得 ≠ 什么都没做过：预检的水位是插件本地记录，这一支也要剔除（见 undeterminable）。
+    return undeterminable(deliveredOf(session, target, gating.cwd));
   }
   // fs：存在性（三态，见 presenceOf）+ 外部改动检测
   const { presence, mtimeMs } = presenceOf(ctx.targetN);
-  const lenKey = `${ctx.sessKey}${ctx.targetN}`;
+  // 键形单源在 sessionTargetKeyOf（与 `ctx.sessKey` 同源同值：buildEvalContext 那侧就是
+  // 用它拼的）。预检的投递水位与上面两张台账**同键**（`会话id|目标`）：键形一旦不同源，
+  // 预检写下的水位就在评估侧读不到——静默退回"仍缺项"，整趟预检白做。
+  const lenKey = sessionTargetKeyOf(session?.id, ctx.targetN);
+  const delivered = preflightDelivered.get(lenKey) ?? NO_DELIVERY;
   // 基线优先取**本会话**上次看到的 mtime；本会话没见过该文件时回落到全局值兜底
   // （例：重启前另一会话评估过）。旧实现只有全局一份 → 谁先评估谁消费掉跳变信号。
   const seenMtime = mtimeBySessionPath.get(lenKey) ?? mtimes.get(ctx.targetN);
@@ -1678,6 +2020,7 @@ function evidenceFor(
     externallyChanged,
     layers,
     layerSeq: resolved.layerSeq,
+    delivered,
   });
 }
 
@@ -1685,7 +2028,7 @@ function evidenceFor(
  *  不让上报侧再解析一次参数——两处解析就会漂移，且 `key` 有值时命令必是字符串，
  *  上报侧再写一次 `typeof === "string"` 兜底就是一道永远测不到的死分支）。
  *  规则键有两种性质：命中危险模式（拦）与 `-c` 体未被检查（需用户确认），
- *  调用方按键区分上报，见 apply 里的 NESTED_UNCONFIRMED_SIGNATURE 分支。 */
+ *  调用方按键把后者标进 `evidence.needsUserConfirmation`（签名两者一律用命令原文）。 */
 interface BashDenial {
   command: string;
   key: BashDenialKey;
@@ -1806,17 +2149,29 @@ function realpathOf(target: string, cwd: string | undefined): string | undefined
   return result;
 }
 
-/** 声明目标的解析形表（`声明原文 → 真实路径`）。lib 侧不 import `node:fs`：解析留在宿主这层，
- *  判定仍是纯函数——这也让"解析这一步出过错"不可能被算进判定结论里。 */
+/** 声明目标的解析形表（`声明原文 → 真实路径**清单**`）：本机 `realpathSync` 那一形与官方
+ *  后端那一形（lib/target-paths.ts 的缓存，没到手就没有）并列，判定取并集——两形从不互相
+ *  替换，所以"官方那一形陈旧/缺席"只会少拦不会多放。lib 侧不 import `node:fs`：解析留在
+ *  宿主这层，判定仍是纯函数——这也让"解析这一步出过错"不可能被算进判定结论里。 */
 function resolvedFormsOf(
   targets: readonly string[],
   cwd: string | undefined,
-): Record<string, string> {
-  const forms: Record<string, string> = {};
+): Record<string, string[]> {
+  const forms: Record<string, string[]> = {};
   for (const target of targets) {
-    const real = realpathOf(target, cwd);
-    if (real !== undefined) {
-      forms[target] = real;
+    const union = new Set<string>();
+    const local = realpathOf(target, cwd);
+    if (local !== undefined) {
+      union.add(local);
+    }
+    const official = officialPathOf(target, cwd);
+    if (official !== undefined) {
+      union.add(official);
+    }
+    // 一形都没到手就不占键：读侧（判定与上报）据此分得清"没有解析形"与"有一枚空清单"，
+    // 而占着键交空数组会把这两件事说成同一件。
+    if (union.size > 0) {
+      forms[target] = [...union];
     }
   }
   return forms;
@@ -1876,6 +2231,8 @@ interface GuardRuntime {
    *  缺席/迟到 ⇒ undefined ⇒ 每次判定走回退扫描（迁移前行为）。装箱而不是直接字段：
    *  rt 每次 guard 调用现构造（cfg/messages 都要现读），读口只在 apply 期装一次。 */
   ledger: { value: LedgerReader | undefined };
+  /** 检索工具名的在位探测（apply 期由 `toolPresentOf(svc.tools)` 造一次，随 rt 每趟带上）。 */
+  present: ToolPresent;
 }
 
 /**
@@ -1883,12 +2240,95 @@ interface GuardRuntime {
  * 与 extraTestDirs 那类"空数组=没追加"的字段**不同**，这里的空数组是用户的显式选择：
  *  - 值缺失/非数组（降级注册后持久段未经 schema 校验）→ 回落内置默认名单；
  *  - 显式 `[]` → 任何检索都不计入引用取证（凭证面只收紧不放宽；配额上限仍是防死锁出口）。
+ * `present` 只筛**名单**、不筛判据：没注册的工具本来就被调用不到，筛与不筛对记账同解；
+ * 而它决定模型在拒绝理由里看到几个可走的路，所以这里必须筛（见 `toolPresentOf`）。
  */
-const refPolicyOf = (cfg: Config): RefSearchPolicy =>
-  refSearchPolicyOf(
-    strArray(cfg.refSearchTools) ?? DEFAULT_REF_SEARCH_TOOLS,
-    strArray(cfg.refSearchStrictTools) ?? DEFAULT_REF_SEARCH_STRICT_TOOLS,
+const refPolicyOf = (cfg: Config, present: ToolPresent): RefSearchPolicy => {
+  const names = strArray(cfg.refSearchTools) ?? DEFAULT_REF_SEARCH_TOOLS;
+  const strict = strArray(cfg.refSearchStrictTools) ?? DEFAULT_REF_SEARCH_STRICT_TOOLS;
+  return refSearchPolicyOf(
+    names.filter((name) => present(name)),
+    strict,
   );
+};
+
+/**
+ * 取证认定链的读数面：现读的设置、当次语言、当次目录、台账读口。
+ * **两个入口共用它**——guard 回调（经 `readingsOf` 从 `GuardRuntime` 取）与预检
+ * （pre-execute 里现构），于是"门禁会看到哪些缺项"与"预检补了哪些缺项"不可能不一致。
+ */
+interface EvidenceReadings {
+  readonly cfg: Config;
+  readonly messages: DangerGuardMessages;
+  readonly cwd: string | undefined;
+  readonly ledger: LedgerReader | undefined;
+  /** 检索工具名在不在宿主上（指令点名用，见 `toolPresentOf`）。 */
+  readonly present: ToolPresent;
+}
+
+/** 从 guard 调用的运行时面取读数（`ledger` 那格从装箱里现读，见 GuardRuntime.ledger）。 */
+const readingsOf = (rt: GuardRuntime): EvidenceReadings => ({
+  cfg: rt.cfg,
+  messages: rt.messages,
+  cwd: rt.cwd,
+  ledger: rt.ledger.value,
+  present: rt.present,
+});
+
+/** 一次认定链的查询面：哪次调用、改哪枚目标、在哪个会话里。 */
+interface FactEvidenceQuery {
+  readonly name: string;
+  readonly args: Record<string, unknown>;
+  readonly target: string;
+  readonly session: SessionLogFace | undefined;
+  /** 只有一种场合用：预检的 A 面（读检视）此刻**还没有**写参数，无从按写面风险定档，
+   *  只能按"要 refs 的最低必要档"（mid）问一次——按 high 问会顺带要层证据（那不是 A 面的
+   *  职责，也答不出证据），按 low 问则根本没有 refs 这项要求。
+   *  guard 与预检的 B 面都不传这一位，档位照旧由 `tierOf` 现算。
+   *  收在查询对象里而不是函数末位可选参：本函数连同读法面已经是五位上限（max-params），
+   *  再塞一位就越线；把"查什么"装箱成一位也让三个入口的调用形状一致。 */
+  readonly tierOverride?: FactTier;
+}
+
+/**
+ * 用户追加的测试层目录名（值面由条目的 Config schema 保证，但降级读取保留——闸门不能因为
+ * 宿主给来的形状变化而抛在判定链里）。
+ * 收成一处不是省事：门禁算缺项与预检派生层结论**必须**吃同一份词表，两边各写一遍
+ * `strArray(...) ?? []` 时，任何一侧改了读法就会让"门禁要一层、预检查不到那层"变成死结
+ * （预检永远让路，模型永远拿不到层证据）。
+ */
+const extraTestDirsOf = (cfg: Config): string[] => strArray(cfg.extraTestDirs) ?? [];
+
+/**
+ * 一次调用的档位与取证缺项：同步判定（`evaluateFactGate`）与预检的两个触发点走**同一条**
+ * 认定链，三个入口因此不可能看到不同的缺项、预检也就不会"补错项"。
+ * 缺信息一律升档（`tierOf`）、层目录一律现探（`existingLayersOf`）：两条口径都不在这里重述。
+ */
+function factEvidenceOf(
+  readings: EvidenceReadings,
+  query: FactEvidenceQuery,
+): { tier: FactTier; input: FactEvidenceInput } {
+  const { name, args, target, session, tierOverride } = query;
+  // 风险事实：creatable（新建豁免 read）、riskyPath、sigChanged、写面大小。
+  const facts = riskFactsOf(name, args, target);
+  const tier =
+    tierOverride ??
+    tierOf({
+      ...facts,
+      strictMode: readings.cfg.strictMode,
+      smallChars: numOf(readings.cfg.smallEditChars, DEFAULT_SMALL_EDIT_CHARS),
+      bigChars: numOf(readings.cfg.bigEditChars, DEFAULT_BIG_EDIT_CHARS),
+    });
+  const input = evidenceFor(session, target, facts.creatable, {
+    tier,
+    extraTestDirs: extraTestDirsOf(readings.cfg),
+    cwd: readings.cwd,
+    refPolicy: refPolicyOf(readings.cfg, readings.present),
+    messages: readings.messages,
+    ledger: readings.ledger,
+  });
+  return { tier, input };
+}
 
 /**
  * 评估一次写调用的取证档位 + 决策（含配额放行警示）。
@@ -1906,24 +2346,8 @@ function evaluateFactGate(
   const target = editTargetPath(name, args) ?? undefined;
   let outcome: FactGateOutcome | undefined;
   if (target !== undefined) {
-    // 风险事实：creatable（新建豁免 read）、riskyPath、sigChanged、写面大小。
-    const facts = riskFactsOf(name, args, target);
-    const tier = tierOf({
-      ...facts,
-      strictMode: cfg.strictMode,
-      smallChars: numOf(cfg.smallEditChars, DEFAULT_SMALL_EDIT_CHARS),
-      bigChars: numOf(cfg.bigEditChars, DEFAULT_BIG_EDIT_CHARS),
-    });
-    const input = evidenceFor(session, target, facts.creatable, {
-      tier,
-      // extraTestDirs 同样过 strArray：值面由条目的 Config schema 保证，但降级读取
-      // 保留——闸门不能因为宿主给来的形状变化而抛在判定链里。
-      extraTestDirs: strArray(cfg.extraTestDirs) ?? [],
-      cwd: rt.cwd,
-      refPolicy: refPolicyOf(cfg),
-      messages: rt.messages,
-      ledger: rt.ledger.value,
-    });
+    // 档位与缺项由同一条认定链现算（与预检两个触发点共用），这里只管状态机的收敛与配额。
+    const { tier, input } = factEvidenceOf(readingsOf(rt), { name, args, target, session });
     // maxDenies 取 settings 运行时值；numOf 保证非法/0 一律回落内置默认
     // （0 会让"首拒即配额放行"，等于关掉事实门）。
     const decision = factGate.check(
@@ -1950,6 +2374,629 @@ function evaluateFactGate(
     }
   }
   return outcome;
+}
+
+/** 密钥面判定所需的**入参组装**（扩展词表 + 会话 cwd + realpath 解析形 + 参与判定的目标清单）。
+ *  单源这一枚的原因不是省事：guard 的密钥闸与预检的 B 面必须对同一枚目标给出同一个"会不会
+ *  被拦"的答案——两处各自组装迟早会漂，漂了就是预检抢在密钥闸前面把拒绝理由换成"请重试"，
+ *  等于替那道闸做决定（顺序依据：官方 `prepareExecution` 只在瀑布放行后才走 `guardReason`）。
+ *  返回 `undefined` = 这次调用没有任何声明形目标（密钥闸不会判它）。
+ *  相对目标按会话 cwd 解析（与事实门用的 `resolveTarget` 同源）：模型给 `.ssh/config` 这种
+ *  相对路径时，判据要看到它落地后的样子，而不是只判输入字符串的字面形状。cwd 由调用方送
+ *  进来（guard 每趟调用算一次的当前工作目录，见 `effectiveCwdOf`）——本函数与事实门因此共用
+ *  同一枚目录基准，不会一个跟到 `cd` 之后、一个停在创建时。
+ *  目标由**键形**认（`declaredTargets`），不按工具名认——代价与理由写在
+ *  lib/danger-rules.ts 的 TARGET_PATH_KEYS 注释与 README「已知边界」里。 */
+/** 密钥面判定的入参面：`resolvedPaths` 在这一枚类型里是**必选**——`secretOptsOf` 必然装上它，
+ *  于是读侧（判定与上报）不必再写一遍 `?.`：那会养出一条永远走不到的分支，而本包的覆盖率
+ *  阈值是 100%（测不到的分支就是可读性与覆盖率的双份负债）。 */
+type SecretFaceOpts = EditDangerOptions & {
+  resolvedPaths: Readonly<Record<string, readonly string[]>>;
+};
+
+function secretOptsOf(
+  args: Record<string, unknown>,
+  cfg: Config,
+  cwd: string | undefined,
+): { targets: readonly string[]; opts: SecretFaceOpts } | undefined {
+  const targets = declaredTargets(args);
+  // 密钥词表在这里现读：strArray 兜住未经 schema 校验的值面，与调用点那两处同一口径。
+  const secretPatterns = strArray(cfg.extraSecretPatterns);
+  return targets.length === 0
+    ? undefined
+    : {
+        targets,
+        opts: {
+          ...(secretPatterns === undefined ? {} : { extraSecretPatterns: secretPatterns }),
+          ...(cwd === undefined ? {} : { cwd }),
+          // 解析形只在真要判目标时才取（每枚目标至多两形：本机 realpath + 官方后端那一形，
+          // 热路径上没有无谓 I/O——官方那一形读的是缓存，写它的 I/O 在预检与 fs/observed 那两处）。
+          resolvedPaths: resolvedFormsOf(targets, cwd),
+        },
+      };
+}
+
+/** 这一次调用会不会被密钥/凭据面拦下来（预检的 B 面据此整趟让路）。
+ *  与密钥闸同一条谓词（lib 的 `editDanger`），只差没把结论渲染成文案。 */
+function secretFaceWouldDeny(
+  args: Record<string, unknown>,
+  cfg: Config,
+  cwd: string | undefined,
+): boolean {
+  const built = secretOptsOf(args, cfg, cwd);
+  return built !== undefined && editDanger(args, built.opts) !== undefined;
+}
+
+// ══ 预检（Phase 2）══════════════════════════════════════════════════════════════
+// 取代"先拒绝、再让模型自己去补证"的 block-then-prompt。"前置"在这里有**两个面**，
+// 各挂一条官方瀑布，分工按"证据在什么时刻才真的算被看见"来定，不是按方便定：
+//   A) 只读检视（read / view / str_replace_editor view）挂 `tools/post-execute`：
+//      门禁要的引用面（谁 import/引用这个文件）随**这次读取的结果**一起交出去
+//      （官方 `PostToolDecision.accept{additionalContexts}`，agent-loop 在 commit 那条
+//      结果时收下、排到下一个 step 边界）。模型读文件的那一刻就看见"它被谁引用"，
+//      于是它下一次动手编辑时证据已经在上下文里——这是真前置。
+//   B) 写类调用（edit / write / str_replace_editor 的写动词）挂 `tools/pre-execute`：
+//      模型**没读就改**（read 缺项）时，当场取到的目标正文与引用面写进这一次的拒绝理由，
+//      模型在**这一次调用**的结果里就看到事实，原样重试即凭水位放行。物理停止仍在
+//      dispatch 之前，所以"改之前先看清它"这条不变式一个字没让。
+// 为什么不是"注入一条消息"（本节的旧形态）：官方 `Agent.inject()` 把消息排在 **next
+// pre-step**，而模型的上下文按 step 推进——它在第 N 步决定这次编辑，只能看见第 N-1 步
+// 为止的内容。pre-execute 注入的证据因此是**编辑生效之后**才读到的，那叫事后补证；
+// inject 还明说排队可能被取消/丢弃，水位却已经把它记成"补过了"。两个面都改走
+// "结果/拒绝理由"这两条**必然落地**的通道，水位因此不再欠一次赌注。
+// 三条硬边界（任一不成立就整趟跳过，退回今天的拒绝路径）：
+//   · 绝不抢别人的决定：两条瀑布都先 `await next()`，下游已 deny/cancel/ask 就原样交回；
+//     B 面还额外让路给密钥闸与配额放行态（它若不让，就等于替那两道做决定，见其函数注释）。
+//   · 绝不无界：扫描有文件数/目录数/单文件字节/命中数四道上限，读取**定长**；取消信号与
+//     墙钟上限合流（平台不会放弃挂起的 pre-execute promise，没有期限的一次卡死会挂掉
+//     整次工具调用）。墙钟到点的那一趟进负缓存，于是这份成本只付一次。
+//   · 绝不只看一半：扫描没跑成（取消/超时）整趟作罢；被预算**截断**的扫描可以说，但不能
+//     当凭证——"扫过一部分"不顶替"探过引用面"（见 RefScan.capped）。
+
+/** 预检用到的调用方 agent 面：**只剩会话这一位**。
+ *  ⚠ 这里曾有第二位 `inject`（官方 `Agent.inject(message: UserMessage): void`，installed
+ *  dsh-agent/lib/types/runtime-types.d.ts:241）——撤掉的理由写在上面那一段"为什么不是注入"。
+ *  仍是同一条例：`@deepseek-ai/dsh-agent` **不是本仓依赖**（dsh-tools 的声明 import 它，
+ *  `skipLibCheck` 下解析不到就退化成 any），直接把 `OfficialAgent` 搬进来会让每一次成员访问
+ *  都撞 lint 的 no-unsafe-* 家族，所以这一位只按**形状**收。 */
+interface PreflightAgent {
+  readonly session: SessionLogFace;
+}
+
+/** 调用方 agent 的形状守卫（象限判据，与 isSettingsReader / isLessonLoopReporter 同款，
+ *  不经任何类型断言）：`session` 是记录才认。会话不可得（或这一位根本不是 agent）时预检
+ *  整趟跳过——**这正是硬要求里"exec.agent/session 不可用时跳过"那条**（官方声明说 agent
+ *  可选、session 必选，但那说的是宿主自己 new 出来的对象；跨边界送来的形状只能运行时判）。 */
+function isPreflightAgent(value: unknown): value is PreflightAgent {
+  return isRecord(value) && isRecord(value["session"]);
+}
+
+/** 预检的运行面：`GuardRuntime` 的四位现读值（与 guard 回调同一份）+ 执行面 + 会话 + 闸门。 */
+interface PreflightRequest extends EvidenceReadings {
+  /** 待执行调用（官方 `ToolExecution` 的三位投影：名字、参数、调用方取消信号）。
+   *  不复用 `GuardExecution`：那是 guard 谓词的读法投影（无 signal），而预检必须绑取消信号。 */
+  readonly exec: Pick<ToolExecution, "name" | "arguments" | "signal">;
+  /** 调用方会话（已过 `isPreflightAgent` 的那一位里取出来的）。 */
+  readonly session: SessionLogFace;
+  /** 状态机本体：B 面要先问一句"这目标是不是已经配额放行了"（只读，不改状态）。 */
+  readonly gate: FactGate;
+  /** 宿主 fs 面（由工厂保证到位：缺席时整趟就不会装配出请求）。 */
+  readonly fs: PreflightFs;
+}
+
+/** 宿主 fs 面的装箱（与 `GuardRuntime["ledger"]` 同一手法：可选服务由 inject 回调装上，
+ *  工厂每趟现读，所以晚到的后端也能被下一趟看见）。 */
+interface PreflightFsBox {
+  value: PreflightFs | undefined;
+}
+
+/** 预检请求工厂的装配面：一次 apply 要现读的东西全在这（六枚位置参会顶破 max-params，
+ *  而且它们本来就是一件事——"这一代插件实例的读数口集合"）。 */
+interface PreflightWiring {
+  readonly svc: HostCtx;
+  readonly gate: FactGate;
+  readonly ledgerBox: GuardRuntime["ledger"];
+  readonly messages: () => DangerGuardMessages;
+  readonly present: ToolPresent;
+  readonly fsBox: PreflightFsBox;
+}
+
+/** 预检的取消信号 = 调用方信号 ⊕ 墙钟上限。两者合流而不是取其一：`exec.signal` 让用户取消
+ *  立刻落地，`AbortSignal.timeout` 让"没人取消但扫描卡住了"也有终点；两个来源经同一枚
+ *  `signal.aborted` 出口被读到，所以每一趟读之前只判一次。 */
+const preflightSignalOf = (caller: AbortSignal): AbortSignal =>
+  AbortSignal.any([caller, AbortSignal.timeout(PREFLIGHT_TIMEOUT_MS)]);
+
+/** 只读检视面：`read` / `view`，以及并存编辑器 `str_replace_editor` 的 view 动词。
+ *  与 `recordReadObservation` 认的读面刻意不同源：那里只管读时基线，这里还多认 `view`
+ *  这个独立工具名（dsh 两套编辑器并存）。 */
+const isInspectCall = (name: string, args: Record<string, unknown>): boolean =>
+  name === "read" ||
+  name === "view" ||
+  (name === "str_replace_editor" && args["command"] === "view");
+
+/** 两个触发点共用的前置筛查：三个开关、有没有目标、文档扩展名（门禁自己也不判的那一枚，
+ *  同源导出见 lib/fact-gate.ts）。命中任何一条就整趟不参与。 */
+const preflightSkipped = (cfg: Config, target: string | undefined): boolean =>
+  !cfg.enabled ||
+  !cfg.factGateEnabled ||
+  !cfg.preflightEnabled ||
+  target === undefined ||
+  SKIP_EXT_RE.test(target);
+
+/** 目标文件名与它足够长的词干（与门禁记账的 `sigHitsOf` 同一条口径：全名命中，或任一词干
+ *  ≥ MIN_STEM 命中——否则 `ab.ts` 这类短词干会让 `grab.ts` 到处顶包）。 */
+const refNeedlesOf = (base: string): string[] => [
+  base,
+  ...buildStems(base).filter((stem) => stem.length >= MIN_STEM),
+];
+
+/**
+ * 扫描侧的凭据面隔离判据：与密钥闸**同一把词表**（`lib/danger-rules.ts` 的 `isSecretPath`），
+ * 只问"这枚路径像不像凭据"。为什么扫描也要问一遍：一条引用命中会把那一行**原文**抄进模型
+ * 上下文，而"凭据正文不外泄"正是本包存在的理由之一——编辑面上拦得住、扫描面上抄出去，等于
+ * 自己给自己开了个洞。纯词法判定、不碰 fs（扫到谁判谁），所以它不可能被"文件读不到"带偏。
+ * 这里**不传 cwd**：送进来的每一枚扫描路径都是绝对形，`cwd` 只服务于"模型给的相对目标"那一面
+ * （isSecretPath 的相对补形对绝对路径是恒等），传它等于多养一条永远走不到的分支。
+ */
+const scanQuarantineOf = (cfg: Config): ((file: string) => boolean) => {
+  const extra = strArray(cfg.extraSecretPatterns);
+  const opts: EditDangerOptions = extra === undefined ? {} : { extraSecretPatterns: extra };
+  return (file: string): boolean => isSecretPath(file, opts);
+};
+
+/**
+ * 目标的版本位（后端给的 opaque token，本包不解析也不比较内容，只判"变没变"）。
+ * `undefined` 把"目标缺席"与"探不到"并成一档：两者都意味着下一次还要重新问一遍，
+ * 而不是拿旧结果充数。
+ * `resolved` = 调用方（预检 B 面）已经 resolve 过的同一枚 target；给了就不再问一次身份
+ *（远端后端上那是一次往返）。缺席时按旧路径自己解一次，失败仍只落进下面那个 catch。
+ */
+async function targetVersionOf(
+  fs: PreflightFs,
+  targetN: string,
+  signal: AbortSignal,
+  resolved?: FsTarget,
+): Promise<FsVersion | undefined> {
+  let version: FsVersion | undefined;
+  try {
+    // 调用方给过身份就不再问一次（复用规则与"为什么不用 `??`"都写在 targetOrResolveOf 上）。
+    const target = await targetOrResolveOf(fs, targetN, signal, resolved);
+    const info = await fs.stat(target, signal);
+    version = info?.version;
+  } catch {
+    // 与 readTargetContent 同一条纪律：任何失败都只表示"这一趟探不到"，不写错误码白名单
+    // （覆盖率 100% 的门禁下，按码分支必然留下一条永远走不到的支路）。
+  }
+  return version;
+}
+
+/**
+ * 引用扫描（两个触发点共用）：同会话同目标、且目标版本未变时吃缓存，否则现扫并回填。
+ * 只有**跑成的**那一趟进缓存（被预算截断的也算跑成，完成度位随结果一起存）；取消/墙钟
+ * 掐断的一趟不进——缓存它等于把一次取消扩散成后续所有读取的降级。
+ * `resolved` 透传给版本探针；扫描起点是**根**而不是目标，那一枚身份仍需现解（一次即可）。
+ */
+async function refScanOf(
+  req: PreflightRequest,
+  targetN: string,
+  signal: AbortSignal,
+  resolved?: FsTarget,
+): Promise<RefScan | undefined> {
+  const key = sessionTargetKeyOf(req.session.id, targetN);
+  // 失效判据用后端给的 version（opaque），而不是宿主侧 mtime：后者正是"本地盘就是执行世界"
+  // 那层假定的一部分——远程后端下它要么探不到、要么探到的是**另一份**同名文件的时间。
+  const version = await targetVersionOf(req.fs, targetN, signal, resolved);
+  const cached = preflightScans.get(key);
+  // 判"命中"必须同时确认有条目：`undefined === undefined` 在版本位上是**会成立**的
+  // （目标缺席或探不到时两边都是 undefined），只看版本就会去读一枚不存在的缓存项。
+  if (cached !== undefined && cached.version === version) {
+    return cached.scan;
+  }
+  // root 与 needles 都在**这一侧**算（理由见文件头那条 import 注释）。
+  const scan = await scanReferences({
+    targetN,
+    root: projectRootOf(targetN, req.cwd),
+    needles: refNeedlesOf(path.posix.basename(targetN)),
+    signal,
+    isQuarantined: scanQuarantineOf(req.cfg),
+    fs: req.fs,
+  });
+  // **只缓存跑成的那一趟**（含被预算截断的那种，`complete` 位随结果一起进缓存）。
+  // 取消/墙钟掐断的一趟不缓存：那是罕见形状（单枚 syscall 卡住，或调用方整体取消），
+  // 缓存它等于把一次取消扩散成后续所有读取的降级。
+  // 大仓里"扫不完"的常态走的是**预算截断**而不是墙钟——256 个文件 / 256 层目录的预算
+  // 会先命中，于是它很快就带 `complete: false` 返回并被缓存，墙钟只是最后一道保险。
+  if (scan !== undefined) {
+    lruPut(preflightScans, key, { scan, version });
+  }
+  return scan;
+}
+
+/** 这份扫描能不能当 refs 的凭证：跑成了，且遍历没被文件/目录预算截断。
+ *  被截断的那份仍然可以**给模型看**（文案会明说它没扫完），但不能记进水位——
+ *  "扫过一部分"不顶替"探过引用面"（完成度位的两条去向见 lib/preflight-scan.ts 的 RefScan）。
+ *  写成类型谓词而不是布尔：调用方随后就要用那一枚结果，返回值收窄省掉第二次判（而第二次
+ *  判要么写成 `scan.complete === true` 撞 lint，要么写成 `&&` 链把同一件事说两遍）。 */
+function refsCreditable(scan: RefScan | undefined): scan is RefScan {
+  return scan?.complete ?? false;
+}
+
+/** 一次预检的作用域：目标的声明形、归一后的绝对形、合流后的取消信号。 */
+interface PreflightScope {
+  readonly target: string;
+  readonly targetN: string;
+  readonly signal: AbortSignal;
+}
+
+/** 预检入参里"这一趟要不要跑"的那一段：三个开关、目标形状、文档扩展名，然后归一目标、
+ *  合流取消信号。两个触发点共用一处，免得"一侧漏了某道筛查"。
+ *  取消信号在这里合流而不是更早：墙钟计时器不为 bash 之类的无关调用空转。
+ *  `undefined` = 这一趟预检不参与。 */
+function preflightScopeOf(
+  req: PreflightRequest,
+  target: string | undefined,
+): PreflightScope | undefined {
+  return preflightSkipped(req.cfg, target) || target === undefined
+    ? undefined
+    : {
+        target,
+        targetN: resolveTarget(target, req.cwd),
+        signal: preflightSignalOf(req.exec.signal),
+      };
+}
+
+/** 参数面归一（官方 `arguments` 深冻结但形状跨边界而来）：非记录按 `{}` 走——
+ *  两个入口各自只判这一次，不留"调用方判过、被调方再判一遍"的死分支。 */
+const preflightArgsOf = (req: PreflightRequest): Record<string, unknown> =>
+  isRecord(req.exec.arguments) ? req.exec.arguments : {};
+
+/** 预检能当场补上的那两种缺项（其余一律交回 guard 的行动清单）。 */
+const HANDED_NEEDS = new Set<FactNeed>(["read", "refs", "test", "e2e", "docs"]);
+
+/** 层类缺项（test/e2e/docs）：它们的证据**从引用面那一次扫描里派生**，不另花 I/O。 */
+const LAYER_NEEDS: readonly FactNeed[] = ["test", "e2e", "docs"];
+
+/** 这一趟的缺项是不是"预检当场给得出"的那一种：非空，且全落在 read/refs/三层里。
+ *  空清单 = 门禁自己也会放行，一个字符都不必多给。
+ *  层缺项只是**候选**：能不能真给取决于同一次扫描有没有走到那层目录（覆盖判定在
+ *  handoffEvidenceOf 里，没覆盖就整趟让路给行动清单——半份"这层我探过了"最糟）。 */
+const handedOnly = (gaps: readonly FactGap[]): boolean =>
+  gaps.length > 0 && gaps.every((gap) => HANDED_NEEDS.has(gap.need));
+
+/** B 面的作用域：目标按 `editTargetPath` 的严格写类口径取（与门禁随后的判定目标**同源**），
+ *  再过一道密钥面让路——那一站不花 I/O 之外的成本（词法判定 + realpath），却决定了
+ *  "这次调用本来就该被密钥闸拦下"，预检不许替它做决定。 */
+function handoffScopeOf(
+  req: PreflightRequest,
+  args: Record<string, unknown>,
+): PreflightScope | undefined {
+  const scope = preflightScopeOf(req, editTargetPath(req.exec.name, args) ?? undefined);
+  return scope !== undefined && !secretFaceWouldDeny(args, req.cfg, req.cwd) ? scope : undefined;
+}
+
+/** B 面挣到的证据 + 各自能不能记账（`credit*` 决定是否写水位，见 handoffReasonOf）。 */
+interface HandoffEvidence extends PreflightEvidence {
+  readonly creditRead: boolean;
+  readonly creditRefs: boolean;
+  /** 层缺项是否**全部**被这次扫描覆盖：漏一层就整趟让路，不半份投递。 */
+  readonly creditLayers: boolean;
+}
+
+/** 这次扫描是不是也用来答层缺项（refs 与层共用同一趟走树，层不再另花一次 I/O）。 */
+function needsScan(gaps: readonly FactGap[]): boolean {
+  return gaps.some((gap) => gap.need === "refs" || LAYER_NEEDS.includes(gap.need));
+}
+
+/** 还缺哪几层（保持 `LAYER_NEEDS` 的顺序，写进文案与水位都按它）。 */
+const missingLayers = (gaps: readonly FactGap[]): FactNeed[] =>
+  LAYER_NEEDS.filter((need) => gaps.some((gap) => gap.need === need));
+
+/** 起点内的层目录 → 相对起点的 POSIX 形（结果里的 `file` 用的就是这一形，比对才不用两边各 normalize）。 */
+function toPosixRelative(root: string, dir: string): string {
+  return path.relative(root, dir).split(path.sep).join("/");
+}
+
+/** 这一项是不是那层（或层更深）里的命中。层就是起点自身时（rel = ""）整棵都在层内。 */
+function underLayer(rel: string, file: string): boolean {
+  return rel.length === 0 || file === rel || file.startsWith(`${rel}/`);
+}
+
+/** 层结论：目标所属包链上**实际存在**的层目录（`existingLayersOf`，与门禁算缺项同一个函数、
+ *  同一枚缓存、同一份 extraTestDirs 读法）本次扫描有没有走到，走过去就报该层内的命中数。
+ *  回 undefined = 有一层没被覆盖：预算截断、那层在扫描起点之外、或那层是软链（门禁的层探查
+ *  跟链，扫描按官方 lstat 口径不跟）。那时"这层零命中"根本不成结论，半份投递会让门禁与模型
+ *  都以为探过了——调用方据此整趟让路。 */
+function layerConclusionsOf(
+  req: PreflightRequest,
+  targetN: string,
+  scan: RefScan,
+  needs: readonly FactNeed[],
+): LayerFinding[] | undefined {
+  const root = projectRootOf(targetN, req.cwd);
+  const relByNeed = new Map(
+    existingLayersOf(targetN, root, extraTestDirsOf(req.cfg)).map((layer): [FactNeed, string] => [
+      layer.need,
+      toPosixRelative(root, layer.dir),
+    ]),
+  );
+  const conclusions: LayerFinding[] = [];
+  for (const need of needs) {
+    const rel = relByNeed.get(need);
+    // 查不到那层（门禁本来不该要求它）或这一趟没走到那层，一律按"没覆盖"收口：
+    // 让路给行动清单，而不是猜一个结论给模型。
+    if (rel === undefined || !scan.dirs.includes(rel)) {
+      break;
+    }
+    conclusions.push({
+      layer: need,
+      dir: rel,
+      hits: scan.findings.filter((finding) => underLayer(rel, finding.file)).length,
+    });
+  }
+  return conclusions.length === needs.length ? conclusions : undefined;
+}
+
+/** 取"当场给得出"的证据。返回 undefined = 什么都没挣到或只挣到一半，这一趟不该拦：
+ *  要 read 却没读到正文（不存在 / 无权限 / 二进制）时，拦它只有拒绝、没有前置；
+ *  缺 refs / 层而扫描没跑成或被预算截断时同理——"扫过一部分"不顶替"探过引用面"。 */
+async function handoffEvidenceOf(
+  req: PreflightRequest,
+  input: FactEvidenceInput,
+  scope: PreflightScope,
+  resolved?: FsTarget,
+): Promise<HandoffEvidence | undefined> {
+  // 顺序先正文后扫描：读取是一次定长 syscall，扫描可能吃掉整个墙钟预算——反过来会把
+  // 唯一挣得到手的那一半也赔进去。
+  const needRead = input.gaps.some((gap) => gap.need === "read");
+  const content = needRead
+    ? await readTargetContent(scope.targetN, scope.signal, req.fs, resolved)
+    : undefined;
+  const scan = needsScan(input.gaps)
+    ? await refScanOf(req, scope.targetN, scope.signal, resolved)
+    : undefined;
+  const creditRead = content !== undefined;
+  const creditRefs = refsCreditable(scan);
+  // 层结论只在**扫描跑完**时才谈得成（creditRefs 就是那枚"跑完了"），于是它与引用面共用同一趟
+  // 走树：high 档不再为此多花一次 I/O。三态要分清：没有层缺项 = 空清单（不影响拦不拦）；
+  // 有层缺项但有一层没覆盖 = undefined（整趟让路）——把后者也写成空清单，就等于拿"半份证据"
+  // 拦人一次，而那层根本没探。
+  const layerNeeds = missingLayers(input.gaps);
+  let derived: LayerFinding[] | undefined;
+  if (layerNeeds.length === 0) {
+    derived = [];
+  } else if (creditRefs) {
+    derived = layerConclusionsOf(req, scope.targetN, scan, layerNeeds);
+  } else {
+    derived = undefined;
+  }
+  const creditLayers = derived !== undefined;
+  const evidence: HandoffEvidence = {
+    scan,
+    content,
+    layers: derived ?? [],
+    creditRead,
+    creditRefs,
+    creditLayers,
+  };
+  // 挣到了才拦：read 缺项必须有正文；层缺项必须全被覆盖；refs 与 read 至少挣到一项
+  // （两项都空 = 这一趟本来就该放行，那是 guard 的事，不是这里）。
+  return (!needRead || creditRead) && (creditRead || creditRefs) && creditLayers
+    ? evidence
+    : undefined;
+}
+
+/** B 面拿到作用域之后的那一半：现算缺项 → 两道让路 → 取证据 → 挣到了才拦并记水位。
+ *  `resolved` 是本次调用开头那一次身份解析的结果（同一枚目标不再被读正文与探版本各问一遍）。 */
+async function handoffReasonOf(
+  req: PreflightRequest,
+  args: Record<string, unknown>,
+  scope: PreflightScope,
+  resolved?: FsTarget,
+): Promise<string | undefined> {
+  const { input } = factEvidenceOf(req, {
+    name: req.exec.name,
+    args,
+    target: scope.target,
+    session: req.session,
+  });
+  let reason: string | undefined;
+  if (
+    handedOnly(input.gaps) &&
+    !req.gate.releasedFor(req.session.id, scope.target, input.fileEditSeq)
+  ) {
+    const evidence = await handoffEvidenceOf(req, input, scope, resolved);
+    if (evidence !== undefined) {
+      noteDelivery(sessionTargetKeyOf(req.session.id, scope.targetN), deliverySeqOf(req, input), {
+        read: evidence.creditRead,
+        refs: evidence.creditRefs,
+        // 只有真被覆盖到的层才记投递：记早了等于替模型宣称"这层我探过了"。
+        layers: evidence.layers.map((layer) => layer.layer),
+      });
+      reason = renderHandoff(req.messages, scope.targetN, evidence);
+    }
+  }
+  return reason;
+}
+
+/**
+ * B 面（写类调用，挂 `tools/pre-execute`）：门禁当场给得出证据的那次缺项，用**带证据的拒绝**
+ * 拦下来——目标正文与引用面写进这一次的拒绝理由，模型在**这次**调用的结果里就看到事实，
+ * 原样重试即凭水位放行。返回 `undefined` = 不拦（照旧交回 `next()`，走今天的行动清单路径）。
+ * 让路有三道，每一道都对应"预检抢了别人的决定"的一个具体形态：
+ *  - 密钥/凭据面（handoffScopeOf）：正文不许经预检外泄（那是本插件存在的理由之一），而我们的
+ *    deny 会抢在密钥闸之前把拒绝理由换成"请重试"。判定与密钥闸共用 secretOptsOf。
+ *  - 配额放行态（releasedFor）：目标已熬满 maxDenies 拿到免检，再停一次就把"防死锁"换成了
+ *    插件自己新加的拒绝。
+ *  - 什么都没挣到（handoffEvidenceOf）：正文读不出、扫描没跑成或被预算截断，或**层缺项里有
+ *    一层没被这次扫描覆盖**（层结论与引用面共用同一趟走树，覆盖不到就不成结论，半份最糟）。
+ *  （`handedOnly` 那一道如今只在"缺项为空"时命中：五枚 FactNeed 全在预检给得出的集合里，
+ *   于是它退化成"门禁自己也会放行，一个字符都不必多给"。）
+ * 已知代价（刻意的口径变化，写在 CHANGELOG）：这一趟 deny 走的是 pre-execute，同步 guard
+ * 因此**不会**跑到——事实门那次的 `reportDeny`（lesson-loop）与拒绝计数都不再发生；换来的是
+ * 模型没有被"拒一次再去查"，而取证通过时的 `reportPass` 照旧在重试那一趟上报。
+ */
+async function runPreflight(req: PreflightRequest): Promise<string | undefined> {
+  const args = preflightArgsOf(req);
+  const targets = declaredTargets(args);
+  // 官方通道那一形先问到手（async 只有这一站付得起，同步 guard 付不起）：写进缓存之后，
+  // ① 紧接着这道密钥面让路判定吃到并集，② 同一次调用随后同步跑的 guard 也吃到
+  //（官方保证 pre-execute 整趟跑完才轮到 guard）。
+  // 没有声明目标的调用（bash / 缺路径键）一枚 resolve 都不发，**也不造那枚 3 秒墙钟信号**：
+  // pre-execute 是每次工具调用都要过的路，白烧一个定时器加一次 AbortSignal.any 就是白烧。
+  // 顺带交回的"声明形 → 已 resolve 的 target"给下面的正文读取与版本探针复用：一次盲改对
+  // 同一枚目标只问一次身份（远端后端上那是省掉两次往返）。
+  const resolvedByTarget =
+    targets.length === 0
+      ? NO_TARGETS
+      : await rememberOfficialTargetsOf(
+          req.fs,
+          targets,
+          req.cwd,
+          preflightSignalOf(req.exec.signal),
+        );
+  const scope = handoffScopeOf(req, args);
+  return scope === undefined
+    ? undefined
+    : handoffReasonOf(req, args, scope, resolvedByTarget.get(scope.target));
+}
+
+/** A 面那条附加上下文：`notice` 形（一次性发生的事），`source.kind` 是本包声明的生产者名。
+ *  官方要求 notice 必带一行 `summary`（≤120 字，见 dsh-llm 的 `boundContextSummary`）。 */
+const refsMessage = (messages: DangerGuardMessages, scan: RefScan): UserMessage =>
+  createUserMessage({
+    content: [{ type: "text", text: renderAttach(messages, scan) }],
+    source: {
+      kind: "dangerguard-preflight",
+      form: "notice",
+      summary: messages.preflightSummary,
+    },
+  });
+
+/**
+ * A 面（只读检视，挂 `tools/post-execute`）：门禁要的引用面随**这次读取的结果**一起交出去
+ * （官方 `PostToolDecision.accept{additionalContexts}`；agent-loop 在 commit 那条结果时收下，
+ * 排到下一个 step 边界）。于是模型下一次动手编辑前就看得见"它被谁引用"——这是真前置。
+ * 返回 `undefined` = 不附加（下游决定原样交回）。
+ * 三条收口的理由：
+ *  - 只在门禁确实会要 refs 的那次读上附加（按 mid 档问，见 FactEvidenceQuery.tierOverride），
+ *    且附加过就有水位、下一趟不再重复——否则每次 read 都塞一块引用面，那就是上下文 flooding。
+ *  - 扫描被预算截断（`capped`）时**不附加**：A 面是"一次性把这项补全"的通道，给半份既换不到
+ *    凭证、又会让模型以为探过了；那种缺项交给 guard 的行动清单去教它自己搜。
+ *  - 目标正文不在这里给（见 renderAttach）。
+ * 副作用（明记）：判定走的 `evidenceFor` 会顺带刷新 read 的 mtime 基线——判在读取**之后**，
+ *  于是基线比 guard 那次更准，但"读取与本次附加之间发生的外部改动"会被并成一次观测。
+ * 这与 `recordReadObservation` 那条残余窗口同源，方向保守（最多一次重读）。
+ */
+async function attachRefsOnRead(req: PreflightRequest): Promise<UserMessage | undefined> {
+  const args = preflightArgsOf(req);
+  const scope = preflightScopeOf(
+    req,
+    isInspectCall(req.exec.name, args) ? callPathOf(req.exec.name, args) : undefined,
+  );
+  let context: UserMessage | undefined;
+  if (scope !== undefined) {
+    const { input } = factEvidenceOf(req, {
+      name: req.exec.name,
+      args,
+      target: scope.target,
+      session: req.session,
+      tierOverride: "mid",
+    });
+    const scan = input.gaps.some((gap) => gap.need === "refs")
+      ? await refScanOf(req, scope.targetN, scope.signal)
+      : undefined;
+    if (refsCreditable(scan)) {
+      noteDelivery(sessionTargetKeyOf(req.session.id, scope.targetN), deliverySeqOf(req, input), {
+        refs: true,
+      });
+      context = refsMessage(req.messages, scan);
+    }
+  }
+  return context;
+}
+
+/** 预检两面共用的一条告警：整趟被兜底 catch 吞掉时出声。预检失败必须退化成"今天的拒绝
+ *  路径"，绝不能变成"这次编辑没了"；当然也不能静默——所以留一条日志（模板进
+ *  test/log-templates.ts 的清单，文案漂了就红）。 */
+const PREFLIGHT_WARN = "[danger-guard] 预检失败，本轮退回拒绝路径:";
+
+/** 预检运行面的装配口（两个监听器共用一位入参，见下面那两枚监听器体的签名）。 */
+type PreflightRequestOf = (exec: PreExecuteParams[0]) => PreflightRequest | undefined;
+
+/** 造一枚"按当次现读值装配预检运行面"的工厂（apply 里因此只留接线）。
+ *  设置 / 语言 / cwd / 台账读口都必须每趟现读（改设置卡与切语言都不必重载插件），
+ *  所以收的是**读数口**而不是值。`exec.agent` 是官方可选位，而 dsh-agent 不是本仓依赖
+ *  （该类型在 skipLibCheck 下退化成 any）——这一位只能按**形状**收（isPreflightAgent），
+ *  会话不可得就整趟跳过、只放行。 */
+function preflightRequestFactory(wiring: PreflightWiring): PreflightRequestOf {
+  const { svc, gate, ledgerBox, messages, present, fsBox } = wiring;
+  return (exec) => {
+    const agentRaw: unknown = exec.agent;
+    const session = isPreflightAgent(agentRaw) ? agentRaw.session : undefined;
+    // `fs` 与 `session` 两条都是"没有就不要装"：预检给得出证据的唯一前提是**能读到工具
+    // 实际用的那份盘**，读不到就一句证据都不编（而不是拿宿主本地盘的内容冒充）。
+    const fs = fsBox.value;
+    return session === undefined || fs === undefined
+      ? undefined
+      : {
+          exec,
+          session,
+          gate,
+          cfg: settingsConfig(svc),
+          messages: messages(),
+          cwd: effectiveCwdOf(svc, session),
+          ledger: ledgerBox.value,
+          present,
+          fs,
+        };
+  };
+}
+
+/** B 面监听器体：**先** `await next()`，只在下游本来会放行时才拦这一次——
+ *  别的插件已经 deny/cancel/ask 就原样交回，预检不去抢别人做过的决定。 */
+async function preflightOnPreExecute(
+  exec: PreExecuteParams[0],
+  next: PreflightNext,
+  reqOf: PreflightRequestOf,
+): Promise<PreDecision> {
+  // oxlint-disable-next-line node/callback-return -- 官方 next() 是瀑布的下游执行口，不是错误优先回调：它的**结果**要参与本层的合并决定（B 面还可能把 allow 换成 deny），所以必须接住变量而不是直接 `return next()`
+  const downstream: PreDecision = await next();
+  const req = downstream.kind === "allow" ? reqOf(exec) : undefined;
+  let decision = downstream;
+  if (req !== undefined) {
+    try {
+      const reason = await runPreflight(req);
+      decision = reason === undefined ? downstream : { kind: "deny", reason };
+    } catch (error: unknown) {
+      console.warn(PREFLIGHT_WARN, error);
+    }
+  }
+  return decision;
+}
+
+/** A 面监听器体：引用面并进下游决定。这次读取本身没成（isError：路径不存在 / 无权限 /
+ *  被别的策略 block）时什么都不附——模型并没有拿到它以为拿到了的内容，这时候要它
+ *  "别再检索引用"更是错的。 */
+async function preflightOnPostExecute(
+  exec: PostExecuteParams[0],
+  result: PostExecuteResult,
+  next: PostflightNext,
+  reqOf: PreflightRequestOf,
+): Promise<PostDecision> {
+  // oxlint-disable-next-line node/callback-return -- 同 pre-execute 那一处：next() 的结果要和本次附加合并，不能直接交回
+  const downstream: PostDecision = await next();
+  const req = result.isError ? undefined : reqOf(exec);
+  let decision = downstream;
+  if (req !== undefined) {
+    try {
+      const context = await attachRefsOnRead(req);
+      decision = context === undefined ? downstream : attachContext(downstream, context);
+    } catch (error: unknown) {
+      console.warn(PREFLIGHT_WARN, error);
+    }
+  }
+  return decision;
 }
 
 /**
@@ -2097,49 +3144,37 @@ function secretJudgeOf(
   args: Record<string, unknown>,
 ): SecretJudge {
   const { messages, cfg, cwd } = rt;
-  // 密钥词表也在函数内现读：strArray 兜住未经 schema 校验的值面，与调用点那两处同一口径。
+  // 非法/超长的扩展模式要在这一层点名上报（值面判定本身在 lib 的 partition 里）。
   const secretPatterns = strArray(cfg.extraSecretPatterns);
-  // 相对目标按会话 cwd 解析（与事实门用的 resolveTarget 同源）：模型给 `.ssh/config` 这种
-  // 相对路径时，判据要看到它落地后的样子，而不是只判输入字符串的字面形状。
-  // cwd 取 rt.cwd（guard 每趟调用算一次的当前工作目录，见 effectiveCwdOf）——本函数与
-  // 事实门因此共用同一枚目录基准，不会一个跟到 `cd` 之后、一个停在创建时。
-  // 目标由**键形**认（`declaredTargets`），不按工具名认——代价与理由写在
-  // lib/danger-rules.ts 的 TARGET_PATH_KEYS 注释与 README「已知边界」里。
-  const targets = declaredTargets(args);
-  const editOpts: EditDangerOptions = {
-    ...(secretPatterns === undefined ? {} : { extraSecretPatterns: secretPatterns }),
-    ...(cwd === undefined ? {} : { cwd }),
-  };
-  if (targets.length > 0) {
-    // 解析形只在真要判目标时才取（每枚目标至多一串 realpath，热路径上没有无谓 I/O）。
-    editOpts.resolvedPaths = resolvedFormsOf(targets, cwd);
-  }
   if (secretPatterns !== undefined) {
     reportRejectedPatterns(secretPatterns);
   }
+  const built = secretOptsOf(args, cfg, cwd);
   let reason: string | undefined;
   const cost: JudgeCost = { face: "secret", ms: 0, length: 0 };
-  if (targets.length > 0) {
+  if (built !== undefined) {
     // 判定走 lib 的单一谓词 editDanger（"取目标 → 判密钥面"就是它的本体），本函数不再抄第二份；
     // 它回给的 `target` 同时是**上报签名**，判定与上报仍是同一个键。
     const startedAt = performance.now();
-    const denial = editDanger(args, editOpts);
+    const denial = editDanger(args, built.opts);
     cost.ms = performance.now() - startedAt;
-    cost.length = targets.join("|").length;
+    cost.length = built.targets.join("|").length;
     if (denial !== undefined) {
       // 规则键 → 当前语言的拒绝理由；`messages[key]` 的取值类型让"加了规则没写文案"
       // 停在编译期，而不是运行时把 undefined 回给模型。
       reason = messages[denial.key];
-      const real = editOpts.resolvedPaths?.[denial.target];
+      const forms = built.opts.resolvedPaths[denial.target] ?? [];
       reportDeny(wiring, exec, {
         category: "secret-path",
         signature: denial.target,
         detail: reason,
         // 解析形一起进上报：被拦的是"声明路径"还是"它背后的那棵树"，看教训时要有这一格。
+        // 交**清单**而不是单值：判定吃的就是并集（本机 realpath 形 + 官方后端形），只报一枚
+        // 等于把"哪一形命中的"这件事藏起来——而非本地执行世界里恰恰只有官方那一形说得准。
         evidence: {
           tool: name,
           judgeMs: Math.round(cost.ms),
-          ...(real === undefined ? {} : { resolvedPath: real }),
+          ...(forms.length === 0 ? {} : { resolvedPaths: forms }),
         },
       });
     }
@@ -2212,6 +3247,12 @@ export function apply(ctx: Context): void {
   // profile）时回调根本不激活 ⇒ 读口留 undefined ⇒ 每次判定沿用回退扫描（wukil 的 rules
   // 判重、session-rescue 的回合事实同策）。**不**写进插件级 inject：那会让没装投影包的
   // profile 整个闸门不再激活——拦截面绝不能因为可选读面缺失而下线。
+  // 宿主 fs 面：可选**读面**，装进箱子而不是插件级 `inject: ["fs"]`——理由与上面投影台账
+  // 一字不差：那会让没装 fs 后端的 profile **整个闸门不再激活**，而拦截面绝不能因为可选
+  // 读面缺失而下线（本包的 bulkhead 口径）。直接读属性也不行：cordis 对未声明 inject 的
+  // 服务名是**抛错**而不是回 undefined（真 spine 实测："cannot get property \"fs\" without inject"），
+  // 所以只能走 inject 回调或 `ctx.get`。
+  const fsBox: PreflightFsBox = { value: undefined };
   const ledgerBox: GuardRuntime["ledger"] = { value: undefined };
   svc.inject?.(["sessionProjections"], (child) => {
     const registry = child.sessionProjections;
@@ -2219,7 +3260,18 @@ export function apply(ctx: Context): void {
     ledgerBox.value = (session) => asLedger(registry.stateOf(session, LEDGER_KEY));
   });
 
-  // 会话销毁即释放该会话的全部记账：fact-gate 分片 + 两张会话键台账
+  svc.inject?.(["fs"], (child) => {
+    fsBox.value = child.fs;
+  });
+
+  // 后端每观察一枚目标就报一次 ⇒ 把它自己解析出的真实路径记进 officialPaths（同步、零额外 I/O，
+  // 于是同会话随后那次盲改的密钥面判定就吃得到官方那一形）。fs 后端缺席时箱子是空的，
+  // 这一枚监听器只是什么都不记——判定退回声明形 + 本机形，拦截面一条不减。
+  svc.on?.("fs/observed", (target) => {
+    rememberObservedPath(fsBox.value, target);
+  });
+
+  // 会话销毁即释放该会话的全部记账：fact-gate 分片 + 四张会话键台账
   //（ctx-observe/lesson-loop 同用官方 session/disposed）。
   // 幂等语义：同一 session id 重复 dispose 由 FactGate.dropSession 的 delete 天然幂等。
   svc.on?.("session/disposed", (sessionRaw) => {
@@ -2231,6 +3283,33 @@ export function apply(ctx: Context): void {
   svc.effect((): (() => void) => (): void => {
     clearDerivedLedgers();
   });
+
+  // ── 预检（Phase 2）的两个触发点 ──────────────────────────────────────────────
+  // A 面挂 `tools/post-execute`（引用面随读取结果出去），B 面挂 `tools/pre-execute`
+  // （带证据拦一次）。两条都是瀑布，都**先** `await next()`：下游任何插件已经 deny/cancel/ask
+  // 就原样交回——预检只补充证据，不抢别人已经做出的决定。
+  // 官方契约保证 pre-execute 瀑布整体跑完之后才轮到 `ctx.tools.guard` 的同步判定
+  // （installed dsh-tools `prepareExecution`：只在 `decision.kind === 'allow'` 时才走
+  // `guardReason`），所以 B 面写下的投递水位 guard 一定看得见。
+  // ⚠ 两面都**永不抛错**：任何异常只记一条告警，随后照常交回下游。预检失败必须退化成
+  //   "今天的拒绝路径"，绝不能变成"这次编辑没了"；当然也不能静默——所以留一条日志。
+  // 检索工具的在位探测：`ctx.tools.get` 是官方成员，装配期造一次即可（注册表在一条会话里
+  // 不太可能每趟都变，而探测本身只读一张表）。它只影响拒绝理由里点名的工具，见 toolPresentOf。
+  const present = toolPresentOf(svc.tools);
+  const preflightReqOf = preflightRequestFactory({
+    svc,
+    gate: factGate,
+    ledgerBox,
+    messages: localeMessages,
+    present,
+    fsBox,
+  });
+
+  svc.on?.("tools/pre-execute", (exec, next) => preflightOnPreExecute(exec, next, preflightReqOf));
+
+  svc.on?.("tools/post-execute", (exec, result, next) =>
+    preflightOnPostExecute(exec, result, next, preflightReqOf),
+  );
 
   // 判定链（bash 闸 / 密钥路径闸 / 事实门）与两路上报都已提到模块层，apply 只留接线。
   const wiring: GuardWiring = { svc, gate: factGate };
@@ -2255,6 +3334,7 @@ export function apply(ctx: Context): void {
       // 停在会话创建时那一级。
       cwd: effectiveCwdOf(svc, exec.agent?.session),
       ledger: ledgerBox,
+      present,
     };
     let deny: string | undefined;
     if (rt.cfg.enabled) {
@@ -2308,7 +3388,11 @@ export function apply(ctx: Context): void {
         deny = messages[key];
         reportDeny(wiring, exec, {
           category: "dangerous-bash",
-          signature: unconfirmed ? NESTED_UNCONFIRMED_SIGNATURE : command,
+          // 签名**一律**用命令原文：类别级归并在 lesson-loop 侧完成（`CATEGORY_SIGNATURES`
+          // 把 `dangerous-bash` 折成一个稳定键），原文因此落进 `evidence.signature`，不再被
+          // 常量吃掉。旧写法给"认不准"那一类传常量，于是那张卡里每条证据都是同一段模板文案，
+          // 人审时看不出该审哪条命令——"是否需用户确认"另有 `needsUserConfirmation` 承载。
+          signature: command,
           detail: deny,
           evidence: {
             tool: name,

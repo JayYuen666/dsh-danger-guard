@@ -11,7 +11,19 @@ import { declareSchemaCoverage } from "./schema-coverage.ts";
 const CLIENT_BUNDLE_SPEC = "../client.js";
 
 await declareClientFreshness(import.meta.url);
-await declareSchemaCoverage(import.meta.url);
+await declareSchemaCoverage(import.meta.url, {
+  // 预检开关（`preflightEnabled`，Phase 2）本轮只落设置面与拦截半：卡片控件要同时改 client
+  // 产物、`src/ui-messages.ts` 的两语文案与卡片用例，而规格把卡片入口划在范围外。
+  // 它并非"无处可关"——`- id: danger-guard-settings` 那一行的 `config.preflightEnabled`
+  // 与设置命名空间都直接生效（它就是 schema 字段，越界校验走同一份）。故这里按
+  // "确无 UI 入口" 显式豁免，而不是在 client 源码里挂一个不渲染的假绑定。
+  allowUnbound: [
+    {
+      field: "preflightEnabled",
+      reason: "本轮只落设置面与拦截半：卡片控件（含 ui-messages 两语文案）不在本次规格内",
+    },
+  ],
+});
 
 describe("danger-guard client 构建", () => {
   it("client.js 已产出且含设置卡与开关文案", async () => {

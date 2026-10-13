@@ -14,7 +14,7 @@
 import { describe, it } from "vitest";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, mkdir, rm, symlink, writeFile, utimes } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile, utimes } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
 import plugin, { BUILTIN_BASE, noteJudgeCost } from "../host.ts";
@@ -76,6 +76,9 @@ interface ReportPayload {
 interface MockCtx {
   tools: {
     guard: (fn: GuardCall["fn"]) => () => void;
+    /** 官方的按名查询（installed dsh-tools index.d.ts:164）。本包只用它探测
+     *  「这条工具名在不在」，缺席/抛错都按"在"处理——见下面的在位探测一组。 */
+    get?: (name: string) => unknown;
   };
   /** 0.1.7 settings 面：拦截半只调 describe()（locale 偏好）；configure 归设置条目。 */
   settings: {
@@ -371,7 +374,7 @@ describe("bash 闸的两种结论在总线侧必须可分辨（拦 vs 认不准�
     assert.equal(rep.evidence["needsUserConfirmation"], false);
   });
 
-  it("`-c` 体未被检查 → 同一通道上报，换成类别级稳定签名并标记需确认", () => {
+  it("`-c` 体未被检查 → 同一通道上报，签名用命令原文并标记需确认", () => {
     const { ctx, reports } = reportSpy();
     applyPlugin(ctx);
     // 守卫仍返回字符串（= 物理拒绝，模型不会静默跑到没检查过的命令）
@@ -381,8 +384,9 @@ describe("bash 闸的两种结论在总线侧必须可分辨（拦 vs 认不准�
     assert.equal(rep.source, "danger-guard");
     assert.equal(rep.category, BASH_DENIAL_CATEGORY);
     assert.equal(rep.sessionId, "s-1");
-    // 命令原文当签名会把这条通用教训按套娃形态碎成无数张卡（每次输入都不重样）
-    assert.equal(rep.signature, "bash-nested-shell-unconfirmed");
+    // 签名用**命令原文**：类别级归并在 lesson-loop 侧（CATEGORY_SIGNATURES 的 dangerous-bash），
+    // 原文因此落进 evidence.signature —— 卡片不再按套娃形态碎片化，人审也看得见是哪条命令。
+    assert.equal(rep.signature, 'bash -c "rm -rf /');
     assert.equal(rep.detail, NESTED_SHELL_UNDETERMINED_MESSAGE);
     assert.equal(rep.evidence["tool"], "bash");
     assert.equal(rep.evidence["needsUserConfirmation"], true);
@@ -648,7 +652,7 @@ describe("判定耗时与解析形随上报一起发（长度上限要按真实�
     assert.equal(rep.evidence["judgeLength"], "rm -rf /".length, "签名就是这条命令，长度要能对上");
   });
 
-  it("密钥面载荷带 judgeMs；解析不出真实路径时不带 resolvedPath", () => {
+  it("密钥面载荷带 judgeMs；解析不出真实路径时不带 resolvedPaths", () => {
     const { ctx, reports } = reportSpy();
     applyPlugin(ctx);
     const reason = ctx.guardInstalled!.fn({
@@ -660,7 +664,7 @@ describe("判定耗时与解析形随上报一起发（长度上限要按真实�
     const rep = reports[0] as ReportPayload;
     assert.equal(rep.category, "secret-path");
     assert.equal(typeof rep.evidence["judgeMs"], "number");
-    assert.equal(rep.evidence["resolvedPath"], undefined, "祖先全不存在 ⇒ 没有这一形");
+    assert.equal(rep.evidence["resolvedPaths"], undefined, "祖先全不存在 ⇒ 一形都没到手");
   });
 
   it("目标确实存在时解析形一起发出（看教训时要知道被拦的是哪棵树）", async () => {
@@ -675,7 +679,11 @@ describe("判定耗时与解析形随上报一起发（长度上限要按真实�
         agent: { session: { id: "s-1", header: { cwd: dir } } },
       });
       const rep = reports[0] as ReportPayload;
-      assert.equal(typeof rep.evidence["resolvedPath"], "string");
+      // 交的是**清单**：本机 realpath 那一形在这里，官方后端那一形要 fs 面在位才有
+      //（这个桩没装 ⇒ 清单只有一枚；两形并列的判定面见 test/danger-rules.test.ts 与
+      // test/host-preflight.test.ts 的官方通道那组用例）。
+      const realDir = await realpath(dir);
+      assert.deepEqual(rep.evidence["resolvedPaths"], [path.join(realDir, ".ssh", "id_rsa")]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -934,5 +942,38 @@ describe("会话当前工作目录：判据跟到 cd 之后（ctx.workingDirecto
     applyPlugin(legacy);
     legacy.guardInstalled!.fn(bashExec);
     assert.equal(legacyReports[0]?.cwd, "/w/proj", "服务缺席 ⇒ 上报退回 header.cwd");
+  });
+});
+
+describe("检索工具的在位探测：指令只点这台宿主上注册着的那几枚", () => {
+  // 默认名单里 grep/glob 出自宿主 stock 目录，而 zg_search（连它的 root/query/fts/vector 参数面）
+  // 出自**另一枚插件**（本仓同级包 @jayyuen66/dsh-zvec-grep）——装不装逐台不同。没装还点名它，
+  // 就是"指令不可照做"：模型照着烧一次调用，然后被同一个缺项再拒一次。
+  it("get 认得出的名字才进指令；认不出的一律不点", () => {
+    const ctx = createMockCtx();
+    ctx.tools.get = (name: string): unknown => (name === "grep" ? {} : undefined);
+    applyPlugin(ctx);
+    const message = ctx.guardInstalled!.fn(editWithoutEvidence("s-present"));
+    assert.equal(typeof message, "string");
+    assert.match(message!, /grep/u, "注册在位的照点");
+    assert.doesNotMatch(message!, /glob|zg_search/u, "没注册的名字点了就是给模型一条走不通的路");
+  });
+
+  it("探测抛错 ⇒ 一律算「在」：宁可多点名一个名字，也不把模型要走的门关上", () => {
+    const ctx = createMockCtx();
+    ctx.tools.get = (): never => {
+      throw new Error("宿主这枚成员在别的版本上没有");
+    };
+    applyPlugin(ctx);
+    const message = ctx.guardInstalled!.fn(editWithoutEvidence("s-throw"));
+    assert.equal(typeof message, "string", "探测失败不许影响判定，更不许抛进 guard 热路径");
+    assert.match(message!, /grep|glob/u, "退化成不筛 ⇒ 名单原样给模型");
+  });
+
+  it("tools 面根本没有 get（老宿主/别的实现）⇒ 同样退化成不筛", () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const message = ctx.guardInstalled!.fn(editWithoutEvidence("s-noget"));
+    assert.match(message!, /grep/u, "探不到就不筛，判定面一条不减");
   });
 });
