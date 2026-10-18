@@ -98,7 +98,7 @@ describe("danger-guard client 构建", () => {
       "product 里 configForms.get 的实参必须是设置条目 id",
     );
     // 表单是 provider 持有的共享对象，消费契约 ConfigForm 里没有 dispose
-    //（installed config-form-types.d.ts:36-74）：slot disposer 只注销登记。
+    //（installed config-form-types.d.ts 的 ConfigForm）：slot disposer 只注销登记。
     // 判据取全链 `.dispose()`：客户端产物里**一处**都不该有（表单归 provider 持有）。
     assert.ok(!/\.dispose\(\)/u.test(text), "产物不得销毁 provider 的表单");
   });

@@ -458,8 +458,8 @@ describe("stateOf 回填与单元形状", () => {
       toolLedgerProjection.init({} as never, 0 as never),
       first,
     );
-    // 期望值按字面写：折一条 read 调用之后该是哪一行、长度停在哪一格。此前这条比的是
-    // lib 里那份并行 fold 的产物，两个口与 fold 同源即算通过；折叠既已收归单元，这里就
+    // 期望值按字面写：折一条 read 调用之后该是哪一行、长度停在哪一格。与 lib 里那份
+    // fold 同源比对不算证据——两个口一起错也不会红，所以这里
     // 直接钉形状本身（test/ledger-fold.ts 的等价用例逐条覆盖其余事件形态）。
     assert.deepEqual(stepped, {
       calls: [{ name: "read", callId: "c1", arguments: {}, badArguments: false, seq: 0 }],

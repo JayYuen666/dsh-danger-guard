@@ -93,7 +93,7 @@ export type EditDenialKey = "secretPath" | "opaqueTarget";
  * 一条拒绝交回宿主的东西：规则键 + 可选的出路（见 `lib/fix.ts` 的 `Fix`）。
  *
  * 为什么 `fix` 是**结构化**的而不是一段中英 prose：本模块是语言无关的（只回规则键，
- * 文案单源在 `lib/messages.ts`）。把话写进 lib 就等于给同一件事开第二份语言面，而两语必���。
+ * 文案单源在 `lib/messages.ts`）。把话写进 lib 就等于给同一件事开第二份语言面。
  * 形状本身住在那枚零依赖的 `lib/fix.ts` 里（收在那里的理由见该文件头）。
  */
 export interface BashVerdict {
@@ -1595,6 +1595,8 @@ function tildeHomePath(value: string, home: string): string {
 function homeVarTail(value: string): string {
   if (HOME_EXPANSION_RE.test(value)) {
     const end = value.indexOf("}");
+    /* v8 ignore next 1 —— 未闭合形态在 lexer 那一层已升格为"需确认"，到不了这里；
+       留着是纯函数自己的兜底（畸形输入按空尾 = 家目录本身处理）。 */
     return end === -1 ? "" : value.slice(end + 1);
   }
   return value.slice("$HOME".length);
@@ -1610,6 +1612,232 @@ function isHomeVarDisaster(value: string, home: string): boolean {
   return isHomeDisasterPath(`${home}${tail}`, home);
 }
 
+/** 目标里出现未展开的 glob 元字符：shell 会先展开它，判据该看展开后的那批路径。 */
+const GLOB_METACHAR_RE = /[*?[]/u;
+
+/** 正则元字符：glob 模式的字面部分进 `new RegExp` 前必须转义。 */
+const REGEX_METACHARS: ReadonlySet<string> = new Set(String.raw`\^$.|+()[]{}*?`);
+
+/**
+ * 把 glob 模式编译成**同段匹配**的正则：`*` → `[^/]*`、`?` → 一枚非分隔符、`[...]` 整类 →
+ * 一枚非分隔符（字符类内容不解析：判据只问"能否落到受保护前缀上"，取超集是安全方向）。
+ * 未闭合的 `[` 在真实 shell 里是字面量，故按字面转义。
+ *
+ * 为什么不枚举展开结果：条目数由目录内容决定，而这是一条同步纯函数判定。
+ * 花括号展开（`{a,b}`）**不在**此列——它不是 glob，且要解析嵌套与不配对形态；
+ * 见 README 的「不拦」列，登记为已知洞而不是猜着收。
+ */
+function globRegExp(pattern: string): RegExp {
+  let src = "";
+  let i = 0;
+  while (i < pattern.length) {
+    const ch = pattern.charAt(i);
+    if (ch === "*") {
+      src += "[^/]*";
+    } else if (ch === "?") {
+      src += "[^/]";
+    } else if (ch === "[") {
+      const close = pattern.indexOf("]", i + 1);
+      src += close === -1 ? String.raw`\[` : "[^/]";
+      i = close === -1 ? i : close;
+    } else {
+      src += REGEX_METACHARS.has(ch) ? `\\${ch}` : ch;
+    }
+    i += 1;
+  }
+  return new RegExp(`^${src}$`, "u");
+}
+
+/**
+ * 一枚绝对 glob 目标**能否**落到受保护前缀上——根到系统前缀各试"前缀本身"与"其下一层"
+ * （`/etc/*` 展开的是 `/etc/<项>`，不是 `/etc` 本身）。
+ * 判"能否"而不是"会"：命中即拦，方向与 `rm` 那一族"看不见就不放行"一致。
+ */
+function globCouldHitProtected(pattern: string, home: string): boolean {
+  // 尾斜杠不改变展开结果（`/e*/` 与 `/e*` 都展开成 `/etc`），但会让同段正则多要一格。
+  const re = globRegExp(pattern.replace(/\/+$/u, ""));
+  return [home, ...SYSTEM_PATH_PREFIXES].some((probe) => re.test(probe) || re.test(`${probe}/x`));
+}
+
+/** 花括号展开的预算：超过即按"形状不可判"处理（绝对路径 fail-closed）。 */
+const BRACE_EXPANSION_BUDGET = 64;
+
+/** 第一个参与花括号展开的 `{`；跳过 `${…}`（参数展开不归这条判据管）。 */
+function braceOpenIndex(word: string): number {
+  let found = -1;
+  for (let i = 0; i < word.length && found === -1; i += 1) {
+    const ch = word.charAt(i);
+    if (ch === "$" && word.charAt(i + 1) === "{") {
+      const skip = word.indexOf("}", i + 2);
+      if (skip === -1) {
+        break;
+      }
+      i = skip;
+    } else if (ch === "{") {
+      found = i;
+    }
+  }
+  return found;
+}
+
+/** 词里是否还有不属于 `${…}` 的花括号（字面花括号或残缺形态）。 */
+function hasLiteralBrace(word: string): boolean {
+  let found = false;
+  for (let i = 0; i < word.length && !found; i += 1) {
+    const ch = word.charAt(i);
+    if (ch === "$" && word.charAt(i + 1) === "{") {
+      const skip = word.indexOf("}", i + 2);
+      if (skip !== -1) {
+        i = skip;
+      }
+    } else if (ch === "{" || ch === "}") {
+      found = true;
+    }
+  }
+  return found;
+}
+
+/** 与 `open` 处配对的 `}`；不配对返回 -1。 */
+function matchingBrace(word: string, open: number): number {
+  let depth = 0;
+  let found = -1;
+  for (let i = open; i < word.length && found === -1; i += 1) {
+    const ch = word.charAt(i);
+    if (ch === "{") {
+      depth += 1;
+    } else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        found = i;
+      }
+    }
+  }
+  return found;
+}
+
+/** 按顶层逗号切备选项（嵌套花括号里的逗号不切）。 */
+function splitBraceAlternatives(inner: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < inner.length; i += 1) {
+    const ch = inner.charAt(i);
+    if (ch === "{") {
+      depth += 1;
+    } else if (ch === "}") {
+      depth -= 1;
+    } else if (ch === "," && depth === 0) {
+      parts.push(inner.slice(from, i));
+      from = i + 1;
+    }
+  }
+  if (parts.length === 0) {
+    return [inner];
+  }
+  parts.push(inner.slice(from));
+  return parts;
+}
+
+/** 闭区间序列（含降序）；跨度超预算返回 null。 */
+function rangeWords(
+  start: number,
+  end: number,
+  render: (current: number) => string,
+): string[] | null {
+  let out: string[] | null;
+  if (Math.abs(end - start) + 1 <= BRACE_EXPANSION_BUDGET) {
+    out = [];
+    const step = start <= end ? 1 : -1;
+    for (let current = start; step > 0 ? current <= end : current >= end; current += step) {
+      out.push(render(current));
+    }
+  } else {
+    out = null;
+  }
+  return out;
+}
+
+/** `{a..c}` 序列；没匹配上返回 null。 */
+function expandAlphaSequence(alpha: RegExpExecArray | null): string[] | null {
+  return alpha === null
+    ? null
+    : rangeWords(
+        /* v8 ignore start —— 正则已经保证两个分组存在；?? 只是类型层兜底 */
+        alpha.groups?.["start"]?.codePointAt(0) ?? 0,
+        alpha.groups?.["end"]?.codePointAt(0) ?? 0,
+        /* v8 ignore stop */
+        String.fromCodePoint,
+      );
+}
+
+/** `{1..3}` / `{a..c}` 序列；没有序列（含只有一组字面花括号）一律返回 null。 */
+function expandBraceSequence(inner: string): string[] | null {
+  const numeric = /^(?<start>-?\d+)\.\.(?<end>-?\d+)(?:\.\.-?\d+)?$/u.exec(inner);
+  const alpha = /^(?<start>[A-Za-z])\.\.(?<end>[A-Za-z])$/u.exec(inner);
+  return numeric === null
+    ? expandAlphaSequence(alpha)
+    : rangeWords(Number(numeric.groups?.["start"]), Number(numeric.groups?.["end"]), String);
+}
+
+/**
+ * 展开一个词的第一组花括号。返回替换后的词（可能还含后面的花括号）；形状不可判返回 null
+ * ——没有逗号也没有序列的字面花括号（`{a}`）同样算不可判：bash 不展开它，而把带花括号的
+ * 名字当普通路径判会给出"安全"的假象。
+ */
+function expandOne(word: string): string[] | null {
+  let out: string[] | null;
+  const open = braceOpenIndex(word);
+  if (open === -1) {
+    // 调用方只在「没有可展开的 `{`、但还有字面花括号」时才把词交到这里。
+    out = null;
+  } else {
+    const close = matchingBrace(word, open);
+    if (close === -1) {
+      out = null;
+    } else {
+      const prefix = word.slice(0, open);
+      const suffix = word.slice(close + 1);
+      const inner = word.slice(open + 1, close);
+      const choices = splitBraceAlternatives(inner);
+      const expanded = choices.length > 1 ? choices : expandBraceSequence(inner);
+      out = expanded === null ? null : expanded.map((choice) => `${prefix}${choice}${suffix}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * bash 花括号展开的纯词法子集（`{a,b}`、序列、嵌套）。返回 null 表示形状不可判：
+ * 超出预算、残缺花括号、不认识的序列，或 bash 本就不展开的字面花括号。
+ *
+ * 词值是 lexer 去过引号的一形，所以引号里的花括号也会被展开——方向是**多拦**，
+ * 与文件头"宁可多抹"的保守原则一致。
+ */
+function expandBraces(word: string, budget = BRACE_EXPANSION_BUDGET): string[] | null {
+  const pending = [word];
+  const out: string[] = [];
+  let failed = false;
+  for (const current of pending) {
+    if (failed) {
+      break;
+    }
+    const settled = braceOpenIndex(current) === -1 && !hasLiteralBrace(current);
+    if (settled) {
+      out.push(current);
+      failed = out.length > budget;
+    } else {
+      const next = expandOne(current);
+      if (next === null) {
+        failed = true;
+      } else {
+        pending.push(...next);
+        failed = pending.length > budget;
+      }
+    }
+  }
+  return failed ? null : out;
+}
+
 /**
  * **POSIX 轨道**的灾难性删除目标：根 / 家目录（**变量与字面路径同判**）/ 系统前缀 / 上跳 /
  * 当前目录，绝对路径的 glob 形态（`/*`、`/usr/**`）等价于其目录本身。
@@ -1623,7 +1851,7 @@ function isHomeVarDisaster(value: string, home: string): boolean {
  * 波浪号不展开）⇒ 一律回到本函数的结论，这是**正确语义**而不是漏拦。
  * @param value 词值（`lexTokens` 去过引号、落过转义的那一形）
  */
-function isPosixDisasterTarget(value: string): boolean {
+function isPosixDisasterTargetWord(value: string): boolean {
   // ── 入参是词值本身（lexical 归一，无需 cwd），与 Windows 字形、与宿主平台都无关。
   const posixNormalized = path.posix.normalize(value);
   // 绝对路径的 glob 形态等价于其目录本身（`/*` → `/`）。
@@ -1655,6 +1883,11 @@ function isPosixDisasterTarget(value: string): boolean {
       isHomeVarDisaster(value, home)) ||
     // `~user/…` 吃原词值（归一会吃掉 `..` 段，见 USER_HOME_RE 的注释）。
     USER_HOME_RE.test(value) ||
+    // 绝对 glob 的**展开形态**同判：`rm -rf /e?c` 在真实 bash 里展开成 `/etc`（实测）、
+    // `rm -rf /e*/` 展开成 `/etc/`。上面那支只剥尾部 `*`（把 `/e*/` 削成 `/e` 后不再成灾），
+    // 于是 `?`/`[...]`/中缀 `*` 三族整片漏面——而这三族与 `/*` 是同一件事：shell 先展开、
+    // rm 只看结果。读**归一值**而不是上面那支的转换结果：转换已经把命中形态削掉了。
+    (GLOB_METACHAR_RE.test(posixNormalized) && globCouldHitProtected(posixNormalized, home)) ||
     posixTarget === "." ||
     posixTarget === ".." ||
     posixTarget.startsWith("../") ||
@@ -1662,6 +1895,19 @@ function isPosixDisasterTarget(value: string): boolean {
       (prefix) => posixTarget === prefix || posixTarget.startsWith(`${prefix}/`),
     )
   );
+}
+
+/**
+ * 灾难目标判定：词值里含花括号时先按 shell 语义展开，任一展开结果命中受保护面即判灾难。
+ * 展开形状不可判（超预算 / 残缺 / 不认识的序列）时，绝对路径与家目录/变量形态按灾难处理
+ * ——"看不懂"落在多拦的一侧。
+ */
+function isPosixDisasterTarget(value: string): boolean {
+  const expanded = expandBraces(value);
+  if (expanded === null) {
+    return value.startsWith("/") || value.startsWith("~") || value.startsWith("$");
+  }
+  return expanded.some((word) => isPosixDisasterTargetWord(word));
 }
 
 /** rm 一系参数走查的可变状态。 */
@@ -2551,7 +2797,7 @@ export function partitionSecretPatterns(patterns: readonly string[]): SecretPatt
   return { accepted, rejected };
 }
 
-/** 合并内置 + 用户配置的密钥路径正则（每次调用构建；实测 1000 次 ≈3ms，不必缓存）。 */
+/** 合并内置 + 用户配置的密钥路径正则（每次调用构建；实测开销可忽略，不必缓存）。 */
 function secretRe(opts: EditDangerOptions = {}): RegExp {
   const { accepted } = partitionSecretPatterns(opts.extraSecretPatterns ?? []);
   if (accepted.length === 0) {

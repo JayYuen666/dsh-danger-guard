@@ -8,10 +8,10 @@
 //  - `additionalContexts` 在真 dispatch 的结果面上到底存不存在、能不能与别的插件的上下文并存；
 //  - guard 拿到的是**模型字面量**（深冻结，宿主不注入 realpath 形——全仓 grep `resolvedPaths`
 //    零命中，路径解析在工具体内，见 packages/fs/tool-fs/src/read-target.ts:25），
-//    所以软链/相对路径那两面能拦住靠的是本包自己的 realpathOf，这条依赖此前只写在注释里；
+//    所以软链/相对路径那两面能拦住靠的是本包自己的 realpathOf，这条依赖只写在注释里不算数；
 //  - **直接 `ctx.tools.execute` 不写会话日志**（只有 agent loop 会 appendToolCall）：
 //    于是"模型自己检索过"这类凭证在这一层必然读不到，只有预检的投递水位能顶。
-//    这条边界是本轮测出来的事实，所以下面把它写成显式断言，正向用例在
+//    这条边界是实测出来的事实，所以下面把它写成显式断言，正向用例在
 //    test/agent-loop-e2e.test.ts。
 // 装配与工具见 test/host-spine.ts：真注册、真校验、真执行，read/edit/write 真的读盘写盘，
 // 于是 mtime、外部改动、正文截断这些判据拿到的是真文件系统事实。
@@ -74,7 +74,7 @@ const REFS_HEAD_MARK = markOf(zh.preflightRefsHead);
 /** 别的插件留下的痕迹：多条用例都按这一枚标记认「那句话不是我写的」，所以只写一遍。 */
 const OTHER_PLUGIN_MARK = "[other-plugin]";
 
-/** 本轮开出去的测试台，随 describe 收（每台一份独立临时工程，互不踩 mtime）。 */
+/** 开出去的测试台，随 describe 收（每台一份独立临时工程，互不踩 mtime）。 */
 const stages: Spine[] = [];
 
 /** 装配一台，会话 cwd 指向那台自己的临时工程。 */
@@ -446,7 +446,7 @@ describe("真实 spine 下的接线与物化", () => {
     // 读过目标 ⇒ read 不再是缺项，剩下的只落在上层探查 ⇒ 配额这条路才打开。
     // ⚠ 这一次读取必须走**真回合**（脚本模型 + runTurn），不能 `dispatch`：直接 dispatch
     // 不落会话日志（本文件另有用例钉着这条边界），而事实门的 read 证据正是从会话日志里读的
-    // —— 用 dispatch 的话这次读取对门禁等于没发生，配额会被一直扣着（本轮实测踩过）。
+    // —— 用 dispatch 的话这次读取对门禁等于没发生，配额会被一直扣着（实测踩过）。
     registerModel(spine, [toolCallReply("r1", TOOL_READ, { file_path: file }), textReply("read")]);
     await runTurn(spine, agent, "先读一眼目标");
     const again = await dispatch(spine, agent, "d3", TOOL_EDIT, highBlind(file, "c"));

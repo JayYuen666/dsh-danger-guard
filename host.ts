@@ -193,7 +193,7 @@ const FACTGATE_SIGNATURE = "edit-before-factgate";
 const JUDGE_COST_CATEGORY = "judge-cost";
 
 /** 官方 `ToolExecution.agent` 去掉可选后的 `Agent`。本包**未**声明 `@deepseek-ai/dsh-agent`
- *  依赖，故经官方成员索引访问取到它，而不 import 类名（zvec-grep/lib/routing.ts:40 同策）。 */
+ *  依赖，故经官方成员索引访问取到它，而不 import 类名（zvec-grep 的 lib/routing.ts 同策）。 */
 type OfficialAgent = NonNullable<ToolExecution["agent"]>;
 
 /** tools.guard 收到的调用面 = **官方 `ToolExecution` 的本包读取投影**。
@@ -275,7 +275,7 @@ interface SettingsReader {
  * settings 服务」，而 `HostCtx` 其余每个服务面都只点名自己用到的成员，`isDangerGuardHost`
  * 也只探 `describe` 这一位（多探一项就等于多给闸门一条失败路径）。投影不重述签名：
  * `describe(options?: SettingsDescribeOptions): SettingsDescriptor[]` 的入参与返回都由官方
- * 成员交出（installed :96）。口径同 ocr-review/host.ts:223 与 zvec-grep/host.ts:210——区别只在
+ * 成员交出（installed :96）。口径同 ocr-review 与 zvec-grep 的 host.ts——区别只在
  * 那两包还用了 `configure`：本包的页面策略归**设置条目**声明（见 apply 上方注释），故不取。
  */
 type SettingsFormsService = Pick<SettingsForms, "describe">;
@@ -388,7 +388,7 @@ interface HostCtx {
    *     `officialPaths`——同步、零额外 I/O。⚠ 官方明说这类监听器"throws fail the tool call"，
    *     所以取值那一步整个包在 try 里（见 rememberObservedPath）。
    *  ⚠ 这里**不**换成 `Context["on"]`：那是全仓延后项（泛型 `on<K extends keyof Events>` 会
-   *  重写每一枚监听器签名，ctx-observe/host.ts:329-336 记着同一条理由）。按重载逐枚点名，
+   *  重写每一枚监听器签名，ctx-observe 的 host.ts 记着同一条理由）。按重载逐枚点名，
    *  新增事件时加一条签名即可，不必把整张事件表拖进来。 */
   on?: {
     (
@@ -1337,7 +1337,7 @@ function readSessionLog(session: SessionLogFace): readonly SessionEvent[] | unde
   // 形参是官方品牌数 `SessionLogOffset`：0 必须经 `brandNumber<…>(0)` 送出（幻影品牌
   // type-only 造不出来，`as` 又被 no-unsafe-type-assertion 禁掉；见文件头列出的 dsh-brand 值导入）。
   // 且必须以真实 session 为 `this` 调用：snapshotEvents 读 this.log/this.seq，解绑会以本对象
-  // 为 this → TypeError（quality-gate/host.ts:822-824 的 0.1.6 实证同款）。
+  // 为 this → TypeError（quality-gate 的 host.ts 在 0.1.6 上有同款实证）。
   const evs =
     typeof reader === "function"
       ? reader.call(session, brandNumber<SessionLogOffset>(0))

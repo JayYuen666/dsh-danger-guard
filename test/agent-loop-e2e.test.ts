@@ -1,6 +1,6 @@
 // test/agent-loop-e2e.test.ts —— **点对点层**：真 AgentLoop 跑完整回合，断言"模型到底看见了什么"。
 //
-// 这一层是上一轮 A/B 混合改造的**唯一实证**。原因很具体：预检的全部论点是一句话——
+// 这一层是 A/B 混合改造的**唯一实证**。原因很具体：预检的全部论点是一句话——
 // "证据在模型**下一次动手之前**就出现在它的上下文里"。这在单元层只能测到"我们往结果面上挂了
 // 一块 additionalContexts"，而挂上去 ≠ 看得见：官方的链是
 //   post-execute 收下 additionalContexts → agent-loop 排到 **next-step** 边界 → 下一次
@@ -49,7 +49,7 @@ const HANDOFF_MARK = gateMarkOf(zh.preflightHandoff);
 const ATTACH_MARK = gateMarkOf(zh.preflightAttach);
 const LIST_MARK = gateMarkOf(zh.headFirst);
 
-/** 本轮开出去的测试台，随 describe 收。 */
+/** 开出去的测试台，随 describe 收。 */
 const stages: Spine[] = [];
 
 /** 装配一台 + 起一个真 Agent（cwd 指向那台的临时工程）。 */

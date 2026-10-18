@@ -1,10 +1,10 @@
 // 设置卡契约测试（happy-dom + react-dom/act）。
 // 真实契约（0.1.7 的 dsh-client-ui-settings ConfigForm，installed
-// lib/types/client/config-form-types.d.ts:36-74 + ConfigFormSnapshot:6-32）——本文件的
+// lib/types/client/config-form-types.d.ts 的 ConfigForm + ConfigFormSnapshot，两份接口都在那一份 d.ts 里）——本文件的
 // 表单桩件**直接 import 官方那两个类型**（type-only，不引运行时代码），所以宿主改字段名
 // 或取值域时桩件这里先编译失败，而不是像原先的本地 mirror 一样静默漂移：
-//   snapshot 7 位全必选：status: 'loading' | 'ready' | 'unavailable'（:12）、
-//   value: T | undefined（:14，首个快照受理前才是 undefined）、base/user/revision/mode
+//   snapshot 6 位全必选：status: 'loading' | 'ready' | 'unavailable'（:12）、
+//   value: T | undefined（:14，首个快照受理前才是 undefined）、base/user/revision
 //   snapshot.writable: boolean（恒存在，独立于 status 的可写位，:29）
 //   表单五位在位：getSnapshot/subscribe/**mutate**/set/unset；后两者回
 //   Promise<boolean>（:65/:73 受理位，只有传输失败才 reject）
@@ -190,8 +190,8 @@ function placeholders(template: string): Set<string> {
   return new Set(template.split(/[{}]/u).filter((piece) => /^\w+$/u.test(piece)));
 }
 
-/** 官方表单快照（installed config-form-types.d.ts:6-32）：**7 位全必选**
- *  （status 恒为三态之一、value 在首个快照受理前才是 undefined、base/user/revision/mode
+/** 官方表单快照（installed config-form-types.d.ts:6-32）：**6 位全必选**
+ *  （status 恒为三态之一、value 在首个快照受理前才是 undefined、base/user/revision
  *  恒在位）。桩件交得出这个面，宿主改字段名/取值域时这里先编译失败。 */
 type Snap = ConfigFormSnapshot<Record<string, unknown>>;
 
@@ -204,7 +204,6 @@ function snap(over: Partial<Snap> = {}): Snap {
     user: {},
     revision: 3,
     writable: true,
-    mode: "host",
     ...over,
   };
 }
@@ -218,7 +217,7 @@ interface CardView {
 }
 
 /** 0.1.7 的表单消费面：**直接绑官方 `ConfigForm<Record<string, unknown>>`**
- *  （installed config-form-types.d.ts:36-74：getSnapshot/subscribe/mutate/set/unset），
+ *  （installed config-form-types.d.ts 的 ConfigForm：getSnapshot/subscribe/mutate/set/unset），
  *  set/unset 回**受理位** boolean（true 宿主受理 / false 拒绝或写入被跳过，只有传输失败
  *  才 reject）。契约里**没有 dispose**——本 mock 额外挂一个会抛的 dispose 纯作绊线
  *  （见 disposeTripwire）。 */
@@ -241,7 +240,7 @@ function useCardOf(view: CardView): <Out>(selector: (snapshot: CardView) => Out)
   return <Out>(selector: (snapshot: CardView) => Out): Out => selector(view);
 }
 
-/** 0.1.7 的 `ConfigForm` 契约里**没有** dispose（installed config-form-types.d.ts:36-74：
+/** 0.1.7 的 `ConfigForm` 契约里**没有** dispose（installed config-form-types.d.ts 的 ConfigForm：
  *  只有 getSnapshot/subscribe/mutate/set/unset）。表单由 provider 持有并统一回收
  *  （installed lib/client.js:1289-1293）。这两个 mock 仍各留一根会抛的 dispose 绊线：
  *  把 `scope.dispose()` 写回 slot disposer 这类回退会立刻炸在这里（而不是像 0.1.6 那样

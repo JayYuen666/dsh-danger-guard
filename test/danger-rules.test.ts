@@ -1125,6 +1125,43 @@ describe("绕过面回归：家目录字面路径 / 系统前缀 / glob 根", ()
     assert.ok(bashDanger("rm -rf /usr/**") !== undefined);
     assert.equal(bashDanger("rm -rf *.log"), undefined, "相对 glob 仍是项目内清理");
   });
+
+  it("绝对 glob 的展开形态同判（`?` / `[...]` / 中缀 `*`）", () => {
+    // 真 shell 先展开再交给 rm：实测 `printf '%s\n' /e?c` 给 `/etc`、`/usr/lo?al` 给
+    // `/usr/local`。既有那支只剥尾部 `*`，这三族此前整片放行。
+    assert.ok(bashDanger("rm -rf /e?c") !== undefined);
+    assert.ok(bashDanger("rm -rf /usr/libe?ec") !== undefined);
+    assert.ok(bashDanger("rm -rf /et[c]") !== undefined);
+    assert.ok(bashDanger("rm -rf /e*/") !== undefined);
+    // 未闭合的 `[` 在 shell 里是字面量：退回既有判据（放行）。
+    assert.equal(bashDanger("rm -rf /tmp/buil[") === undefined, true);
+    // 展开后不落在受保护前缀上的 glob 仍是日常清理。
+    assert.equal(bashDanger("rm -rf /tmp/buil?") === undefined, true);
+  });
+
+  it("花括号展开同判（`{a,b}` / 序列 / 嵌套；相对目标仍放行）", () => {
+    // 真 shell 先展开再交给 rm：`rm -rf /{etc,usr}` 删的是 /etc 与 /usr。
+    assert.ok(bashDanger("rm -rf /{etc,usr}") !== undefined);
+    assert.ok(bashDanger("rm -rf {/etc,usr}") !== undefined);
+    assert.ok(bashDanger("rm -rf /{etc,{usr,opt}}") !== undefined, "嵌套");
+    assert.ok(bashDanger("rm -rf /et{c..e}") !== undefined, "序列");
+    assert.ok(bashDanger("rm -rf /{tmp,etc}") !== undefined, "任一备选命中即拦");
+    assert.ok(bashDanger("rm -rf /{etc") !== undefined, "展开形状不可判 → 绝对路径 fail-closed");
+    // 相对花括号展开仍是项目内清理：`{a,b}` 展开成两个相对名。
+    assert.equal(bashDanger("rm -rf {a,b}"), undefined);
+    assert.equal(bashDanger("rm -rf {dist,build}/x"), undefined);
+    assert.equal(bashDanger("rm -rf /tmp/{a,b}"), undefined);
+    // 数字/字母序列（含降序）：展开后不落在受保护前缀上就放行/命中就拦。
+    assert.equal(bashDanger("rm -rf /et{1..3}"), undefined);
+    assert.ok(bashDanger("rm -rf /et{c..a}") !== undefined);
+    // 字面花括号 / 落单的 `}` / 超预算：形状不可判，绝对路径按灾难处理。
+    assert.ok(bashDanger("rm -rf /{a}") !== undefined);
+    assert.ok(bashDanger("rm -rf /tmp/a}") !== undefined);
+    assert.ok(bashDanger("rm -rf /{1..100}") !== undefined);
+    assert.ok(bashDanger("rm -rf /{a,b}{1..40}") !== undefined);
+    // 未闭合的 `${`：按既有的家目录形态判据保守拦下（畸形输入不享受"认不准就放行"）。
+    assert.ok(bashDanger("rm -rf ${HOME") !== undefined);
+  });
 });
 
 describe("绕过面回归：包管理器旗标不再打断位置判定", () => {

@@ -24,6 +24,7 @@ import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-
 // （见下面 CardSnapshot）。lint 的 `require-module-specifiers` 禁空 import specifier，
 // 正合本意——载入官方契约就该同时*用上*它。
 import type { ConfigPageForm } from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
+import { diffTouched } from "@jayyuen66/dsh-plugin-shared/lib/card-diff";
 import {
   DEFAULT_MAX_DENIES,
   DEFAULT_SMALL_EDIT_CHARS,
@@ -314,20 +315,6 @@ function NumberInputRow(props: {
       },
     }),
   );
-}
-
-/** touched 层与快照的差异字段（值语义比较；undefined 与缺失等价）。 */
-export function diffTouched(
-  touched: Record<string, unknown>,
-  value: Record<string, unknown>,
-): string[] {
-  const out: string[] = [];
-  for (const key of Object.keys(touched)) {
-    if (JSON.stringify(touched[key] ?? null) !== JSON.stringify(value[key] ?? null)) {
-      out.push(key);
-    }
-  }
-  return out;
 }
 
 /**
@@ -1011,7 +998,7 @@ function apply(ctx: ClientCtx): void {
     // disposer 只 unregister()，**不 dispose 表单**：0.1.7 的 `configForms.get(entryId)`
     // 交回的是 provider 自己持有的共享表单（installed config-form.d.ts:138-142
     // "The entry's form, owned by this provider"），消费契约 `ConfigForm`
-    //（config-form-types.d.ts:36-74）里根本没有 dispose，消费者无从销毁；provider 在自己的
+    //（config-form-types.d.ts 的 ConfigForm）里根本没有 dispose，消费者无从销毁；provider 在自己的
     // fiber 上统一回收（installed lib/client.js:1289-1293）。slot collapse 会调用本 disposer
     // 并在再次声明时**重跑工厂**（installed dsh-client-ui-renderer/lib/types/client/
     // registry.d.ts:100 "Collapse disposes the effect and a later declaration runs it

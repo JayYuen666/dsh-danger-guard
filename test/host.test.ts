@@ -571,7 +571,7 @@ describe("danger-guard host 接线", () => {
   it("b9 接线：agent.session.id 隔离事实门记忆", () => {
     assert.ok(ctx.guardInstalled!.fn(sess("s1")) !== undefined, "s1 首拦");
     // 强校验：mock 的 session 无 snapshotEvents → 证据不可判定 → 走交互式确认，
-    // 不再"重试即放行"（这正是本次升级要消灭的软门禁行为）。
+    // 不再"重试即放行"。
     assert.equal(
       ctx.guardInstalled!.fn(sess("s1")),
       INDETERMINATE_MESSAGE,
@@ -819,7 +819,7 @@ describe("危险面闸门的入参防御（非字符串 / 非对象参数）", (
   });
 
   it("密钥面按**键形**认目标：只读工具翻凭据也拒，事实门仍只盯写类工具", () => {
-    // 本轮定的口径：工具名不构成豁免（名字会随 provider/版本漂移，猜名字等于静默失效），
+    // 口径：工具名不构成豁免（名字会随 provider/版本漂移，猜名字等于静默失效），
     // 只要参数里声明了路径键就进密钥面判定。
     assert.match(
       ctx.guardInstalled!.fn({
