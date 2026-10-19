@@ -1,6 +1,6 @@
 {
   "name": "@jayyuen66/dsh-danger-guard",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "dsh 插件：危险命令物理拦截（git --no-verify / rm -rf / curl|sh / dev server）+ 首次编辑事实强制门（gateguard 移植，ECC MIT）",
   "license": "MIT",
   "author": "JayYuen",

@@ -48,6 +48,11 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 - MIT, source at git+https://github.com/JayYuen666/dsh-danger-guard.git.
 - The fact gate and the command rules are **ported in mechanism** from ECC (MIT, © Affaan Mustafa) — [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) records the upstream files, what differs in this package, and the item-by-item comparison showing no upstream code, word list or message text was copied.
 
+
+### Shared version floor
+
+If your profile pins `@jayyuen66/dsh-plugin-shared` with a pnpm `overrides` entry, that pin must be at least the `@jayyuen66/dsh-plugin-shared` version this package declares. A lower pin installs a copy without the names this package imports at runtime, and the host then reports `N entries did not activate` with `does not provide an export named ...` when it boots -- the package installs fine and never loads, and no per-repo CI run can see it.
+
 ### Enabling it in dsh
 
 - Bundle form: `dsh.bundle.patch` in package.json points at `cordis.patch.yml`, and `dsh plugin add/remove` maintains the assembly layer.

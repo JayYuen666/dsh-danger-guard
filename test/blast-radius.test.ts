@@ -38,6 +38,8 @@ interface SpecView {
   onExpiry?: unknown;
   timeoutMs?: unknown;
   workdir?: unknown;
+  /** 预演必须带的沙箱策略（与 runGate 同口径，见 measureBlastOf 的注释）。 */
+  sandboxPolicy?: unknown;
 }
 const specOf = (calls: { spec: unknown }[], index = 0): SpecView => calls[index]?.spec ?? {};
 
@@ -175,7 +177,15 @@ describe("blast-radius：接进 ask 的每一处文案", () => {
 describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => {
   it("正常路径：按表里的命令跑，输出渲染好交回", async () => {
     const { shell, calls } = fakeShell(" M src/a.ts\n?? scratch.txt");
-    const reading = await measureBlastOf(shell, STATUS_COMMAND, "/w/proj", signalOf(), ZH);
+    const reading = await measureBlastOf({
+      shellRaw: shell,
+      policyRaw: undefined,
+      command: STATUS_COMMAND,
+      cwd: "/w/proj",
+      session: undefined,
+      signal: signalOf(),
+      messages: ZH,
+    });
     assert.match(reading ?? "", /scratch\.txt/u);
     assert.equal(calls.length, 1);
     assert.equal(calls[0]?.command, STATUS_COMMAND);
@@ -185,9 +195,88 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
     assert.equal(specOf(calls).workdir, "/w/proj");
   });
 
+  it("预演带上 sandboxPolicy：只读预演不许回落到部署级宽松策略", async () => {
+    // `git status` 会刷 `.git/index`，那是一次**写**。不传策略时执行器按部署默认走，
+    // 而部署默认可能是 `danger-full-access` —— 那这条"只读预演"就是唯一绕过沙箱写盘的路。
+    // 与 runGate 那条路同口径：两处读同一个服务，只一处传就是两条纪律。
+    const { shell, calls } = fakeShell(" M a.ts");
+    const policy = {
+      resolve: (request: { session?: unknown }) => ({ mode: "workspace-write", request }),
+    };
+    const session = { id: "s1" };
+    await measureBlastOf({
+      shellRaw: shell,
+      policyRaw: policy,
+      command: STATUS_COMMAND,
+      cwd: "/w",
+      session,
+      signal: signalOf(),
+      messages: ZH,
+    });
+    assert.deepEqual(specOf(calls).sandboxPolicy, {
+      mode: "workspace-write",
+      request: { session },
+    });
+    // 策略面读不到 ⇒ 不传这一位（预演照跑，失败即盲问，不额外造分支）。
+    const bare = fakeShell(" M a.ts");
+    await measureBlastOf({
+      shellRaw: bare.shell,
+      policyRaw: undefined,
+      command: STATUS_COMMAND,
+      cwd: "/w",
+      session,
+      signal: signalOf(),
+      messages: ZH,
+    });
+    assert.equal("sandboxPolicy" in specOf(bare.calls), false);
+    // session 缺席 ⇒ 给 resolve 空对象（官方读法：没 agent 就 resolve({})），不是「不调用」。
+    const noSession = fakeShell(" M a.ts");
+    const seen: unknown[] = [];
+    await measureBlastOf({
+      shellRaw: noSession.shell,
+      policyRaw: {
+        resolve: (request: unknown) => {
+          seen.push(request);
+          return { mode: "read-only" };
+        },
+      },
+      command: STATUS_COMMAND,
+      cwd: "/w",
+      session: undefined,
+      signal: signalOf(),
+      messages: ZH,
+    });
+    assert.deepEqual(seen, [{}], "session 缺席时 resolve 收到空对象");
+    // resolve 自己抛 ⇒ 同样不传这一位
+    const throwing = {
+      resolve: () => {
+        throw new Error("nope");
+      },
+    };
+    const bare2 = fakeShell(" M a.ts");
+    await measureBlastOf({
+      shellRaw: bare2.shell,
+      policyRaw: throwing,
+      command: STATUS_COMMAND,
+      cwd: "/w",
+      session,
+      signal: signalOf(),
+      messages: ZH,
+    });
+    assert.equal("sandboxPolicy" in specOf(bare2.calls), false);
+  });
+
   it("会话目录缺席 ⇒ 不替它猜一个 cwd（`workdir` 那一键整个不送）", async () => {
     const { shell, calls } = fakeShell(" M a.ts");
-    await measureBlastOf(shell, STATUS_COMMAND, undefined, signalOf(), ZH);
+    await measureBlastOf({
+      shellRaw: shell,
+      policyRaw: undefined,
+      command: STATUS_COMMAND,
+      cwd: undefined,
+      session: undefined,
+      signal: signalOf(),
+      messages: ZH,
+    });
     assert.equal("workdir" in specOf(calls), false);
   });
 
@@ -199,21 +288,73 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
           result: () => Promise.resolve({ exitCode: 0, timedOut: false, aborted: false }),
         }),
     };
-    assert.equal(await measureBlastOf(bare, STATUS_COMMAND, "/w", signalOf(), ZH), undefined);
+    assert.equal(
+      await measureBlastOf({
+        shellRaw: bare,
+        policyRaw: undefined,
+        command: STATUS_COMMAND,
+        cwd: "/w",
+        session: undefined,
+        signal: signalOf(),
+        messages: ZH,
+      }),
+      undefined,
+    );
   });
 
   it("执行器缺席 ⇒ 盲问（不静默换一条命令，也不抛）", async () => {
-    assert.equal(await measureBlastOf(undefined, STATUS_COMMAND, "/w", signalOf(), ZH), undefined);
-    assert.equal(await measureBlastOf({}, STATUS_COMMAND, "/w", signalOf(), ZH), undefined);
     assert.equal(
-      await measureBlastOf({ resolve: 1 }, STATUS_COMMAND, "/w", signalOf(), ZH),
+      await measureBlastOf({
+        shellRaw: undefined,
+        policyRaw: undefined,
+        command: STATUS_COMMAND,
+        cwd: "/w",
+        session: undefined,
+        signal: signalOf(),
+        messages: ZH,
+      }),
+      undefined,
+    );
+    assert.equal(
+      await measureBlastOf({
+        shellRaw: {},
+        policyRaw: undefined,
+        command: STATUS_COMMAND,
+        cwd: "/w",
+        session: undefined,
+        signal: signalOf(),
+        messages: ZH,
+      }),
+      undefined,
+    );
+    assert.equal(
+      await measureBlastOf({
+        shellRaw: { resolve: 1 },
+        policyRaw: undefined,
+        command: STATUS_COMMAND,
+        cwd: "/w",
+        session: undefined,
+        signal: signalOf(),
+        messages: ZH,
+      }),
       undefined,
     );
   });
 
   it("这一族没有预演命令 ⇒ 不跑（盲问）", async () => {
     const { shell, calls } = fakeShell("x");
-    assert.equal(await measureBlastOf(shell, undefined, "/w", signalOf(), ZH), undefined);
+    assert.equal(
+      await measureBlastOf({
+        shellRaw: shell,
+        policyRaw: undefined,
+        command: undefined,
+        cwd: "/w",
+        session: undefined,
+        signal: signalOf(),
+        messages: ZH,
+      }),
+      undefined,
+    );
     assert.equal(calls.length, 0, "没有命令就一枚子进程都不该起");
   });
 
@@ -231,12 +372,23 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
             }),
         }),
     };
-    assert.equal(await measureBlastOf(failing, STATUS_COMMAND, "/w", signalOf(), ZH), undefined);
+    assert.equal(
+      await measureBlastOf({
+        shellRaw: failing,
+        policyRaw: undefined,
+        command: STATUS_COMMAND,
+        cwd: "/w",
+        session: undefined,
+        signal: signalOf(),
+        messages: ZH,
+      }),
+      undefined,
+    );
 
     const killedReadings = await Promise.all(
       (["timedOut", "aborted"] as const).map((flag) =>
-        measureBlastOf(
-          {
+        measureBlastOf({
+          shellRaw: {
             resolve: (request: Record<string, unknown>) => request,
             execute: () =>
               Promise.resolve({
@@ -249,11 +401,13 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
                   }),
               }),
           },
-          STATUS_COMMAND,
-          "/w",
-          signalOf(),
-          ZH,
-        ),
+          policyRaw: undefined,
+          command: STATUS_COMMAND,
+          cwd: "/w",
+          session: undefined,
+          signal: signalOf(),
+          messages: ZH,
+        }),
       ),
     );
     assert.deepEqual(killedReadings, [undefined, undefined], "超时与取消都不是可用的结论");
@@ -268,16 +422,18 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
     ];
     const badReadings = await Promise.all(
       badHandles.map((handle) =>
-        measureBlastOf(
-          {
+        measureBlastOf({
+          shellRaw: {
             resolve: (request: Record<string, unknown>) => request,
             execute: () => Promise.resolve(handle),
           },
-          STATUS_COMMAND,
-          "/w",
-          signalOf(),
-          ZH,
-        ),
+          policyRaw: undefined,
+          command: STATUS_COMMAND,
+          cwd: "/w",
+          session: undefined,
+          signal: signalOf(),
+          messages: ZH,
+        }),
       ),
     );
     // 每一项都必须是"没采纳"：`undefined` 而不是半份结论。
@@ -289,7 +445,18 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
       resolve: (request: Record<string, unknown>) => request,
       execute: () => Promise.resolve({ result: () => Promise.resolve(undefined) }),
     };
-    assert.equal(await measureBlastOf(bare, STATUS_COMMAND, "/w", signalOf(), ZH), undefined);
+    assert.equal(
+      await measureBlastOf({
+        shellRaw: bare,
+        policyRaw: undefined,
+        command: STATUS_COMMAND,
+        cwd: "/w",
+        session: undefined,
+        signal: signalOf(),
+        messages: ZH,
+      }),
+      undefined,
+    );
   });
 
   it("`resolve` 或 `execute` 抛错 ⇒ 盲问（预演失败不是告警，是『这次量不出来』）", async () => {
@@ -299,6 +466,17 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
       },
       execute: () => Promise.reject(new Error("spawn failed")),
     };
-    assert.equal(await measureBlastOf(throwing, STATUS_COMMAND, "/w", signalOf(), ZH), undefined);
+    assert.equal(
+      await measureBlastOf({
+        shellRaw: throwing,
+        policyRaw: undefined,
+        command: STATUS_COMMAND,
+        cwd: "/w",
+        session: undefined,
+        signal: signalOf(),
+        messages: ZH,
+      }),
+      undefined,
+    );
   });
 });

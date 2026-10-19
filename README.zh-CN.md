@@ -53,6 +53,11 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
   - `host.js` 里 `from "zod"` 与 `from "@deepseek-ai/dsh-brand"` 两枚裸说明符都由 `test/build-host.test.ts` 钉着「说明符在、官方函数体不在」；设置半不导入 brand，所以 `settings.js` 里没有那枚说明符（同一条测试反向钉）。产物**不压缩**也正是为此：压缩会把裸说明符字符串一并去掉，那两条断言就会永远变绿，内联副本得以悄悄发出去。
 - 事实强制门与命令规则是**机制层面**移植自 ECC（MIT，© Affaan Mustafa）——[`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) 记录了上游文件、本包做了哪些改动，以及逐项比对的结果（未搬运上游的代码、词表或文案）。
 
+
+### shared 的版本下限
+
+如果你的 profile 用 pnpm `overrides` 把 `@jayyuen66/dsh-plugin-shared` 钉在某个版本，那个钉住的值必须不低于本包声明的 `@jayyuen66/dsh-plugin-shared` 版本。钉得更低就会装到一份缺少本包运行期所导入的名字的产物，宿主起来时报 `N entries did not activate` 加 `does not provide an export named ...`——包装得上、永远不生效，而各仓单仓 CI 看不见这一类。
+
 ### 在 dsh 里启用
 
 - 组合包（bundle）形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，由 `dsh plugin add/remove` 维护装配层。

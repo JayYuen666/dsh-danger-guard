@@ -523,12 +523,19 @@ interface LessonLoopReporter {
 }
 
 /** 非法/超长的扩展密钥模式：**加载期就校验**（判定链走的是同一个谓词），并且点名报出来——
- *  静默跳过等于让用户以为这条保护已经生效。按模式字面去重，否则每次编辑判定都刷同一条日志。 */
-const rejectedPatternsLogged = new Set<string>();
+ *  静默跳过等于让用户以为这条保护已经生效。按模式字面去重，否则每次编辑判定都刷同一条日志。
+ *
+ *  去重表**必须有界**：模式串来自用户配置，长驻进程里反复改设置会持续往里加，而它只用于
+ *  「这条已经报过别再刷」，丢一条旧记录最坏的后果是多打一行日志，不是漏掉一条保护。
+ *  容量按一次设置的合理规模取，淘汰交给 `lruPut`（与其它台账同一条容量口径）。 */
+const rejectedPatternsLogged = new Map<string, true>();
+
+/** 去重表的容量：一次设置里的无效模式数远小于它；超出的旧记录被淘汰只意味着日志可能重复一次。 */
+const REJECTED_PATTERNS_CAP = 64;
 function reportRejectedPatterns(patterns: readonly string[]): void {
   for (const pattern of partitionSecretPatterns(patterns).rejected) {
     if (!rejectedPatternsLogged.has(pattern)) {
-      rejectedPatternsLogged.add(pattern);
+      lruPut(rejectedPatternsLogged, pattern, true, REJECTED_PATTERNS_CAP);
       console.warn(`[danger-guard] extraSecretPatterns 无效，本条未生效: ${pattern}`);
     }
   }
@@ -3088,13 +3095,15 @@ function confirmFactory(
     const blast =
       ask === undefined
         ? undefined
-        : await measureBlastOf(
-            svc.get?.("shell"),
-            BLAST_COMMANDS[ask.key],
-            effectiveCwdOf(svc, exec.agent?.session),
-            preflightSignalOf(exec.signal),
-            table,
-          );
+        : await measureBlastOf({
+            shellRaw: svc.get?.("shell"),
+            policyRaw: svc.get?.("sandboxPolicy"),
+            command: BLAST_COMMANDS[ask.key],
+            cwd: effectiveCwdOf(svc, exec.agent?.session),
+            session: exec.agent?.session,
+            signal: preflightSignalOf(exec.signal),
+            messages: table,
+          });
     // 翻成官方那一臂：`lib/confirm.ts` 交的是宿主无关形态（它不 import 官方决定类型）。
     return ask === undefined ? undefined : { kind: "ask", ...withBlast(ask, blast) };
   };

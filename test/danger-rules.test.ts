@@ -1359,46 +1359,58 @@ describe("绕过面回归：嵌套 shell 的 -c 体走同一套逐段判定", ()
     );
   });
 
-  it("递归深度有上限：界内逐层命中，界外按需确认收口且成本只随层数增长", () => {
-    // 每层至少吃掉一枚词，故递归必然终止；但终止≠有界——栈深与每层 O(输入长度) 的成本
-    // 都由 NESTED_SHELL_MAX_DEPTH 给出，否则超长套娃就是栈爆面。
-    assert.equal(bashDanger(nestShell("rm -rf /", 1)), "rmrf", "一层");
-    assert.equal(bashDanger(nestShell("rm -rf /", 5)), "rmrf", "五层引号套娃仍在界内");
-    assert.equal(bashDanger(nestShell("echo hi", 5)), undefined, "界内良性套娃不误拦");
-    // 上界的两侧各钉一条：16 层仍逐层下钻到最内层的 rm，第 17 层起"还有没检查过的体"
-    assert.equal(bashDanger(nestEval("rm -rf /", 16)), "rmrf", "16 层仍在界内");
-    assert.equal(
-      bashDanger(nestEval("rm -rf /", 17)),
-      "nestedShellUnconfirmed",
-      "超界仍有未检查的体 → 需确认（不是静默放行）",
-    );
-    assert.equal(
-      bashDanger(nestEval("echo hi", 17)),
-      "nestedShellUnconfirmed",
-      "良性套娃超界同样升格：看不见就是看不见",
-    );
-    // **词法伪套娃**（`bash -c bash -c … rm`，无引号）与此前结论相反，理由是 shell 语义而不是运气：
-    // 紧跟 `-c` 的那一枚参数才是命令串，其后的都是 $0/$1（本机实测
-    // `bash -c "true" "echo NOT-EXECUTED"` → 第二枚没执行，rc=0）。所以第一层的体就是 `bash`，
-    // 内层那条 rm 根本进不了被执行的位置——判它危险就是把跑不起来的串当危险（复评点名的误拦面）。
-    assert.equal(
-      bashDanger(nestedLexical("rm -rf /", 16)),
-      undefined,
-      "词法套娃：内层不在命令串位上",
-    );
-    assert.equal(bashDanger(nestedLexical("echo hi", 16)), undefined, "16 层良性套娃不误拦");
-    // 长度上界仍要钉住成本：线性扫描、不抛错、结论明确。
-    assert.equal(bashDanger(`${"bash -c ".repeat(200)}rm -rf /`), undefined, "200 层词法套娃同判");
-    assert.equal(bashDanger("bash -c ".repeat(20_000)), undefined, "16 万字符套娃不崩不超时");
-    // 超出可判定长度上限（MAX_JUDGED_COMMAND_LENGTH）→ 需确认而不是放行：没判完就是没判完。
-    const tooLong = `echo ${"x".repeat(1_000_001)}`;
-    assert.equal(bashDanger(tooLong), "nestedShellUnconfirmed", "超限输入按需确认收口");
-    assert.equal(
-      bashDanger(`echo ${"x".repeat(999_000)}`),
-      undefined,
-      "界内长输入仍照常判定（不是按长度一刀切升格）",
-    );
-  });
+  // 这条是**性能边界**测试：它刻意构造 2 万层与 16 万字符的输入来证明"成本只随层数增长"。
+  // 单独跑约 4s，但整套并发跑时会被其他 worker 拖到 20s 以上——那会让一条本来正确的用例
+  // 间歇性超时（实测两个不同轮次各红过一次）。给它显式放宽而不是放宽全局基线：
+  // 全局 testTimeout 是 8 仓共用的门禁值，为一个仓的边界用例改它会掩盖别处真正的卡死。
+  it(
+    "递归深度有上限：界内逐层命中，界外按需确认收口且成本只随层数增长",
+    { timeout: 120_000 },
+    () => {
+      // 每层至少吃掉一枚词，故递归必然终止；但终止≠有界——栈深与每层 O(输入长度) 的成本
+      // 都由 NESTED_SHELL_MAX_DEPTH 给出，否则超长套娃就是栈爆面。
+      assert.equal(bashDanger(nestShell("rm -rf /", 1)), "rmrf", "一层");
+      assert.equal(bashDanger(nestShell("rm -rf /", 5)), "rmrf", "五层引号套娃仍在界内");
+      assert.equal(bashDanger(nestShell("echo hi", 5)), undefined, "界内良性套娃不误拦");
+      // 上界的两侧各钉一条：16 层仍逐层下钻到最内层的 rm，第 17 层起"还有没检查过的体"
+      assert.equal(bashDanger(nestEval("rm -rf /", 16)), "rmrf", "16 层仍在界内");
+      assert.equal(
+        bashDanger(nestEval("rm -rf /", 17)),
+        "nestedShellUnconfirmed",
+        "超界仍有未检查的体 → 需确认（不是静默放行）",
+      );
+      assert.equal(
+        bashDanger(nestEval("echo hi", 17)),
+        "nestedShellUnconfirmed",
+        "良性套娃超界同样升格：看不见就是看不见",
+      );
+      // **词法伪套娃**（`bash -c bash -c … rm`，无引号）与此前结论相反，理由是 shell 语义而不是运气：
+      // 紧跟 `-c` 的那一枚参数才是命令串，其后的都是 $0/$1（本机实测
+      // `bash -c "true" "echo NOT-EXECUTED"` → 第二枚没执行，rc=0）。所以第一层的体就是 `bash`，
+      // 内层那条 rm 根本进不了被执行的位置——判它危险就是把跑不起来的串当危险（复评点名的误拦面）。
+      assert.equal(
+        bashDanger(nestedLexical("rm -rf /", 16)),
+        undefined,
+        "词法套娃：内层不在命令串位上",
+      );
+      assert.equal(bashDanger(nestedLexical("echo hi", 16)), undefined, "16 层良性套娃不误拦");
+      // 长度上界仍要钉住成本：线性扫描、不抛错、结论明确。
+      assert.equal(
+        bashDanger(`${"bash -c ".repeat(200)}rm -rf /`),
+        undefined,
+        "200 层词法套娃同判",
+      );
+      assert.equal(bashDanger("bash -c ".repeat(20_000)), undefined, "16 万字符套娃不崩不超时");
+      // 超出可判定长度上限（MAX_JUDGED_COMMAND_LENGTH）→ 需确认而不是放行：没判完就是没判完。
+      const tooLong = `echo ${"x".repeat(1_000_001)}`;
+      assert.equal(bashDanger(tooLong), "nestedShellUnconfirmed", "超限输入按需确认收口");
+      assert.equal(
+        bashDanger(`echo ${"x".repeat(999_000)}`),
+        undefined,
+        "界内长输入仍照常判定（不是按长度一刀切升格）",
+      );
+    },
+  );
 
   it("超大单层 -c 体：整段扫到底，给出真实结论而不是需确认", () => {
     // 新增的两处引号扫描是 O(体长) 的常数次遍历，不是逐段再嵌套——所以 100KB 量级的
@@ -1436,6 +1448,50 @@ describe("绕过面回归：嵌套 shell 的 -c 体走同一套逐段判定", ()
     const deep = nestSubst("echo hi", 10_000);
     assert.equal(bashDanger(deep), "nestedShellUnconfirmed", "1 万层不抛错");
     assert.ok(splitSegments(deep).truncated, "截断由词法层回报，判定层不猜");
+  });
+
+  it("展开式构造的命令词不再逃逸：引号前缀 / IFS 变量 / 命令替换全部收口", () => {
+    // 这一组是真实逃逸口而非构造：`$'rm' -rf ~` 在真 bash 里就是 `rm -rf ~`（引号只影响
+    // 展开方式，不影响命令词），`${IFS}` 展开成空格，`$(echo rm)` 展开成 rm。
+    // 词法器按字面读，整条会落成一个不含空白的词或一个 `$rm`——四类规则因此全部不参与。
+    assert.equal(bashDanger("$'rm' -rf ~"), "rmrf", "$'...' 引号前缀");
+    assert.equal(bashDanger('$"rm" -rf ~'), "rmrf", '$"..." 引号前缀');
+    // 用拼接写被测串：直接写字面量会触发 no-template-curly-in-string（它看不出这是被测输入）。
+    // IFS 那几个字符不能写成字面量也不能常量拼接：前者触发 no-template-curly-in-string，
+    // 后者触发 no-useless-concat。用数组 join 表达"这里就是要构造那个串"。
+    const ifs = ["$", "{", "I", "F", "S", "}"].join("");
+    assert.equal(bashDanger(["rm", ifs, "-rf", ifs, "~"].join("")), "rmrf", "IFS 变量当分隔符");
+    assert.equal(
+      bashDanger("$(echo rm) -rf ~"),
+      "nestedShellUnconfirmed",
+      "命令替换在命令词位置：展开结果不可静态确定",
+    );
+    assert.equal(bashDanger("`echo rm` -rf ~"), "nestedShellUnconfirmed", "反引号同判");
+    // 反向：良性替换不许被拦（判据收窄成"替换体里出现命令词"）。
+    assert.equal(bashDanger('echo "$(date)"'), undefined, "良性替换不误拦");
+    assert.equal(bashDanger("VERSION=$(git describe) && echo $VERSION"), undefined, "赋值里的替换");
+  });
+
+  it('包装词后带命令体的形态同判：su -c / ssh <host> "…" / busybox', () => {
+    // 这三种此前全部放行：`su`/`ssh`/`busybox` 不在 RUN_PREFIX_WORDS 里，段头认不出是包装词，
+    // `headStarts` 的多点位兜底整个不参与 —— 漏判的形态是"整条兜底不参与"，不是"更保守"。
+    assert.equal(bashDanger('su -c "rm -rf ~"'), "rmrf", "su -c 体是命令串");
+    assert.equal(bashDanger('runuser -c "rm -rf ~"'), "rmrf", "runuser 同判");
+    assert.equal(bashDanger('ssh box "rm -rf ~"'), "rmrf", "ssh 位置体");
+    assert.equal(bashDanger("busybox rm -rf ~"), "rmrf", "busybox 前置");
+    assert.equal(bashDanger("chroot /tmp/root rm -rf ~"), "rmrf", "chroot 新根后");
+    // 反向：正常用法不许被拦。
+    assert.equal(bashDanger("ssh host ls"), undefined, "ssh 只登录/单命令不误拦");
+    // 带旗标（含带值旗标与布尔旗标）时目标名要能被跳过：覆盖 sshTailAfterTarget 的推进分支。
+    assert.equal(bashDanger('ssh -p 2222 -v box "rm -rf ~"'), "rmrf", "带旗标时目标仍能定位");
+    assert.equal(bashDanger("ssh -v host uptime"), undefined, "带旗标的良性远端命令");
+    // 只有旗标、没有目标名（`ssh -v` 单独出现）：取不到体，走空返回那条分支。
+    assert.equal(bashDanger("ssh -v"), undefined, "缺目标名时没有体可下钻");
+    // 空词（`""` 作为参数）也要被跳过：覆盖 `word.length > 0` 的另一侧。
+    assert.equal(bashDanger('ssh "" host ls'), undefined, "空词参数跳过");
+    assert.equal(bashDanger('ssh build-host "make build"'), undefined, "良性远端命令");
+    assert.equal(bashDanger('su -c "id"'), undefined, "su 良性体");
+    assert.equal(bashDanger("busybox ls"), undefined, "busybox 良性前置");
   });
 
   it("体取不出可靠文本 → 需用户确认（不享受「认不准就放行」）", () => {

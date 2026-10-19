@@ -235,6 +235,29 @@ const RUN_PREFIX_WORDS = new Set([
   "chrt",
   "xargs",
   "parallel",
+  // 下面这组是「段头是包装词、实部在其后」的其它形态。漏一个就是一条现成的逃逸口：
+  // 它们都接受「后面跟一条命令」的位置，而 `headStarts` 的多点位扫描只有在段头被认出
+  // 是包装词时才会启动——认不出时整条兜底**不参与**，`su -c "rm -rf ~"` 就直接放行。
+  "su",
+  "runuser",
+  "ssh",
+  "busybox",
+  "chroot",
+  "unshare",
+  "nsenter",
+  "ionice",
+  "flock",
+  "strace",
+  "ltrace",
+  "gdb",
+  "script",
+  "systemd-run",
+  "firejail",
+  "bwrap",
+  "proot",
+  "torsocks",
+  "proxychains",
+  "proxychains4",
 ]);
 
 /** 吃旗标的包装词 → 其**带独立取值**的旗标（跳名不跳值会让取值挡在命令实部前 →
@@ -247,6 +270,92 @@ const RUN_PREFIX_WORDS = new Set([
  *  `wrapperHeadStarts` 的多点位扫描，不是这张表。 */
 const PREFIX_VALUE_FLAGS: Readonly<Record<string, readonly string[]>> = {
   env: ["-u", "--unset", "--unset-var"],
+  // `su -c "<命令>"` 的体是一枚取值：不认它，`su -c "rm -rf ~"` 里的 rm 就落到头外。
+  su: [
+    "-c",
+    "--command",
+    "-s",
+    "--shell",
+    "-g",
+    "--group",
+    "-G",
+    "--supp-group",
+    "-w",
+    "--whitelist-environment",
+  ],
+  runuser: [
+    "-c",
+    "--command",
+    "-s",
+    "--shell",
+    "-g",
+    "--group",
+    "-G",
+    "--supp-group",
+    "-u",
+    "--user",
+  ],
+  // `ssh -p 22 host "<命令>"`：旗标带值，host 是位置取值，其后才是命令体。
+  ssh: [
+    "-p",
+    "-i",
+    "-o",
+    "-l",
+    "-F",
+    "-J",
+    "-L",
+    "-R",
+    "-D",
+    "-W",
+    "-b",
+    "-c",
+    "-e",
+    "-m",
+    "-O",
+    "-Q",
+    "-S",
+    "-w",
+  ],
+  ionice: ["-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid", "-u", "--uid"],
+  flock: ["-w", "--timeout", "-E", "--conflict-exit-code", "-c", "--command"],
+  chroot: ["--userspec", "--groups"],
+  nsenter: [
+    "-t",
+    "--target",
+    "-S",
+    "--setuid",
+    "-G",
+    "--setgid",
+    "-w",
+    "--wd",
+    "-r",
+    "--root",
+    "-F",
+    "--no-fork",
+  ],
+  "systemd-run": [
+    "-u",
+    "--unit",
+    "-p",
+    "--property",
+    "-E",
+    "--setenv",
+    "--uid",
+    "--gid",
+    "--working-directory",
+  ],
+  script: [
+    "-c",
+    "--command",
+    "-O",
+    "--output-limit",
+    "-I",
+    "--log-in",
+    "-B",
+    "--log-io",
+    "-T",
+    "--log-timing",
+  ],
   nice: ["-n", "--adjustment"],
   stdbuf: ["-i", "-o", "-e"],
   sudo: [
@@ -279,7 +388,22 @@ const PREFIX_VALUE_FLAGS: Readonly<Record<string, readonly string[]>> = {
 /** 旗标之外还吃一个**位置**取值的包装词（`nice 10 …` / `timeout 5 …` / `taskset 0-3 …`）。
  *  chrt 不在此表：它的策略旗标是布尔且可连用、命令前必有一枚优先级词，走 stripRunPrefix
  *  里的专用分支。 */
-const PREFIX_POSITIONAL_VALUE = new Set(["nice", "timeout", "taskset"]);
+const PREFIX_POSITIONAL_VALUE = new Set([
+  "nice",
+  "timeout",
+  "taskset",
+  // `su <user> -c "…"` / `ssh <host> "…"` / `runuser <user> -c "…"`：旗标之后（或之前）
+  // 的那一枚是目标名，不是命令词。不吃它，`ssh box "rm -rf ~"` 里的 box 会被当成命令头。
+  "su",
+  "runuser",
+  "ssh",
+  // `chroot <newroot> <命令>`：新根是位置取值。
+  "chroot",
+  // `flock <file> <命令>`：锁文件是位置取值。
+  "flock",
+  // `nsenter` 的目标 pid 可用位置形态给。
+  "nsenter",
+]);
 
 /** 时长词：`5` / `10s` / `5m` / `1h` / `2d`，以及 GNU timeout 承认的**小数与 MM:SS**
  *  形态（`timeout --signal TERM 1.5 npm run dev` 实测漏拦——只认整数就把 `1.5` 留成了命令头）。
@@ -304,6 +428,19 @@ const isPlainEnvAssign = (word: string): boolean =>
  *  剥出来的结果与改动前逐字相同。
  *  引号也在这一步之外：词值已由 lexTokens 去过引号，`"git"` 到这里就是 `git`（实测
  *  `"git" --version` 正常执行，故引号包裹的命令头不是逃逸口）。 */
+/**
+ * 把 `$'rm'` / `$"rm"` 这类**引号前缀**归一成裸命令词。
+ *
+ * 为什么必须有这一层：`$'...'` / `$"..."` 在 POSIX shell 里就是"按字面取这串字符"，
+ * 与带引号的命令词（`"rm" -rf ~`）完全等价，实测两者在真 bash 里都执行 rm。
+ * 而词法器把引号剥掉后把 `$` 留在词首，于是 `$'rm'` 读成 `$rm`，rm 词表认不出，
+ * 四类规则整条不参与——这是一个现成的逃逸口，不是理论构造。
+ *
+ * @param word - 剥过路径的 bin 名
+ * @returns 去掉引号前缀后的词
+ */
+const stripQuotePrefix = (word: string): string => word.replace(/^\$/u, "");
+
 const binNameOf = (word: string): string => word.replace(/^.*[\\/]/u, "");
 
 /** 一个词的两种读法各自剥出的 bin 名。
@@ -313,8 +450,8 @@ const binNameOf = (word: string): string => word.replace(/^.*[\\/]/u, "");
  *  `isWindowsHost` 那条"由平台/方言说话而不是猜字形"是同一条纪律的另一半：
  *  这里猜错的方向只会多拦不会少拦。 */
 const binForms = (token: ShellToken): readonly [string, string] => [
-  binNameOf(token.value),
-  binNameOf(token.raw),
+  stripQuotePrefix(binNameOf(token.value)),
+  stripQuotePrefix(binNameOf(token.raw)),
 ];
 
 /** 该词是否命中命令词表（大小写敏感的 POSIX 词，如 `git`/`npm`）。 */
@@ -2285,6 +2422,11 @@ function devServer(tokens: readonly ShellToken[], ctx: DangerContext): BashVerdi
  *  这三家的**旗标**方言不同是已知近似，不为它猜方言）。 */
 const SHELL_BIN_NAMES = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"]);
 
+/** 自己也带「`-c` 后跟一整条命令串」语义的包装词：它们的体与 shell 的 `-c` 同判。
+ *  `ssh` 的体可以不带 `-c`（`ssh host "cmd"` 直接给位置串），那一支由
+ *  `sshPositionalBody` 单独取，见下。 */
+const BODY_CARRYING_WRAPPERS = new Set(["su", "runuser", "ssh"]);
+
 /** shell 的 `-c`，含与短选项的合写（`-lc` / `-ic` / `-xc`）：其后第一词是命令串。 */
 const SHELL_C_FLAG = /^-[A-Za-z]*c[A-Za-z]*$/u;
 
@@ -2377,12 +2519,108 @@ function codeInterpreterHead(words: readonly string[]): boolean {
   return flags !== undefined && codeFlagIndex(words, (word) => flags.includes(word)) !== -1;
 }
 
+/** 命令串形态的判据：含空白或 shell 元字符（`;` `|` `$(` 反引号 `&&`）才像"一整条命令"，
+ *  单纯一个词（`ls`/`uptime`）按位置参数对待、不下钻。 */
+const COMMAND_STRING_RE = /[\s;|&$`()<>]/u;
+
+/**
+ * `ssh <目标> "<命令串>"` 的取体：跳过选项（含带值的那几枚）与目标名，剩下的**最后一枚**
+ * 若像命令串就取出来。取不到给 undefined（`ssh host` 只是登录，没有体）。
+ *
+ * @param words - 该段的词
+ * @returns 待下钻的命令串，或 undefined
+ */
+/**
+ * `ssh` 段里**目标名之后**的那些词（已滤掉空词）。
+ *
+ * @param words - 该段的词
+ * @returns 目标之后的词；没有目标时为空数组
+ */
+function sshTailAfterTarget(words: readonly string[]): readonly string[] {
+  let index = 1;
+  while (index < words.length) {
+    // `?? ""` 兜底不可达：while 条件已保证下标在界内，`words` 也没有稀疏位。
+    /* v8 ignore next */
+    const word = words[index] ?? "";
+    if (word.length > 0 && !word.startsWith("-")) {
+      return words.slice(index + 1).filter((item) => item.length > 0);
+    }
+    index += 1;
+  }
+  return [];
+}
+
+function sshPositionalBody(words: readonly string[]): string | undefined {
+  const afterTarget = sshTailAfterTarget(words);
+  const last = afterTarget.at(-1);
+  const usable = last !== undefined && COMMAND_STRING_RE.test(last);
+  return usable ? last : undefined;
+}
+
+/** 命令词位置是命令替换的形状：段首就是 `$(` 或反引号。 */
+const SUBSTITUTION_AT_HEAD_RE = /^\s*(?:\$\((?<dollar>[^()]*)\)|`(?<backtick>[^`]*)`)/u;
+
+/**
+ * 命令词位置被命令替换占据、且替换体里带危险命令词形。
+ *
+ * `$(echo rm) -rf ~` 与 `` `echo rm` -rf ~ `` 在真 bash 里就是 `rm -rf ~`；而
+ * `VERSION=$(git describe) && echo $VERSION`、`echo "$(date)"` 这类良性替换不该被拦。
+ * 判据因此收窄成：**段首**是替换 + **替换体里出现 rm 词表**，两件同时成立才升格。
+ *
+ * @param command - 已归一的命令串
+ * @returns 需确认的结论，或 undefined
+ */
+function substitutionMentionsDanger(command: string): boolean {
+  // 同一道廉价前置：绝大多数命令里没有 `$(`/反引号，正则的 exec 在 2 万字符上仍是 O(n)，
+  // 而这一层会被每一层递归调用一次。
+  if (!command.includes("$(") && !command.includes("`")) {
+    return false;
+  }
+  const match = SUBSTITUTION_AT_HEAD_RE.exec(command);
+  const groups = match?.groups;
+  const inner = groups?.["dollar"] ?? groups?.["backtick"] ?? "";
+  // 看**替换体里的任意词**，不只看首词：`$(echo rm)` 的体是 `echo rm`，rm 是 echo 的参数，
+  // 而 echo 的输出正是外层要执行的命令词。只判首词会漏掉这个最常见写法。
+  const mentionsRm = lexTokens(inner).some((token) =>
+    RM_BIN_WORDS.has(binNameOf(token.value).toLowerCase()),
+  );
+  return mentionsRm;
+}
+
+/** `${IFS}` 的展开值。POSIX 定义是「空格 / 制表符 / 换行」三个字符，这里按空白归一。 */
+const IFS_EXPANSION_RE = /\$\{IFS\}|\$IFS(?![A-Za-z0-9_])/gu;
+
+/**
+ * 把 `${IFS}` / `$IFS` 归一成空格。
+ *
+ * 这是**按真 shell 的读法**归一，不是放宽：IFS 就是字段分隔符，展开后与写一个空格等价。
+ * 不归一的话该形会把 `rm` 与 `-rf` 粘成一个词，判定域里根本看不到 rm。
+ *
+ * @param command - 模型给的命令串
+ * @returns 归一后的命令串
+ */
+function normalizeIfs(command: string): string {
+  // 先做一次廉价的存在性判定再替换：`String#replace` 在 2 万字符 × 2 万层的输入上是
+  // 每层一次全串扫描，实测把一条 20000 层的词法套娃从个位数毫秒推到 2.6 秒（测试因此超时）。
+  // 判据只看"有没有那个子串"，与替换用的是同一个前缀，所以这里不会漏掉该归一的情形。
+  return command.includes("IFS") ? command.replace(IFS_EXPANSION_RE, " ") : command;
+}
+
 /** shell 系段头的 `-c` 体：只取紧跟该旗标的**那一枚**参数；段头不是 shell 则 undefined。 */
 function codeBodyOf(words: readonly string[], bin: string): string | undefined {
   let body: string | undefined;
-  if (SHELL_BIN_NAMES.has(bin)) {
+  // `su -c` / `runuser -c` / `ssh <host> -c?` 的体与 shell 的 `-c` 同一语义：**一整条命令串**，
+  // 由对端 shell 执行。不在这里取出来下钻，`su -c "rm -rf ~"` 就整条落在判定域外
+  // （段头是 su 时 `headStarts` 的多点位扫描只看"像命令的词"，而体是一个带空格的字符串）。
+  if (SHELL_BIN_NAMES.has(bin) || BODY_CARRYING_WRAPPERS.has(bin)) {
     const index = codeFlagIndex(words, (word) => SHELL_C_FLAG.test(word));
     body = index === -1 ? undefined : words[index + 1];
+  }
+  // `ssh host "cmd"` 不带 `-c`：命令串是最后一个位置参数（`ssh host` 之后整体交给对端
+  // shell）。只认"目标之后恰好还剩一枚、且它含空白或 shell 元字符"的形态——把任意位置词
+  // 都当命令体会把 `ssh host ls` 里的 `ls` 误判成一条要下钻的命令（下钻无害但会白判）。
+  if (body === undefined && bin === "ssh") {
+    body = sshPositionalBody(words);
   }
   return body;
 }
@@ -2551,6 +2789,13 @@ function segmentDenial(
   // 直接 return，`ask` 档一进来就会把体内那条更严重的判据整个跳过。
   let best = rules;
   const words = tokens.map((token) => token.value);
+  // 执行面按**整段**判一次：`su -c "<命令串>"` 的段头是 `su`，体是一枚带空格的参数。
+  // 若只按候选起点取 `words.slice(start)`，起点落到 `-c` 或体上时段头就不再是包装词，
+  // 取体那一步整个失效 —— 这正是 `su -c "rm -rf ~"` 此前放行的原因。
+  best = preferSevere(best, faceDenialOf(segText, words, drill));
+  if (settled(best)) {
+    return best;
+  }
   for (const start of starts) {
     // "已确认危险"排在前：看不见才升格为需确认，看得见危险就用危险那条。
     const face = faceDenialOf(segText, words.slice(start), drill);
@@ -2591,7 +2836,16 @@ function commandDanger(
   let result = pipeToShell(structureView(command));
   // 方言在上下文里收窄一次，随嵌套 `-c` 体一路继承：换一层 shell **不换**方言的读法
   // （`pwsh` 调用点里的 `bash -c "rm -rf C:/Windows"` 内层按 Windows 轨道判 ⇒ 拦）。
-  const segmentation = splitSegments(command);
+  // `rm${IFS}-rf${IFS}~`：`${IFS}` 在真 shell 里展开成空格/制表符/换行，于是它既不是命令词
+  // 的一部分、也不是可忽略的变量——用它拼出来的命令**真的会执行**（实测该形在 bash 下删得掉
+  // 家目录）。词法器按字面读，整条会落成一个不含空白的词，四类规则因此全部不参与。
+  // 归一成空格后再切词：判据只看"展开后长什么样"，这正是真 shell 的读法。
+  const normalized = normalizeIfs(command);
+  // 命令词位置是**命令替换**时（`$(echo rm) -rf ~` / `` `echo rm` -rf ~ ``），真 shell 会先
+  // 展开再执行，而展开结果取决于运行时。这一形只在两件事同时成立时才升格：① 替换出现在
+  // 命令词位置（段首），② 替换体里出现了危险命令的词形。只看①会把 `echo "$(date)"` 这类
+  // 良性替换一并拦下——那是误伤，而本仓的取舍是「认不准就放行」优先于误拦。
+  const segmentation = splitSegments(normalized);
   for (const seg of segmentation.texts) {
     // 只有拿到 `deny` 档才算"结论已定"：`ask` 档只是备选，扫描要继续（见 preferSevere）。
     if (settled(result)) {
@@ -2608,6 +2862,12 @@ function commandDanger(
           : commandDanger(body, windowsFace ? withWindowsFace(ctx) : ctx, depth + 1),
       ),
     );
+  }
+  // 命令词位置是命令替换、且上面的常规判定没给出结论时，才升格为需确认：
+  // `$(rm -rf /)` 的体本身就能判出 rmrf（那条更贴近模型写的东西，优先给），
+  // 而 `$(echo rm) -rf ~` 这种"展开后才成命令词"的形状常规判定看不见，只能升格。
+  if (!settled(result) && substitutionMentionsDanger(normalized)) {
+    result = preferSevere(result, { key: "nestedShellUnconfirmed" });
   }
   if (segmentation.truncated) {
     // 执行面区（`$( )`/反引号）套得比界内更深 ⇒ 还有一批体没扫到。与 `-c` 超界同一条纪律：

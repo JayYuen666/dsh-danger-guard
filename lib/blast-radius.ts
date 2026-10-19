@@ -143,6 +143,56 @@ function blastTextOf(
   return rendered;
 }
 
+/** `ctx.sandboxPolicy` 的读取面：与 `lib/sandbox-scope.ts` 同一形状。 */
+interface PolicyFace {
+  resolve: (request?: { session?: unknown }) => unknown;
+}
+
+const isPolicyFace = (value: unknown): value is PolicyFace =>
+  typeof value === "object" &&
+  value !== null &&
+  typeof (value as { resolve?: unknown }).resolve === "function";
+
+/**
+ * 预演要带的沙箱策略（读不到就给空对象，不传这一位）。
+ *
+ * 形状照官方 `tool-bash` 的读法：`resolve(exec.agent === undefined ? {} : { session })`。
+ *
+ * @param policyRaw - `ctx.get("sandboxPolicy")` 的原始值
+ * @param session - 会话（逐会话的 sandbox 覆盖按它解析）；缺席用部署默认
+ * @returns 可展开进 `resolve` 入参的对象
+ */
+function sandboxRequestOf(policyRaw: unknown, session: unknown): { sandboxPolicy?: unknown } {
+  if (!isPolicyFace(policyRaw)) {
+    return {};
+  }
+  try {
+    return { sandboxPolicy: policyRaw.resolve(session === undefined ? {} : { session }) };
+  } catch {
+    // 解析失败与"读不到"同一处理：不传这一位，预演照跑（失败即盲问）。
+    return {};
+  }
+}
+
+/** `measureBlastOf` 的入参。收成对象是因为它有七位、且后四位常一起缺席——
+ *  位置参数会让 `undefined, undefined` 串位，而这里每一位都影响一次真实子进程调用。 */
+export interface MeasureBlastOptions {
+  /** `ctx.get("shell")` 的**原始值**（形状由本模块判）。 */
+  readonly shellRaw: unknown;
+  /** `ctx.get("sandboxPolicy")` 的原始值；读不到即不传策略。 */
+  readonly policyRaw: unknown;
+  /** 要跑的只读预演命令（缺席 ⇒ 这一族没有预演，直接盲问）。 */
+  readonly command: string | undefined;
+  /** 会话工作目录（预演在那里跑）。 */
+  readonly cwd: string | undefined;
+  /** 会话（逐会话的 sandbox 覆盖按它解析）；缺席用部署默认。 */
+  readonly session: unknown;
+  /** 已与墙钟合流的取消信号。 */
+  readonly signal: AbortSignal;
+  /** 当次语言的文案表。 */
+  readonly messages: DangerGuardMessages;
+}
+
 /**
  * 跑一趟**只读预演**并把结果渲染好（`ask` 档专属）。
  *
@@ -156,24 +206,25 @@ function blastTextOf(
  * @param signal   - 已与墙钟合流的取消信号（由宿主给：见 host.ts 的 `preflightSignalOf`）。
  * @param messages - 当次语言的文案表。
  */
-export async function measureBlastOf(
-  shellRaw: unknown,
-  command: string | undefined,
-  cwd: string | undefined,
-  signal: AbortSignal,
-  messages: DangerGuardMessages,
-): Promise<string | undefined> {
+export async function measureBlastOf(options: MeasureBlastOptions): Promise<string | undefined> {
+  const { shellRaw, policyRaw, command, cwd, session, signal, messages } = options;
   let rendered: string | undefined;
   if (command !== undefined && isShellRunFace(shellRaw)) {
     try {
       // 入参形状照官方 `ShellExecRequest` 给：`onExpiry: "kill"` + `timeoutMs` 让执行器
       // 到点杀进程；`workdir` 缺席时由执行器用它自己的默认值（不替它猜一个目录）。
+      //
+      // `sandboxPolicy` 必须带上，与 `runGate` 那条路同口径：`git status` 会刷 `.git/index`，
+      // 是一次**写**。不传策略就等于让这次预演回落到部署级默认（可能是 `danger-full-access`），
+      // 于是"只读预演"名不副实——它成了唯一一处能绕过沙箱写盘的地方。
+      // 策略面读不到时不传（执行器按自己的默认走）：预演失败本来就退回盲问，不额外造分支。
       const spec = shellRaw.resolve({
         command,
         timeoutMs: BLAST_TIMEOUT_MS,
         onExpiry: "kill",
         signal,
         ...(cwd === undefined ? {} : { workdir: cwd }),
+        ...sandboxRequestOf(policyRaw, session),
       });
       const handle: unknown = await shellRaw.execute(spec);
       if (isShellHandle(handle)) {
