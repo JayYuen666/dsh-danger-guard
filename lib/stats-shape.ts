@@ -18,6 +18,12 @@ export interface StatsSnapshot {
   readonly hits: Readonly<Record<string, number>>;
   /** `ask` 档的命中次数（按键）：这些是**问过用户**的，不是拒掉的。 */
   readonly asks: Readonly<Record<string, number>>;
+  /** 按档位"看见了但没拦"的命中（按键）：完全权限档的零兵底口径下放过了什么。 */
+  readonly allowed: Readonly<Record<string, number>>;
+  /** 上面那一格按档位汇总（键是 `GuardMode` 的名字）。 */
+  readonly allowedByMode: Readonly<Record<string, number>>;
+  /** 被去重掉的询问（同一会话同一命令重复命中，不再打扰用户）。 */
+  readonly skipped: Readonly<Record<string, number>>;
   /** 事实门配额放行次数。 */
   readonly quotaReleases: number;
   /** 慢判定的告警线（ms）与成本采样的滚动窗口 —— 数字本身要说得出，用户才知道阈值在哪。 */

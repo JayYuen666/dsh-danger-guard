@@ -630,7 +630,9 @@ function statsValueLines(t: Translate, snap: StatsSnapshot): ReactNode[] {
   const calls = topLines(snap.calls, 6);
   const hits = topLines(snap.hits, 6);
   const asks = topLines(snap.asks, 6);
+  const allowed = topLines(snap.allowed, 6);
   const slow = topLines(snap.slow, 6);
+  const skipped = Object.values(snap.skipped).reduce((sum, count) => sum + count, 0);
   // 每一格都先把文案落成变量再 push：本仓 lint 的 `max-nested-calls` 上限是 3，
   // 而 `push(statLine(…, t(…, { … })))` 那一串正好是第四层。
   if (calls.length > 0) {
@@ -644,6 +646,14 @@ function statsValueLines(t: Translate, snap: StatsSnapshot): ReactNode[] {
   if (asks.length > 0) {
     const asksText = t("statsAsks", { summary: statsSummary(asks) });
     lines.push(statLine("asks", asksText));
+  }
+  if (allowed.length > 0) {
+    const allowedText = t("statsAllowed", { summary: statsSummary(allowed) });
+    lines.push(statLine("allowed", allowedText));
+  }
+  if (skipped > 0) {
+    const skippedText = t("statsSkipped", { count: String(skipped) });
+    lines.push(statLine("skipped", skippedText));
   }
   if (slow.length > 0) {
     const slowText = t("statsSlow", { ms: String(snap.slowMs), summary: statsSummary(slow) });

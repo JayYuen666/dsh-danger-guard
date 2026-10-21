@@ -53,24 +53,38 @@ import type { Config } from "./lib/settings-schema.ts";
 import {
   bashVerdictOf,
   declaredTargets,
-  disasterTargetPathOf,
   editDanger,
   editTargetPath,
   isSecretPath,
   partitionSecretPatterns,
-  RULE_TIER,
-  SANDBOX_COVERED,
 } from "./lib/danger-rules.ts";
-import type { BashDangerOptions, BashVerdict, EditDangerOptions, Fix } from "./lib/danger-rules.ts";
+import type {
+  BashDangerOptions,
+  BashDenialKey,
+  BashVerdict,
+  EditDangerOptions,
+  Fix,
+} from "./lib/danger-rules.ts";
 // 需确认档的判定与两句话构造（宿主无关的那一半，可脱离宿主单测）。
-import { askRequestOf } from "./lib/confirm.ts";
+import { askRequestOf, AskDeduper, dedupKeyOf } from "./lib/confirm.ts";
 // 爆炸半径预演：常量表与渲染是纯函数（可脱离宿主单测），跑子进程那一趟在本文件。
 import { BLAST_COMMANDS, measureBlastOf, withBlast } from "./lib/blast-radius.ts";
 // 设置值面的防御性读取（`strArray`）与两个判定入口共用的词表装配（`bashOptsOf`）。
 import { bashOptsOf, strArray } from "./lib/settings-read.ts";
 // 宿主沙箱的管辖面（哪些灾难目标该让给它拦）。规范化折法由本文件注入 —— lib 不 import
 // `node:fs`，而 `realpathOf` 是同步判定链唯一付得起的那种解析。
-import { sandboxDropsOf as sandboxScopeDropsOf, sandboxScopeOf } from "./lib/sandbox-scope.ts";
+import { sandboxCoveredFacts, sandboxModeOf, sandboxScopeOf } from "./lib/sandbox-scope.ts";
+import { presenceOfAttempt } from "./lib/fs-errors.ts";
+import type { Presence } from "./lib/fs-errors.ts";
+import { asOsPath } from "./lib/path-format.ts";
+import type { OsPath } from "./lib/path-format.ts";
+// 按权限档位分叉的处置表：同一枚规则键在不同预设下的结论不同，判据本体全在这一层。
+import { decideRule, severityResolverOf } from "./lib/mode-policy.ts";
+import type { PolicyFacts } from "./lib/mode-policy.ts";
+// 档位事实的折法（宿主三个只读服务面 → PolicyFacts），纯形状守卫、可脱离宿主单测。
+import { policyFactsOf as policyFactsOfIn } from "./lib/policy-facts.ts";
+// 拒绝文案的三段拼法（纯函数）：降级来的 deny 要多一段换档出路，这条只有一处实现。
+import { policyDenyFlags, policyDenyText } from "./lib/policy-deny.ts";
 import {
   FactGate,
   renderDenyMessage,
@@ -120,11 +134,16 @@ import {
 import type { RefSearchCriterion, RefSearchPolicy } from "./lib/ref-search-policy.ts";
 // 模型可见文案的中英两份单源。判定链（lib/*、下面的 evidenceFor/assembleGaps）只产结构，
 // 文案在本文件的 guard 调用点按当前语言现取现渲染——纯函数不读设置。
-import { fillTemplate, MESSAGES, renderFix } from "./lib/messages.ts";
+import { fillTemplate, MESSAGES } from "./lib/messages.ts";
 import type { DangerGuardMessages } from "./lib/messages.ts";
 // 判定成本的本地滚动统计（每面一窗）。抽到 lib 是为了给 host.ts 腾出 max-lines 预算，
 // 顺带把它变成一条**可复用的运维读数**（设置卡那侧要展示的就是这份数据）。
-import { isJudged, noteJudgeCost, noteQuotaRelease, noteRuleHit } from "./lib/judge-stats.ts";
+import {
+  noteAllowedHit,
+  noteAskSkipped,
+  noteQuotaRelease,
+  noteRuleHit,
+} from "./lib/judge-stats.ts";
 import type { JudgeCost } from "./lib/judge-stats.ts";
 // 判定统计的客户端读面（官方 Typert Remote；手写 descriptor 与理由见该模块头）。
 import { installStatsRemote } from "./lib/stats-remote.ts";
@@ -168,10 +187,9 @@ import type { Session, SessionLogOffset } from "@deepseek-ai/dsh-session";
 // 官方实现，而 test/build-host.test.ts 有一条断言专门钉"裸说明符在、函数体不在"。
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import type { ContextFormed, UserMessage } from "@deepseek-ai/dsh-llm";
-// lesson bus 收口：lesson-loop 的 report/pass 以异步落库（返回 Promise），
-// 只包一层同步 try/catch 抓不到 rejection——失败会被静默吞掉，还给宿主进程留一枚
-// 未处理拒绝。同步抛错与异步拒绝共用这一个出口（三个包的调用点降级口径一致）。
-import { settleLessonCall } from "@jayyuen66/dsh-plugin-shared/lib/lesson-bus";
+// lesson-loop 上报面（deny/pass 两条信号与代价采样）：可选读 + 异步收口的纪律全在那一层。
+import { reportDeny, reportPass, sampleJudge } from "./lib/lesson-report.ts";
+import type { ReportContext } from "./lib/lesson-report.ts";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 /** 事实门教训的类别级稳定签名：lesson-loop 规则卡按
@@ -453,15 +471,6 @@ function isDangerGuardHost(value: unknown): value is Context & HostCtx {
   return typeof settings["describe"] === "function";
 }
 
-/** lesson-loop 总线最小面类型守卫：report/pass 我都按函数判（象限守卫）。 */
-function isLessonLoopReporter(value: unknown): value is LessonLoopReporter {
-  if (!isRecord(value)) {
-    return false;
-  }
-  const { report, pass } = value;
-  return typeof report === "function" && (pass === undefined || typeof pass === "function");
-}
-
 /** 官方工作目录服务的最小读面（`WorkingDirectoryService.get(session: Session): string`，
  *  `@deepseek-ai/dsh-working-directory` src/index.ts:122-124——同步、不做 fs I/O，
  *  所以能在 `ToolGuard` 这道同步谓词里读）。
@@ -491,35 +500,6 @@ function stringIdOf(value: unknown): string {
     return String(value);
   }
   return "";
-}
-
-/**
- * lesson-loop 总线最小面（自进化闭环）：可选读——总线未装/未就绪时
- * 拦截照常生效，只丢报告；report 自身容错，守卫热路径绝不因总线故障而失败。
- *
- * 返回值按 unknown 收而不是 void：lesson-loop 落库已异步（report 返回 Promise，
- * pass 按契约也可能），而 `(input) => void` 的函数类型**恰好允许调用方丢弃返回的
- * Promise**——TS 不会报"游离 Promise"，no-floating-promises 也看不到，失败于是被
- * 静默吞掉并留下一枚未处理拒绝，正是这次修的根因。unknown 保留真实形状，逼调用方
- * 经 settleLessonCall 收口（见其注释）。
- */
-interface LessonLoopReporter {
-  report: (input: {
-    source: "danger-guard";
-    category: string;
-    cwd?: unknown;
-    sessionId?: unknown;
-    signature: string;
-    detail: string;
-    evidence?: Record<string, unknown>;
-  }) => unknown;
-  /** pass 信号：规则场景被触发且被遵守（fact-gate 通过）。 */
-  pass?: (input: {
-    category: string;
-    cwd?: unknown;
-    sessionId?: unknown;
-    signature: string;
-  }) => unknown;
 }
 
 /** 非法/超长的扩展密钥模式：**加载期就校验**（判定链走的是同一个谓词），并且点名报出来——
@@ -727,26 +707,23 @@ function syncReadText(targetPath: string): string {
   return readFileSync(targetPath, "utf8");
 }
 
-/** stat 的三态结论：**不存在**（ENOENT）/ **存在**（拿到 stat）/ **不可知**（其它错误）。 */
-type Presence = "absent" | "present" | "unknown";
-
 /**
  * fs 存在性判定（tools.guard 同步契约，经 syncStat）。
  * **只把 ENOENT 认作"文件不存在"**：EACCES（目录无权限）、ENOTDIR（路径中间是文件）、
  * ELOOP（符号链接成环）下文件其实**存在**，一律归为"不可知"。调用方据此决定新建豁免——
  * 把任何 stat 失败都当"新文件"，等于让权限问题替模型免掉 read（正是这道豁免最不该失守的方向）。
- * Node 的 fs 错误 message 以 errno 名开头（`ENOENT: no such file or directory, stat …`），
- * 取前缀即可分类，不必在 unknown 上做 code 字段收窄。
+ *
+ * 分类判据在 `lib/fs-errors.ts`（读 `code` 优先，见那里的理由：message 措辞随平台变）。
+ *
+ * @param targetPath 待判目标。
+ * @param statOf 取 stat 的函数。**默认 `syncStat`**；测试可注入一个抛指定 errno 的桩，
+ *   于是"ENOTDIR 不给豁免 / ENOENT 才给"这两条能在**任何宿主**上确定性验证，
+ *   不必依赖真实 fs 在该平台上恰好抛哪个码（那是平台行为，不是本包判据）。
+ * @returns 三态结论与 mtime（unknown/absent 时 mtime 为 -1）。
  */
 function presenceOf(targetPath: string): { presence: Presence; mtimeMs: number } {
-  let out: { presence: Presence; mtimeMs: number };
-  try {
-    out = { presence: "present", mtimeMs: syncStat(targetPath).mtimeMs };
-  } catch (error: unknown) {
-    const notFound = error instanceof Error && error.message.startsWith("ENOENT");
-    out = { presence: notFound ? "absent" : "unknown", mtimeMs: -1 };
-  }
-  return out;
+  // 三态分类本身在 `lib/fs-errors.ts`（纯函数，可注入错误形状验证）；这里只负责"真的去 stat"。
+  return presenceOfAttempt(() => syncStat(targetPath).mtimeMs);
 }
 
 /** 文件是否存在（经 syncStat 取 stat，为 tools.guard 同步契约）。
@@ -767,15 +744,52 @@ const ROOT_MARKERS = [
 ];
 /** 项目根探测使用的存在性包络（模块级，避免在循环内定义函数）。 */
 const hasRootMarker = (dir: string): boolean =>
-  ROOT_MARKERS.some((marker) => pathExists(`${dir}/${marker}`));
+  // `dir` 是宿主真实路径 ⇒ 拼子项走平台实现（理由同 `probeLayersAt`：`/` 拼出混分隔符串，
+  // Windows 上 fs 查不到那个文件，于是工程根标记全判"不存在"，项目根回落到父目录）。
+  ROOT_MARKERS.some((marker) => pathExists(path.join(dir, marker)));
 
 /** `candidate` 是否为 `target` 的**祖先目录**（目标自身不算）。
  *  这是「引用取证的作用域判据」与「项目根的回落取值」共用的**同一条不变式**，故单列一处：
  *  判定侧（`isProjectScopeOf`）只认"检索起点是目标的祖先"，而拒绝文案会把项目根当检索
  *  起点原样递给模型（`assembleGaps` 的 `ctx.searchPath`）。两处一旦不同源，就会出现
  *  「门禁教模型去搜的位置，门禁自己又不认」——模型怎么照做都攒不满凭证。 */
+/**
+ * `path` 是否就是 `root` 或落在它之下（照官方 `workspace-changes/src/paths.ts` 的 `isInside`）。
+ *
+ * 为什么不拼前缀再 `startsWith`：那要自己判"末尾有没有分隔符"，而分隔符在 Windows 上是
+ * `\\`、混形还合法——每漏一种写法就多一条恒假的判据。`path.relative` 由平台实现同时解决
+ * 分隔符与 `..` 归一：结果是空串（同一路径）或以 `..` 开头（在外面）都不是"在内部"。
+ *
+ * @param root     绝对目录。
+ * @param candidate 待判的绝对路径。
+ * @returns 自身与所有后代为 true。
+ */
+/** 把宿主服务交出的 cwd 标成 `OsPath`（`undefined` 原样透传）。
+ *
+ *  单列的理由：它同时承担"空值透传"与"打 brand"两件事，摊在 `sandboxCoveredFacts`
+ *  那个调用点里会顶爆 cognitive-complexity，而这两件事本身没有判断逻辑可读。
+ *
+ *  @param cwd 宿主真实目录（`workingDirectory` 或 session header 的 cwd）。
+ *  @returns 带 brand 的同一枚字符串；`undefined` 交回 `undefined`。
+ */
+function cwdAsOsPath(cwd: string | undefined): OsPath | undefined {
+  return cwd === undefined ? undefined : asOsPath(cwd);
+}
+
+function isInside(root: string, candidate: string): boolean {
+  // 食宿主的 `path`：`host.ts` 里这条判据只服务"检索作用域是否覆盖目标"这一件事，
+  // 而入参都来自宿主服务（`workingDirectory` / `session header`），随平台走是对的。
+  // 需要按 Windows 规则验证的那两处（`lib/sandbox-scope.ts`、`lib/preflight-scan.ts`）
+  // 已改成**注入 `pathApi`**，测试可以显式交 `path.win32`。
+  const rel = path.relative(root, candidate);
+  // ⚠ 判"是否上跳出根"必须比**路径组件边界**，不能只看 `rel.startsWith("..")`：
+  // `relative()` 对根内名为 `..cache` 的目录返回 `..cache`，那个前缀判断会把它误判成
+  // "跑到根外面" —— 方向是**放行**（"沙箱盖不住"为真 ⇒ 灾难删除让路给同样管不了它的沙箱）。
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
 const isAncestorDirOf = (candidate: string, target: string): boolean =>
-  candidate !== target && target.startsWith(`${candidate}/`);
+  candidate !== target && isInside(candidate, target);
 
 /** 项目根：向上找工程标记（与 quality-gate gate-detect 同一族标记）。
  *  **找不到标记时退到目标自己的父目录，不是会话 cwd** —— 回落值必须满足
@@ -836,7 +850,8 @@ function isDir(targetPath: string): boolean {
 
 /** 层目录查找第一条命中（模块级，避免在循环内定义函数）。 */
 const firstExistingLayer = (dir: string, names: string[]): string | undefined =>
-  names.find((name) => isDir(`${dir}/${name}`));
+  // 同上：混分隔符串在 Windows 上 fs 判定恒假 ⇒ 所有层都判成"不存在"（层要求整片失效）。
+  names.find((name) => isDir(path.join(dir, name)));
 
 /** 一条被探测到的层：need + 实际目录绝对路径（提示与归因都要具体路径）。 */
 interface FactLayer {
@@ -871,7 +886,12 @@ function probeLayersAt(dir: string, found: Map<FactNeed, string>, extraTestDirs:
       const names = layer.need === "test" ? [...layer.names, ...extraTestDirs] : layer.names;
       const hit = firstExistingLayer(dir, names);
       if (hit !== undefined) {
-        found.set(layer.need, `${dir}/${hit}`);
+        // ⚠ 必须用 `path.join`：`dir` 是**宿主真实路径**（Windows 上是 `C:\...`），
+        // 用 `/` 拼会产出 `C:\...\\dg-tier-x/test` 这种混分隔符串 —— 实测两个后果：
+        //   ① 文案里点名的层目录写成了混合形，测试拿 `path.join` 的期望值匹配不上
+        //     （Windows runner 上这条红）；
+        //   ② 这个混形随后参与包含性比较，与真实路径不同源。
+        found.set(layer.need, path.join(dir, hit));
       }
     }
   }
@@ -917,7 +937,7 @@ function existingLayersOf(targetN: string, root: string, extraTestDirs: string[]
  * 但**兄弟目录**（如 lib/ 之于 test/）不覆盖，蹭不到证据。
  */
 function scopeCoversLayer(root: string | undefined, layer: FactLayer): boolean {
-  return root !== undefined && (root === layer.dir || layer.dir.startsWith(`${root}/`));
+  return root !== undefined && isInside(root, layer.dir);
 }
 
 /** 触及导出面/签名的关键字：改动文本含这些词 → 波及面大概率超出文件自身，升档。 */
@@ -925,8 +945,11 @@ const SIG_KEYWORD_RE =
   /\b(?:export|default|declare|pub|fn|func|def|class|interface|type|enum|struct|trait|impl|public|protected)\b/u;
 
 /** 高风险路径：manifest / lockfile / 构建配置 / CI / cordis 装配——改一个字符也能全局波及。 */
+// ⚠ 前缀必须容**两种**分隔符（`[/\\]`）：宿主真实路径在 Windows 上是 `C:\\proj\\package.json`，
+// 只认 `(?:^|\/)` 时 `package.json` 前面是 `\\` ⇒ 恒不匹配 ⇒ 改版本号不再升档
+//（实测 Windows runner 上该用例红：`denied` 为 undefined，落到了最低档）。
 const RISKY_PATH_RE =
-  /(?:^|\/)(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|npm-shrinkwrap\.json|bun\.lockb?|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|pyproject\.toml|poetry\.lock|uv\.lock|requirements\.txt|setup\.py|tsconfig[^/]*\.json|vite\.config\.[cm]?[jt]s|webpack\.config\.[cm]?js|cordis\.(?:ya?ml|json)|Makefile|Dockerfile|docker-compose\.ya?ml|\.env(?:\.[\w-]+)?$|schema\.sql)$/u;
+  /(?:^|[/\\])(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|npm-shrinkwrap\.json|bun\.lockb?|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|pyproject\.toml|poetry\.lock|uv\.lock|requirements\.txt|setup\.py|tsconfig[^/]*\.json|vite\.config\.[cm]?[jt]s|webpack\.config\.[cm]?js|cordis\.(?:ya?ml|json)|Makefile|Dockerfile|docker-compose\.ya?ml|\.env(?:\.[\w-]+)?$|schema\.sql)$/u;
 
 /**
  * 取证档位（定稿：按写面风险分档，配 strictMode 回到"每文件全探查"）。
@@ -1298,8 +1321,8 @@ const isProjectScopeOf = (ctx: EvalCtx, targetPath: string | undefined): boolean
 
 /** 路径显示形态：有 cwd 则相对（提示里更短更可读），否则原样。 */
 const relOf = (ctx: EvalCtx, targetPath: string): string =>
-  ctx.cwd !== undefined && targetPath.startsWith(`${ctx.cwd}/`)
-    ? targetPath.slice(ctx.cwd.length + 1)
+  ctx.cwd !== undefined && isInside(ctx.cwd, targetPath)
+    ? path.relative(ctx.cwd, targetPath).split(path.sep).join("/")
     : targetPath;
 
 /** 非空字符串读数：`undefined` / 空串 / 非字符串一律按"这一项没有"处理（cwd 只认非空串，
@@ -1447,7 +1470,7 @@ function buildEvalContext(
     const norm = (value: unknown): string | undefined =>
       typeof value === "string" && value.length > 0 ? resolveTarget(value, cwd) : undefined;
     const targetN = resolveTarget(target, cwd);
-    const base = path.posix.basename(targetN);
+    const base = path.basename(targetN);
     result = {
       ...rows,
       sessKey: sessionKeyPrefix(session.id),
@@ -2112,7 +2135,11 @@ function realpathOf(target: string, cwd: string | undefined): string | undefined
   const missing: string[] = [];
   let current = path.resolve(cwd ?? process.cwd(), target);
   let result: string | undefined;
-  while (result === undefined && current.length > 1) {
+  // 终止条件必须是"已经到根"，**不能**用 `current.length > 1`：那假设根的长度是 1，
+  // 而 Windows 的盘根是 `C:\`（长度 3）⇒ 循环会多走一轮，对盘根做 realpath 并把
+  // 虚构路径拼成一个「看起来存在」的结果。实测后果：一条"祖先全不存在 ⇒ 不该有解析形"
+  // 的用例在 Windows runner 上拿到了 `D:\w\proj\.ssh\id_rsa`（POSIX 上是 undefined）。
+  while (result === undefined && current !== path.dirname(current)) {
     const real = tryRealpath(current);
     if (real === undefined) {
       missing.unshift(path.basename(current));
@@ -2134,6 +2161,7 @@ function bashJudgeOf(
   name: string,
   args: Record<string, unknown>,
   opts: BashDangerOptions | undefined,
+  severityOf: (key: BashDenialKey) => "allow" | "ask" | "deny",
 ): BashJudge {
   let denial: BashDenial | undefined;
   // 非 bash/pwsh 的调用在这一面没有判定发生 ⇒ 零长度样本（采样处据此不发）。
@@ -2142,7 +2170,7 @@ function bashJudgeOf(
   // **调用点入口**（工具名 + 参数 + 配置）：方言、命令原文读取、后台执行的让路
   // 都在 lib 那一层收好了（见 `bashVerdictOf`）—— guard 与需确认档走同一个入口，
   // 于是"guard 拦得住、审批看不见"（或反过来）那种漂在结构上不成立。
-  const hit = bashVerdictOf(name, args, opts);
+  const hit = bashVerdictOf(name, args, { ...opts, severityOf });
   if (hit !== undefined) {
     cost.ms = performance.now() - startedAt;
     cost.length = hit.command.length;
@@ -2151,41 +2179,30 @@ function bashJudgeOf(
   return { denial, cost };
 }
 
-/** `rmrf` 被判灾难的那几枚目标：挂在它的 `Fix` 上、按 `role` 判别式取（`fix` 是呈现面，
- *  但 `disasterTarget` 这一支的 `offending` **就是**灾难目标的定义，取它不算拿呈现当判据）。
- *  取不到时交回**空数组**，调用方据此不让路（空数组会让 `every` 恒真，那是误放行）。 */
-const disasterTargetsOf = (fix: Fix | undefined): readonly string[] =>
-  fix?.role === "disasterTarget" ? fix.offending : [];
-
-/**
- * 这次的灾难目标该不该让给宿主沙箱（判据与理由全在 `lib/sandbox-scope.ts`）。
- *
- * 宿主那一侧的三件事在这里读：两个能力面的**原始值**（形状由 lib 判）、规范形折法
- *（`realpathOf` —— lib 不 import `node:fs`，本机同步解析只有宿主付得起）、平台临时目录。
- */
-function sandboxDropsOf(
-  svc: HostCtx,
-  session: SessionLogFace | undefined,
-  offending: readonly string[],
-  cwd: string | undefined,
-): boolean {
-  const scope = sandboxScopeOf(
-    svc.get?.("shell"),
-    svc.get?.("sandboxPolicy"),
-    session,
-    (absolute) => realpathOf(absolute, undefined),
-    os.tmpdir(),
-  );
-  // 目标绝对形：归一不出来的一律剔成 `undefined`，由 lib 判成"整条不让路"。
-  const targets = offending.map((word) => disasterTargetPathOf(word, cwd));
-  return scope !== undefined && sandboxScopeDropsOf(scope, targets);
-}
-
 /** 事实门单次判定的产出（由 guard 回调翻译成 return/report）。 */
 type FactGateOutcome =
   | { kind: "pass"; target: string; quota?: boolean }
   | { kind: "indeterminate"; target: string }
   | { kind: "deny"; target: string; tier: FactTier; denial: FactDenial };
+
+/**
+ * 读这次调用的档位事实（判据与缺席口径全在 `lib/policy-facts.ts` 的文件头）。
+ *
+ * 本文件只负责把宿主的三样东西送进去：可选服务读法、会话、以及沙箱模式的读法
+ * （`sandboxModeOf` —— lib 侧的 `policy-facts` 不 import `node:fs`，模式读法由这里注入）。
+ */
+function policyFactsOf(
+  svc: HostCtx,
+  session: SessionLogFace | undefined,
+  sandboxCovers: boolean,
+): PolicyFacts {
+  return policyFactsOfIn({
+    get: (name) => svc.get?.(name),
+    session,
+    sandboxCovers,
+    sandboxMode: sandboxModeOf,
+  });
+}
 
 /** 一次 guard 评估的运行时输入：settings 运行时值 + **当前语言的文案表**。
  * 两个都由 guard 回调现取（用户改了设置卡/切了语言，下一次调用即生效），
@@ -2586,7 +2603,7 @@ async function refScanOf(
   const scan = await scanReferences({
     targetN,
     root: projectRootOf(targetN, req.cwd),
-    needles: refNeedlesOf(path.posix.basename(targetN)),
+    needles: refNeedlesOf(path.basename(targetN)),
     signal,
     isQuarantined: scanQuarantineOf(req.cfg),
     fs: req.fs,
@@ -3016,6 +3033,20 @@ async function preflightOnPostExecute(
   return decision;
 }
 
+/** 预检两面的监听器接线（两条都是瀑布，顺序见各自的函数注释）。 */
+function wirePreflightListeners(
+  svc: HostCtx,
+  reqOf: PreflightRequestOf,
+  confirmOf: ConfirmOf,
+): void {
+  svc.on?.("tools/pre-execute", (exec, next) =>
+    preflightOnPreExecute(exec, next, reqOf, confirmOf),
+  );
+  svc.on?.("tools/post-execute", (exec, result, next) =>
+    preflightOnPostExecute(exec, result, next, reqOf),
+  );
+}
+
 /**
  * apply 接线出来的运行面：宿主服务面 + fact-gate 实例。
  * 判定链上的四个函数原本长在 apply 体内，提到模块层后它们仍要读这两个值——打包成一枚入参
@@ -3026,38 +3057,59 @@ interface GuardWiring {
   gate: FactGate;
 }
 
-/** 一次 deny 上报的渲染输入：类别 + 签名 + 文案 + 取证。合成一枚对象同上一条理由
- *  （`reportDeny` 再收 wiring/exec 就六位了）。字段值与拆分前逐字一致。 */
-interface DenyReportInput {
-  category: string;
-  signature: string;
-  detail: string;
-  evidence: Record<string, unknown>;
+/** 上报上下文（总线读数口 + 会话 cwd + 会话 id）：判定链与上报共用同一份来源，
+ *  于是"拦了这条"与"报的是哪个会话/目录"不可能对不上。 */
+const reportContextOf = (wiring: GuardWiring, exec: GuardExecution): ReportContext => ({
+  get: (name) => wiring.svc.get?.(name),
+  cwd: effectiveCwdOf(wiring.svc, exec.agent?.session),
+  sessionId: exec.agent?.session?.id,
+});
+
+/** `denyFromPolicy` 的输入：一枚已被档位表判成 `deny` 的命中，加上上报要用的上下文。 */
+interface PolicyDenyInput {
+  wiring: GuardWiring;
+  exec: GuardExecution;
+  name: string;
+  key: BashDenialKey;
+  command: string;
+  fix: Fix | undefined;
+  facts: PolicyFacts;
+  messages: DangerGuardMessages;
+  cost: JudgeCost;
 }
 
-/** 总线上报（fire-and-forget）：拦截是可学习信号——全量 detail，不截断。
- *  cwd/sessionId 从守卫执行的 agent 链取（与取证同源），总线缺失直接跳过。 */
-function reportDeny(wiring: GuardWiring, exec: GuardExecution, input: DenyReportInput): void {
-  const busRaw: unknown = wiring.svc.get?.("lessonLoop");
-  const bus = isLessonLoopReporter(busRaw) ? busRaw : undefined;
-  if (bus === undefined || typeof bus.report !== "function") {
-    return;
-  }
-  settleLessonCall(
-    () =>
-      bus.report({
-        source: "danger-guard",
-        category: input.category,
-        cwd: effectiveCwdOf(wiring.svc, exec.agent?.session),
-        sessionId: exec.agent?.session?.id,
-        signature: input.signature,
-        detail: input.detail,
-        evidence: input.evidence,
-      }),
-    (reason) => {
-      console.warn("[danger-guard] lessonLoop report failed:", reason);
+/**
+ * 把档位表判出的 `deny` 落成回给模型的文案 + 教训上报。
+ *
+ * 文案本体在 `lib/policy-deny.ts`（纯函数、可脱离宿主单测）；本函数只负责两件宿主才有的事：
+ * 记一格统计、把这次命中报进教训总线。
+ *
+ * @param input 命中与上下文。
+ * @returns 回给模型的拒绝理由。
+ */
+function denyFromPolicy(input: PolicyDenyInput): string {
+  const { wiring, exec, name, key, command, fix, facts, messages, cost } = input;
+  noteRuleHit(key, "deny");
+  const deny = policyDenyText({ key, fix, facts, messages });
+  reportDeny(reportContextOf(wiring, exec), {
+    category: "dangerous-bash",
+    // 签名**一律**用命令原文：类别级归并在 lesson-loop 侧完成（`CATEGORY_SIGNATURES`
+    // 把 `dangerous-bash` 折成一个稳定键），原文因此落进 `evidence.signature`，不再被
+    // 常量吃掉——那张卡里人审时要看得见是哪条命令。
+    signature: command,
+    detail: deny,
+    evidence: {
+      tool: name,
+      // 两种 deny 不是一回事：一部分是"确认危险"，另一部分是"这档问不了"。
+      // 后者仍不是用户拍板过的动作，所以这两位分开写，别让统计把它们混成一种。
+      needsUserConfirmation: policyDenyFlags(facts, key).policyDenied,
+      mode: facts.mode,
+      // 耗时与输入规模一起发：长度上限该不该调，看的是这两枚的真实分布。
+      judgeMs: Math.round(cost.ms),
+      judgeLength: cost.length,
     },
-  );
+  });
+  return deny;
 }
 
 /**
@@ -3073,25 +3125,41 @@ function confirmFactory(
   svc: HostCtx,
   wiring: GuardWiring,
   messages: () => DangerGuardMessages,
+  deduper: AskDeduper,
 ): ConfirmOf {
   return async (exec) => {
     const cfg = settingsConfig(svc);
     const args = isRecord(exec.arguments) ? exec.arguments : undefined;
     const table = messages();
-    const ask = cfg.enabled ? askRequestOf(exec.name, args, bashOptsOf(cfg), table) : undefined;
+    // 档位事实每趟现读（用户随时能换预设）：`confirm` 只在这些档位上被问到，
+    // 而"这一档还能不能问"由 `lib/mode-policy.ts` 的 `askable` 位决定，
+    // 于是 guard 与这里天然读同一份事实、同一张表。
+    const facts = policyFactsOf(svc, exec.agent?.session, false);
+    const ask = cfg.enabled
+      ? askRequestOf(exec.name, args, bashOptsOf(cfg), facts, table)
+      : undefined;
+    // 同一会话 + 同一规则键 + 同一命令原文只问一次：模型重试同一串是常态，
+    // 而重复弹一张一模一样的卡没有信息增量（被去重的那次只记统计，不改变判定）。
+    const fresh =
+      ask !== undefined && deduper.first(exec.agent?.session.id, dedupKeyOf(ask.key, ask.command));
     if (ask !== undefined) {
-      noteRuleHit(ask.key, "ask");
-      reportDeny(wiring, exec, {
-        category: "dangerous-bash",
-        // 签名用**被判定的那条命令原文**（`lib/confirm.ts` 与规则键一起交回的同一份输入）：
-        // 再从参数里读一遍就是第二处读法，"判的是这串、报的是另一串"没有任何运行期信号。
-        // 与 guard 那条路同口径：类别级归并在 lesson-loop 侧完成。
-        signature: ask.command,
-        detail: ask.reason,
-        evidence: { tool: exec.name, needsUserConfirmation: true },
-      });
+      if (fresh) {
+        noteRuleHit(ask.key, "ask");
+        reportDeny(reportContextOf(wiring, exec), {
+          category: "dangerous-bash",
+          // 签名用**被判定的那条命令原文**（`lib/confirm.ts` 与规则键一起交回的同一份输入）：
+          // 再从参数里读一遍就是第二处读法，"判的是这串、报的是另一串"没有任何运行期信号。
+          // 与 guard 那条路同口径：类别级归并在 lesson-loop 侧完成。
+          signature: ask.command,
+          detail: ask.reason,
+          evidence: { tool: exec.name, needsUserConfirmation: true },
+        });
+      } else {
+        noteAskSkipped(ask.key);
+      }
     }
     // **量爆炸半径**：`ask` 档专属，量不出来就盲问（边界见 lib/blast-radius.ts 的文件头）。
+    // 去重掉的那次**照样量**：它仍然会弹给用户（判定是 `ask`），没有证据的卡比有证据的卡更难判。
     const blast =
       ask === undefined
         ? undefined
@@ -3105,57 +3173,10 @@ function confirmFactory(
             messages: table,
           });
     // 翻成官方那一臂：`lib/confirm.ts` 交的是宿主无关形态（它不 import 官方决定类型）。
+    // 去重只压掉**重复上报**（教训卡不会为同一条命令炸成碎片）；判定与证据一个字不改 ——
+    // 宿主该问的仍然问，`.first()` 换来的"少打扰"不能变成偷偷放行或偷偷撤掉证据。
     return ask === undefined ? undefined : { kind: "ask", ...withBlast(ask, blast) };
   };
-}
-
-/** pass 信号上报：fact-gate 取证通过（场景触发且被遵守）。总线
- *  缺失或未实现 pass 时静默跳过——这是度量增强，不是守卫热路径的硬依赖。 */
-function reportPass(
-  wiring: GuardWiring,
-  exec: GuardExecution,
-  category: string,
-  signature: string,
-  cost?: JudgeCost,
-): void {
-  const busRaw: unknown = wiring.svc.get?.("lessonLoop");
-  const bus = isLessonLoopReporter(busRaw) ? busRaw : undefined;
-  if (bus === undefined || typeof bus.pass !== "function") {
-    return;
-  }
-  settleLessonCall(
-    () =>
-      // `?.` 不是第二道守卫（上面已判过）：TS 不把属性收窄带进闭包，回调里 pass 的
-      // 可选性要重新面对——写成方法调用才保住接收方（不借 `.call`/`.bind` 改 this）。
-      bus.pass?.({
-        category,
-        cwd: effectiveCwdOf(wiring.svc, exec.agent?.session),
-        sessionId: exec.agent?.session?.id,
-        signature,
-        // 成本样本只带三枚数值（哪个面、多久、多长输入）——不带命令原文、不带路径。
-        ...(cost === undefined
-          ? {}
-          : { face: cost.face, judgeMs: Math.round(cost.ms), judgeLength: cost.length }),
-      }),
-    (reason) => {
-      console.warn("[danger-guard] lessonLoop pass failed:", reason);
-    },
-  );
-}
-
-/** 一次判定的采样出口：本地滚动统计始终记，出域那一格（pass 载荷）由 `judgeStats` 决定。 */
-function sampleJudge(
-  cost: JudgeCost,
-  collect: boolean,
-  wiring: GuardWiring,
-  exec: GuardExecution,
-): void {
-  if (isJudged(cost)) {
-    noteJudgeCost(cost);
-    if (collect) {
-      reportPass(wiring, exec, JUDGE_COST_CATEGORY, cost.face, cost);
-    }
-  }
 }
 
 /** 事实强制门单层判定 → 拒绝理由（含 pass 信号上报）。单 return + 浅嵌套
@@ -3175,7 +3196,7 @@ function factGateDenyOf(
     if (outcome?.kind === "pass") {
       // 取证通过 = 规则场景被触发且被遵守 → pass 信号（配额放行除外）。
       if (outcome.quota !== true) {
-        reportPass(wiring, exec, "factgate-deny", FACTGATE_SIGNATURE);
+        reportPass(reportContextOf(wiring, exec), "factgate-deny", FACTGATE_SIGNATURE);
       }
     } else if (outcome?.kind === "indeterminate") {
       // 无法自动判定 → 交互式确认（模型会请用户拍板）
@@ -3183,7 +3204,7 @@ function factGateDenyOf(
     } else if (outcome !== undefined) {
       // 状态机回传的是渲染输入（缺项/轮次/上下文），拒绝理由在此按当次语言现渲染。
       deny = renderDenyMessage(outcome.denial, messages);
-      reportDeny(wiring, exec, {
+      reportDeny(reportContextOf(wiring, exec), {
         category: "factgate-deny",
         signature: FACTGATE_SIGNATURE,
         detail: deny,
@@ -3230,7 +3251,7 @@ function secretJudgeOf(
       // 停在编译期，而不是运行时把 undefined 回给模型。
       reason = messages[denial.key];
       const forms = built.opts.resolvedPaths[denial.target] ?? [];
-      reportDeny(wiring, exec, {
+      reportDeny(reportContextOf(wiring, exec), {
         category: "secret-path",
         signature: denial.target,
         detail: reason,
@@ -3266,6 +3287,7 @@ function wireReadFaces(
   factGate: FactGate,
   ledgerBox: GuardRuntime["ledger"],
   fsBox: PreflightFsBox,
+  askDeduper: AskDeduper,
 ): void {
   svc.inject?.(["sessionProjections"], (child) => {
     const registry = child.sessionProjections;
@@ -3287,6 +3309,8 @@ function wireReadFaces(
   // 同用官方 session/disposed）。幂等：同一 session id 重复 dispose 由 delete 天然幂等。
   svc.on?.("session/disposed", (sessionRaw) => {
     factGate.dropSession(sessionRaw.id);
+    // 去重表按会话分片，键形与 `first(exec.agent?.session.id, …)` 同源。
+    askDeduper.drop(stringIdOf(sessionRaw.id));
     dropSessionLedgers(stringIdOf(sessionRaw.id));
   });
 
@@ -3348,20 +3372,12 @@ export function apply(ctx: Context): void {
   // 理由与"缺席只少一栏展示、绝不拖闸门"都在 `lib/stats-remote.ts` 的 installStatsRemote 上。
   installStatsRemote(ctx);
 
-  // 取证台账投影：注册表在位时把单元挂上（注册是 effect，disposer 随注入子 fiber 回收），
-  // 并把 `stateOf` 的同步水位读装进 ledgerBox。注册表缺席（未装 dsh-session-projection 的
-  // profile）时回调根本不激活 ⇒ 读口留 undefined ⇒ 每次判定沿用回退扫描（wukil 的 rules
-  // 判重、session-rescue 的回合事实同策）。**不**写进插件级 inject：那会让没装投影包的
-  // profile 整个闸门不再激活——拦截面绝不能因为可选读面缺失而下线。
-  // 宿主 fs 面：可选**读面**，装进箱子而不是插件级 `inject: ["fs"]`——理由与上面投影台账
-  // 一字不差：那会让没装 fs 后端的 profile **整个闸门不再激活**，而拦截面绝不能因为可选
-  // 读面缺失而下线（本包的 bulkhead 口径）。直接读属性也不行：cordis 对未声明 inject 的
-  // 服务名是**抛错**而不是回 undefined（真 spine 实测："cannot get property \"fs\" without inject"），
-  // 所以只能走 inject 回调或 `ctx.get`。
+  // 两个可选读面（投影台账 / fs）走 inject 回调而不是插件级 inject：见 wireReadFaces 的注释。
   const fsBox: PreflightFsBox = { value: undefined };
   const ledgerBox: GuardRuntime["ledger"] = { value: undefined };
-  // 读面接线（投影台账 / fs 面 / 观察路径 / 会话销毁 / 卸载兜底）：见 wireReadFaces。
-  wireReadFaces(svc, factGate, ledgerBox, fsBox);
+  // 去重表在读面接线之前建：`session/disposed` 那条监听要顺手回收它按会话分的片。
+  const askDeduper = new AskDeduper();
+  wireReadFaces(svc, factGate, ledgerBox, fsBox, askDeduper);
 
   // ── 预检（Phase 2）的两个触发点 ──────────────────────────────────────────────
   // A 面挂 `tools/post-execute`（引用面随读取结果出去），B 面挂 `tools/pre-execute`
@@ -3388,15 +3404,8 @@ export function apply(ctx: Context): void {
   // ⚠ 它要在**预检/需确认接线之前**定义：需确认那一档也要进教训总线（见 confirmFactory）。
   const wiring: GuardWiring = { svc, gate: factGate };
 
-  // 需确认档与 B 面预检共用一条 `tools/pre-execute` 瀑布（下游放行后，前者先判）。
-  const confirmOf = confirmFactory(svc, wiring, localeMessages);
-  svc.on?.("tools/pre-execute", (exec, next) =>
-    preflightOnPreExecute(exec, next, preflightReqOf, confirmOf),
-  );
-
-  svc.on?.("tools/post-execute", (exec, result, next) =>
-    preflightOnPostExecute(exec, result, next, preflightReqOf),
-  );
+  const confirmOf = confirmFactory(svc, wiring, localeMessages, askDeduper);
+  wirePreflightListeners(svc, preflightReqOf, confirmOf);
 
   // 谓词入参显式标注成本包的读取投影 `GuardExecution`（= 官方 ToolExecution 的 name/arguments
   // + SessionLogFace 会话面）：官方 `ToolGuard` 交出的是 `Readonly<ToolExecution>`，而
@@ -3443,56 +3452,61 @@ export function apply(ctx: Context): void {
       // 体在下钻时强制开 Windows 轨道，`-File`/`-EncodedCommand` 归"看不见"→ 需确认。
       // 以及 pwsh 在 POSIX 宿主上真去删一个叫 `C:\Windows` 的相对目录
       // 这种罕见写法（方言带来的过拦，代价已写在 danger-rules 的 shellDialect 注释里）。
-      const judge = bashJudgeOf(name, args, bashOpts);
-      sampleJudge(judge.cost, rt.cfg.judgeStats, wiring, exec);
+      // 档位事实先算：扫描层按它排序，否则串行命令里"本档已放行的前段"会吞掉"仍要拦的后段"。
+      const facts = policyFactsOf(svc, exec.agent?.session, false);
+      const judge = bashJudgeOf(name, args, bashOpts, severityResolverOf(facts));
+      const sample = (cost: JudgeCost): void => {
+        sampleJudge(
+          () => reportContextOf(wiring, exec),
+          cost,
+          rt.cfg.judgeStats,
+          JUDGE_COST_CATEGORY,
+        );
+      };
+      sample(judge.cost);
       const bashDenial = judge.denial;
       if (bashDenial === undefined) {
         // 2) 密钥/凭据路径编辑
         const secret = secretJudgeOf(wiring, exec, rt, name, args);
-        sampleJudge(secret.cost, rt.cfg.judgeStats, wiring, exec);
-        const editDeny = secret.reason;
-        // 3) 事实强制门（强校验：持续拒绝到取证齐备为止）。目标路径经 editTargetPath
-        //    归一化：edit/write 取 file_path ?? path，str_replace_editor 取 path（view 只读
-        //    不过门）——与取证记账（callPathOf）同一个键形，模型照做的动作才记得上。
-        //    上报签名用类别级稳定键：事实门教训是通用「先取证再编辑」，用目标路径当签名
-        //    会把同一条规则拆成碎片卡、armed 后度量失效；目标路径改放 evidence。
-        deny = editDeny ?? factGateDenyOf(wiring, exec, rt, name, args);
-      } else if (RULE_TIER[bashDenial.key] === "deny") {
-        // 只处理 `deny` 档：`ask` 档由 `tools/pre-execute` 的宿主审批收口（见 lib/danger-rules.ts
-        // 的 `RULE_TIER`）。两边读**同一张表** ⇒ 一枚键只可能被一处收口，既不会漏掉、也不会
-        // 被双重收口（双重收口就是"用户点了允许还是被拒"那种故障）。
+        sample(secret.cost);
+        // 3) 事实强制门（强校验：持续拒绝到取证齐备为止）。目标路径经 editTargetPath 归一化，
+        //    与取证记账（callPathOf）同一个键形；上报签名用类别级稳定键（目标路径改放 evidence）。
+        deny = secret.reason ?? factGateDenyOf(wiring, exec, rt, name, args);
+      } else {
+        // 处置由**档位表**给（`lib/mode-policy.ts`）：同一枚规则键在不同权限预设下结论不同，
+        // 而 `ask` 档由 `tools/pre-execute` 的审批通道收口 —— 两条路读**同一张表**，
+        // 所以一枚键只可能被一处收口（双重收口 = 用户点了允许还是被拒）。
         const { command, key, fix } = bashDenial;
-        noteRuleHit(key, "deny");
-        // 沙箱确实管辖这一类判据、且这次的目标**包不住任何可写根**时，让路给宿主：
-        // 它会给出官方的拒绝标记与 escalation 路径，而我们的硬拒会掐死那条路
-        //（guard 跑在 bash 工具之前）。判据与理由见 `sandboxDropsOf` / `SANDBOX_COVERED`。
-        const targets = disasterTargetsOf(fix);
-        const sandboxDrops =
-          SANDBOX_COVERED.has(key) &&
-          targets.length > 0 &&
-          sandboxDropsOf(svc, exec.agent?.session, targets, rt.cwd);
-        if (!sandboxDrops) {
-          // 拒绝理由回给模型前才落到当前语言的文案上；`fix` 存在时**另起一行**接在其后：
-          // 基础文案讲"为什么被拦"，出路讲"改哪几个词就能过"，两件事分开读更不容易漏掉后者。
-          deny =
-            fix === undefined ? messages[key] : `${messages[key]}\n${renderFix(fix, messages)}`;
-          reportDeny(wiring, exec, {
-            category: "dangerous-bash",
-            // 签名**一律**用命令原文：类别级归并在 lesson-loop 侧完成（`CATEGORY_SIGNATURES`
-            // 把 `dangerous-bash` 折成一个稳定键），原文因此落进 `evidence.signature`，不再被
-            // 常量吃掉。旧写法给"认不准"那一类传常量，于是那张卡里每条证据都是同一段模板文案，
-            // 人审时看不出该审哪条命令——"是否需用户确认"另有 `needsUserConfirmation` 承载。
-            signature: command,
-            detail: deny,
-            evidence: {
-              tool: name,
-              // 走到这一支的都是 `deny` 档（已确认危险，出路是改写命令），而"需用户拍板"
-              // 那一档现在经 `ask` 通道上报（`needsUserConfirmation: true` 记在那一侧）。
-              needsUserConfirmation: false,
-              // 耗时与输入规模一起发：长度上限该不该调，看的是这两枚的真实分布。
-              judgeMs: Math.round(judge.cost.ms),
-              judgeLength: judge.cost.length,
-            },
+        const covered = sandboxCoveredFacts(
+          facts,
+          key,
+          fix,
+          sandboxScopeOf(
+            svc.get?.("shell"),
+            svc.get?.("sandboxPolicy"),
+            exec.agent?.session,
+            (absolute: string) => realpathOf(absolute, undefined),
+            os.tmpdir(),
+          ),
+          cwdAsOsPath(rt.cwd),
+        );
+        // 三档收口：allow 只记读数（沙箱让路不算"放过"——那是交给宿主拦），
+        // deny 交给下面的工厂出文案与上报，ask 什么都不做。
+        if (decideRule(covered, key) === "allow") {
+          if (!(key === "rmrf" && covered.sandboxCovers)) {
+            noteAllowedHit(key, facts.mode);
+          }
+        } else if (decideRule(covered, key) === "deny") {
+          deny = denyFromPolicy({
+            wiring,
+            exec,
+            name,
+            key,
+            command,
+            fix,
+            facts: covered,
+            messages,
+            cost: judge.cost,
           });
         }
       }
@@ -3510,6 +3524,7 @@ export function apply(ctx: Context): void {
   // （见 NOOP_DISPOSER 的注释——那是本次改绑官方后新撞出来的分歧，按官方补齐，语义不变）。
   svc.effect(() => {
     factGate.reset();
+    askDeduper.reset();
     return NOOP_DISPOSER;
   });
 }

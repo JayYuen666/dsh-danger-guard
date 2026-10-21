@@ -1,0 +1,55 @@
+# OpenSSF Scorecard：供应链体检。
+#
+# 它查的正是本仓这一层关心的东西——脚本注入、token 权限、依赖是否钉版、分支保护是否
+# 存在。结果同时进 code scanning 面板与 OpenSSF 公有 API（本仓是 public 仓）。
+#
+# publish_results 只在默认分支上有效：上传的身份由 OIDC 换得，所以要 id-token: write。
+name: scorecard
+on:
+  # 分支保护/ruleset 变更时重跑，否则 Branch-Protection 这项检查只会停在旧值上。
+  branch_protection_rule:
+  # 手动入口：同上。注意 analysis 的 if 要求「默认分支或 PR」，
+  # 所以在功能分支上手跑时该 job 会被跳过——这不是故障。
+  workflow_dispatch: {}
+  schedule:
+    - cron: "23 4 * * 1"
+  push:
+    branches: [main]
+# 工作流级全只读；两个写权限只挂在 analysis job 上。
+permissions: read-all
+jobs:
+  analysis:
+    name: scorecard analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # publish_results: true 只在默认分支生效，所以在非默认分支上不跑这条。
+    if: github.event.repository.default_branch == github.ref_name || github.event_name == 'pull_request'
+    permissions:
+      security-events: write
+      id-token: write
+      # job 级 permissions 会覆盖工作流级的 read-all，未列出的作用域一律 none：
+      # 少了 contents，下面那次 checkout 拿不到代码；少了 actions，scorecard 读不了 workflow 文件。
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          # 不让 checkout 把 token 留在 .git/config 里：后续步骤不该能借它推代码。
+          persist-credentials: false
+      - name: Run analysis
+        uses: ossf/scorecard-action@v2.5.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: scorecard-sarif
+          path: results.sarif
+          retention-days: 5
+      - name: Upload to code-scanning
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: results.sarif

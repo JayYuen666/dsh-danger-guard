@@ -97,9 +97,13 @@ function searchEvents(searchPath: string, pattern: string): SessionEvent[] {
   return [fxCall("s1", "grep", JSON.stringify({ path: searchPath, pattern })), fxResult("s1")];
 }
 
-/** 与生产侧同一条不变式（此处独立重述：生产侧改语义时这里必须红，不能跟着一起漂）。 */
+/** 与生产侧同一条不变式（此处独立重述：生产侧改语义时这里必须红，不能跟着一起漂）。
+ *
+ *  补的必须是**平台分隔符**：两枚入参都是宿主真实路径，Windows 上是 `\` 分隔。
+ *  重述不等于可以抄错——写死 `/` 时这条断言在 Windows 上恒假，红的是测量而不是被测对象。 */
 const isAncestorDir = (candidate: string, target: string): boolean =>
-  candidate !== target && target.startsWith(`${candidate}/`);
+  candidate !== target &&
+  target.startsWith(candidate.endsWith(path.sep) ? candidate : `${candidate}${path.sep}`);
 
 /** 文案里出现的绝对路径（反引号包起来的那几枚），与语言、措辞无关。 */
 const BACKTICKED = /`(?<token>[^`]+)`/gu;

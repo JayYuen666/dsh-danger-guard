@@ -2,6 +2,7 @@
 //
 import type { StatsSnapshot } from "./stats-shape.ts";
 import type { BashDenialKey, RuleTier } from "./danger-rules.ts";
+import type { GuardMode } from "./mode-policy.ts";
 // 形状单源在零依赖叶子模块（为什么：见那枚模块的文件头）。这里转发一枚，
 // 让本模块的既有消费方（host 的接线与用例）不必改导入路径。
 export type { StatsSnapshot } from "./stats-shape.ts";
@@ -12,7 +13,7 @@ export type { StatsSnapshot } from "./stats-shape.ts";
 // 判定链与卡片读数口都单向依赖它。
 //
 // 出域那一格**不在这里**：`judge-cost` 的 lesson-loop pass 由调用点按 `judgeStats` 决定
-// （见 host.ts 的 `sampleJudge`）——本模块只管本地（进程内、退出即消失）。
+// （见 `lib/lesson-report.ts` 的 `sampleJudge`）——本模块只管本地（进程内、退出即消失）。
 //
 // 除了"耗时与输入规模"，这里还记**拦了什么**（按规则键）与**配额放行用了几次**：
 // 前者是设置卡那一栏要展示的主体（"rmrf 5 · noVerify 4"），后者是"防死锁出口被用到了"
@@ -46,6 +47,11 @@ const slowByFace = new Map<string, number>();
  *  而"直接拒了"与"问过用户"是两种不同的结论。 */
 const hitsByKey = new Map<string, number>();
 const askByKey = new Map<string, number>();
+/** 按档位"看见了但没拦"的命中（规则键 / 档位各一格）。 */
+const allowedByKey = new Map<string, number>();
+const allowedByMode = new Map<string, number>();
+/** 被去重掉的询问（同一会话同一命令重复命中）。 */
+const skippedByKey = new Map<string, number>();
 /** 事实门配额放行次数（防死锁出口）。它一旦非零，那条目标就带着长期免检。 */
 let quotaReleases = 0;
 
@@ -112,6 +118,29 @@ export function noteRuleHit(key: BashDenialKey, tier: RuleTier): void {
   bump(tier === "ask" ? askByKey : hitsByKey, key);
 }
 
+/** 记一次"看见了但本档选择不动手"。
+ *
+ *  它与 `hits` / `asks` 分开记：那两格是"动手拦了"，这一格是"按当前档位没拦"。
+ *  ⚠ 这一格**不专指**零兵底：自动审查档里交给 reviewer 的命中、已退役规则（长驻服务器）的
+ *  命中也会落进来，所以读它是「这一档总共放过多少」，不是「用户选了完全不拦」。
+ *  沙箱让路（`rmrf` 交给宿主）**不算**这一格——那是交给别人拦，不是放过。
+ *
+ *  @param mode 档位名。收窄到 `GuardMode` 是为了让调用点拼错时当场编译失败，
+ *              而不是在读数里静默多出一个桶。 */
+export function noteAllowedHit(key: BashDenialKey, mode: GuardMode): void {
+  bump(allowedByKey, key);
+  bump(allowedByMode, mode);
+}
+
+/** 记一次**重复命中未再上报**（同一会话 + 同一规则键 + 同一命令原文又命中了一次）。
+ *
+ *  ⚠ 被去重的那次**仍然会弹给用户**（判定照旧是 `ask`，证据也照旧量）——
+ *  这一格表达的是"教训卡没有为同一条命令再炸一张"，不是"用户少被打扰一次"。
+ *  所以 `asks` 也不再等于"用户被问过几次"，两者读法不同。 */
+export function noteAskSkipped(key: BashDenialKey): void {
+  bump(skippedByKey, key);
+}
+
 /** 记一次事实门的**配额放行**（连续未收敛拒绝达上限后的出口）。 */
 export function noteQuotaRelease(): void {
   quotaReleases += 1;
@@ -128,6 +157,9 @@ export function statsSnapshot(): StatsSnapshot {
     slow: recordOf(slowByFace),
     hits: recordOf(hitsByKey),
     asks: recordOf(askByKey),
+    allowed: recordOf(allowedByKey),
+    allowedByMode: recordOf(allowedByMode),
+    skipped: recordOf(skippedByKey),
     quotaReleases,
     slowMs: SLOW_JUDGE_MS,
     window: STATS_WINDOW_CALLS,

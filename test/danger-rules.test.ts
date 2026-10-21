@@ -31,6 +31,15 @@ import {
 } from "../lib/command-segments.ts";
 import { MESSAGES, renderFix } from "../lib/messages.ts";
 import { askRequestOf } from "../lib/confirm.ts";
+import type { PolicyFacts } from "../lib/mode-policy.ts";
+
+/** 「工作区内修改」档：能问、不是自动审查、沙箱不管这次目标 —— 两族 ask 规则在这档仍走审批。 */
+const WORKSPACE_ASKABLE: PolicyFacts = {
+  mode: "workspace-write",
+  askable: true,
+  autoReview: false,
+  sandboxCovers: false,
+};
 
 /** `String.raw` 的收尾反斜杠会连反引号一起吃掉，故尾部带 `\` 的用串一律拼出来。 */
 const BACKSLASH = "\\";
@@ -197,6 +206,18 @@ describe("bashDanger：rm -rf 拦截", () => {
     const result = bashDanger("rm -rf /");
     assert.equal(result, "rmrf");
     assert.match(denialTextOf("rmrf"), /rm -rf/u);
+  });
+
+  it("家目录自己就以分隔符收尾时，判据不拼出双分隔符（防御性分支）", () => {
+    // `os.homedir()` 正常不会带尾分隔符，但判据不能假设这一点：拼出 `//` 会让前缀匹配
+    // 恒假，方向是把"家目录的深层后代"误判成灾难目标。这里把桩打成带尾斜杠的形。
+    homeStub.value = "/home/tester/";
+    try {
+      assert.equal(bashDanger("rm -rf /home/tester/.cache/x/y"), undefined, "深层后代仍放行");
+      assert.equal(bashDanger("rm -rf /home/tester"), "rmrf", "家目录本身照拦");
+    } finally {
+      homeStub.value = undefined;
+    }
   });
 
   it("rm -rf ~ 与 ~/ 开头被拦", () => {
@@ -410,6 +431,15 @@ describe("bashDanger：可配置词表", () => {
     );
     assert.equal(result?.key, "secretPath");
     assert.match(denialTextOf("secretPath"), /密钥|凭据/u);
+  });
+
+  it("extraSecretPatterns：Windows 形的目标也命中（用户写的是 `/` 分隔）", () => {
+    // 用户配模式时几乎总写 `/`（`secrets/`）。Windows 形目标（`...\\secrets\\prod.env`）
+    // 若只保留原形态，这条模式永远匹配不上 —— 那个设置项在 Windows 上等于没配。
+    // 判据现在多给一份"反斜杠折成 `/`"的目标形态，于是两种写法都生效。
+    const winTarget = `C:${String.fromCodePoint(92)}w${String.fromCodePoint(92)}proj${String.fromCodePoint(92)}secrets${String.fromCodePoint(92)}prod.env`;
+    const hit = editDanger({ file_path: winTarget }, { extraSecretPatterns: ["secrets/"] });
+    assert.equal(hit?.key, "secretPath", "反斜杠形目标必须也能被用户模式命中");
   });
 
   it("extraSecretPatterns 不影响默认密钥面", () => {
@@ -1915,6 +1945,31 @@ describe("b9：Windows 形态家目录（os.homedir + 宿主平台双桩）", ()
     assert.equal(bashDanger(RMRF_WIN_HOME_SLASHES), "rmrf");
   });
 
+  it("windows 轨道：家目录的深层普通后代放行（与 POSIX 侧同一门槛）", () => {
+    // 这条钉的是本轮修掉的误拦：Windows 轨道此前**没有**深层后代豁免，而
+    // `WINDOWS_SYSTEM_AND_USERS_RE` 匹配 `^[a-z]:/users/`，于是家目录下任何路径都命中它
+    // ⇒ `rm -rf <home>/.cache/x/y` 在 Windows 上被拦，在 POSIX 上放行（同一动作两种结论）。
+    //
+    // 修法是把豁免写成**守卫提前返回**（挂在 `||` 链上无效：`false || true` 恒为 true）。
+    homeStub.value = winHome;
+    try {
+      assert.equal(
+        bashDanger(`rm -rf ${winHome}${BACKSLASH}.cache${BACKSLASH}x${BACKSLASH}y`),
+        undefined,
+      );
+      assert.equal(bashDanger(`rm -rf ${RMRF_WIN_HOME_SLASHES}/.cache/x/y`), undefined);
+      // 对照：家目录本身、直接子项、含 `..` 的写法照旧拦（豁免不许放宽到这几形）。
+      assert.equal(bashDanger(`rm -rf ${winHome}`), "rmrf");
+      assert.equal(bashDanger(`rm -rf ${winHome}${BACKSLASH}Documents`), "rmrf");
+      assert.equal(
+        bashDanger(`rm -rf ${winHome}${BACKSLASH}.cache${BACKSLASH}..${BACKSLASH}etc`),
+        "rmrf",
+      );
+    } finally {
+      homeStub.value = undefined;
+    }
+  });
+
   it("windows 轨道的家目录比较吃结构归一后的值（`.`/重复分隔符同形）", () => {
     homeStub.value = winHome;
     assert.equal(bashDanger(`rm -rf E:${BACKSLASH}work${BACKSLASH}bob${BACKSLASH}.`), "rmrf");
@@ -2855,12 +2910,22 @@ describe("短旗标簇按命令词分派：封闭字母表已撤销，POSIX 轨 
       assert.equal(bashDanger("Remove-Item -WhatIf ~", opts), undefined);
       assert.equal(bashDanger("Remove-Item -WhatIf -Force ~", opts), undefined);
     }
-    // Windows 字形目标只在轨道参与时才是灾难目标（这一条与此次改动无关，钉住免得把局限写宽）
+    // Windows 字形目标只在轨道参与时才是灾难目标（这一条与此次改动无关，钉住免得把局限写宽）。
+    //
+    // ⚠ "不传方言 ⇒ 轨道不参与"这条**必须把宿主也钉成 POSIX**：`windowsTrack` 是
+    // `isWindowsHost() || windowsDialect`，在 Windows runner 上宿主自己就让轨道参与了，
+    // 于是同一个调用在那里返回 `rmrf` —— 原写法把"宿主是 POSIX"当成了隐含前提，
+    // CI 上就红在这里（实测 Windows 报 `actual: 'rmrf'`）。
     assert.equal(
       bashDanger(String.raw`Remove-Item -WhatIf -rec C:\Users\bob`, pwshDialect),
       "rmrf",
     );
-    assert.equal(bashDanger(String.raw`Remove-Item -WhatIf -rec C:\Users\bob`), undefined);
+    platformStub.value = "linux";
+    try {
+      assert.equal(bashDanger(String.raw`Remove-Item -WhatIf -rec C:\Users\bob`), undefined);
+    } finally {
+      platformStub.value = undefined;
+    }
     assert.equal(
       bashDanger(String.raw`Remove-Item -WhatIf -Recurse -Force C:\Users\bob`, pwshDialect),
       "rmrf",
@@ -3563,7 +3628,7 @@ describe("出路文案（renderFix）：结构由 lib 产出，句子按当次�
 const gitKeyOf = (command: string): BashDenialKey | undefined => bashVerdict(command)?.key;
 /** 该串是否落在 `ask` 档（走 lib/confirm 的入口，与预检同一条路）。 */
 const gitAskOf = (command: string): BashDenialKey | undefined =>
-  askRequestOf("bash", { command }, undefined, MESSAGES.zh)?.key;
+  askRequestOf("bash", { command }, undefined, WORKSPACE_ASKABLE, MESSAGES.zh)?.key;
 
 describe("git 破坏族（A1）：全部 `ask` 档，逐子命令判", () => {
   it("`reset --hard` 与 `push --force` 家族：命中且入 `ask` 档", () => {

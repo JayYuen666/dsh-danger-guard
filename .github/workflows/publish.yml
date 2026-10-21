@@ -8,9 +8,14 @@ concurrency:
   cancel-in-progress: false
 permissions:
   contents: read
-  # npm trusted publishing（OIDC）：官方文档里 id-token: write 是必需项，缺了报
-  # ENEEDAUTH。runner 上没配过 trusted publisher 时这行无害——npm 探测不到 OIDC
-  # 环境就回落到下面的 token，两条路并存，所以不必等 npmjs.com 配好才合。
+  # npm trusted publishing（OIDC）：id-token: write 是换取短期发布凭据的前提。少了它不会安静降级：
+  # 命令里带着 --provenance 时，签来源证明那一步会硬失败并报
+  # ERR_PNPM_ID_TOKEN_GITHUB_WORKFLOW_INCORRECT_PERMISSIONS。
+  # 优先级方向别读反：本包在 npmjs 上配好 trusted publisher 之后，OIDC 赢过 NODE_AUTH_TOKEN
+  # （pnpm 的 publish_options.rs 原话："OIDC takes precedence over a configured static token"），
+  # 交换成功时下面那个 secret 根本不被读到；只有交换失败（没配、权限不足、配置过期）才回落到它。
+  # registry 上该版本的 _npmUser 记作 "GitHub Actions <npm-oidc-no-reply@github.com>" 而不是发布者
+  # 本人，就是这条路的痕迹：归属仍在 maintainers 与 repository 上，改不动也不必改。
   id-token: write
 jobs:
   publish:
@@ -18,11 +23,11 @@ jobs:
     steps:
       # action 按 tag 引用意味着上游动 tag 就等于本仓换了构建器。钉 commit SHA，
       # tag 版本写在同行注释里，升级时照着改这一行即可。
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 12
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -65,19 +70,32 @@ jobs:
           [ "$code" = "200" ] || exit 1
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check
-      # prepack 会重建 host.js / client.js / types/，产物不入库也发得出去
-      # 凭据走 NODE_AUTH_TOKEN：setup-node 配了 registry-url 之后会设
-      # NPM_CONFIG_USERCONFIG 指向它自己生成的那份 .npmrc，npm 只读那一份，
-      # $HOME/.npmrc 会被完全忽略——所以 token 必须以环境变量注入，不能写文件。
-      # 但注入的必须是**与上面预检同款清洗过的值**：预检用 TOKEN_TIDY（剔 \r\n 与空白），
-      # 这里若直接给裸 secret，则 secret 尾部一个换行就让「whoami 通过、publish 401」，
-      # 而上面那句「已剔除后使用」对这一步是假的。实测口径同预检那步，一处清洗两处用。
-      # --provenance：上面的 id-token: write 就是给它用的，不加等于白拿 OIDC；
-      # 消费方在 npm 页面就能看到这一版是从哪个仓库、哪次构建出来的。
+      # prepack 会重建 host.js / client.js / types/，产物不入库也发得出去。
+      # 凭据优先级：OIDC 在前，这枚 NODE_AUTH_TOKEN 在后（pnpm 的 publish_options.rs 原话
+      # "OIDC takes precedence over a configured static token"）。trusted publisher 配好时
+      # 它根本不参与认证，交换失败才轮到它——留着是兜底，不是主路。
+      # 注入方式只能是环境变量：setup-node 配了 registry-url 会把 `${NODE_AUTH_TOKEN}` 占位写进
+      # RUNNER_TEMP/.npmrc 并用 NPM_CONFIG_USERCONFIG 指过去，$HOME/.npmrc 被忽略；真 token 留在
+      # 环境变量里。别往仓库里的 .npmrc 写明文——项目级 .npmrc 也不展开 `${...}` 占位。
+      # 注入的值与上面预检同款清洗（剔 \r\n 与空白）：预检用副本、publish 读原值，secret 尾部
+      # 一个换行就变成「whoami 通过、publish 401」，两处必须是同一份清洗。
+      # --provenance 取的是另一枚 id-token（audience 为 sigstore），与 npm 交换那枚互相独立，
+      # 所以它不受 trusted publisher 是否已配影响；少了它，产物只剩 npm 自己的签名。
       # --publish-wait-timeout：等 registry 真正放出这个版本并对 tarball 回 HEAD，
       # 于是「发出去了但装不上」在 workflow 里就红，而不是等用户报障才发现。
+      # 若要改成 staged 发布（CI 只 stage、人工 approve）：发布命令换成 `pnpm stage publish`。
+      # 本仓命令行还带着 --publish-wait-timeout，切换时一并去掉：stage 与它互斥，pnpm 以
+      # ERR_PNPM_PUBLISH_WAIT_WITH_STAGE 拒绝，不会静默忽略。
+      # 切换前先到 npmjs 上该包 Settings → Trusted publishing 看一眼 Allowed actions：npm 文档在这里
+      # 两处说法不一致（网页说 `npm stage publish` 一直允许；API 却把 createStagedPackage 列成一枚
+      # 可选权限），本仓没有本地判据能判它，所以别假定默认值——stage 第一步就被拒时先回来查这一页。
+      # approve 两条入口，都要 2FA，走哪条由人决定：
+      #   本机  `pnpm stage approve <stage-id> [--otp <码>]`（多个 id 一批共用一枚 OTP）
+      #   网页  npmjs.com → 该包 → Staged Packages → Approve
       - run: |
-          export NODE_AUTH_TOKEN="$(printf '%s' "$TOKEN" | tr -d '\r\n[:space:]')"
+          # 拆成赋值 + export：export X="$(cmd)" 会把 cmd 的退出码吞成 0（SC2155）。
+          NODE_AUTH_TOKEN="$(printf '%s' "$TOKEN" | tr -d '\r\n[:space:]')"
+          export NODE_AUTH_TOKEN
           pnpm publish --no-git-checks --access public --provenance --publish-wait-timeout 600000
         env:
           TOKEN: ${{ secrets.NPM_TOKEN }}

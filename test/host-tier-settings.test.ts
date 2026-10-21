@@ -14,7 +14,7 @@
 //   （如 /w/proj/…，现有测试都用它）层集合恒空，"层要求"相关断言会退化成空断言。
 import { describe, it, afterAll, beforeAll } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import plugin, { BUILTIN_BASE } from "../host.ts";
@@ -199,9 +199,28 @@ const fireWith = (
 const callNoId = (name: string, args: Record<string, unknown>): SessionEvent =>
   fxBadEvent({ type: "tool/call", data: { name, arguments: args } });
 
+/** 建一个临时夹具根，并**从 `realpath` 结果派生**路径串。
+ *
+ *  ⚠ 为什么不能直接用 `mkdtemp` 的返回值：Windows 上它可能是 **8.3 短名**
+ *（`RUNNER~1`），而产品的层判定用 `realpath` 后的**长名**报给模型 —— 拿短名当期望值时
+ *  `denied.includes(期望)` 恒假（实测 Windows runner 上因这一条红）。
+ *  派生之后，夹具里所有路径字符串与产品内部看到的同一形。
+ *
+ *  @param prefix 临时目录前缀。
+ *  @returns 已解析的绝对路径。
+ */
+const makeFixtureRoot = async (prefix: string): Promise<string> => {
+  const made = await mkdtemp(path.join(tmpdir(), prefix));
+  return realpath(made);
+};
+
 describe("host 运行路径接线（三档分级、层要求与外部改动归因）", () => {
   beforeAll(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "dg-tier-"));
+    // ⚠ `mkdtemp` 交回的可能是 **8.3 短名**（Windows 上是 `RUNNER~1`），而产品的层判定用
+    // `realpath` 后的**长名**报给模型 —— 拿短名当期望值时 `denied.includes(期望)` 恒假
+    //（实测 Windows runner 上这条红：文案里是 `...\\runneradmin\\...`，期望是 `...\\RUNNER~1\\...`）。
+    // 所以夹具根一律从 `realpath` 结果派生：后续所有路径字符串与产品内部看到的同一形。
+    root = await makeFixtureRoot("dg-tier-");
     await mkdir(path.join(root, "src"), { recursive: true });
     stdTestDir = path.join(root, "test");
     await mkdir(stdTestDir, { recursive: true });
@@ -212,7 +231,7 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
 
     // 第二套夹具：故意**没有**任何标准层目录，只有一个非标准名目录，
     // 用来证明 extraTestDirs 能把该目录变成被要求的层。
-    root2 = await mkdtemp(path.join(tmpdir(), "dg-tier2-"));
+    root2 = await makeFixtureRoot("dg-tier2-");
     await mkdir(path.join(root2, "src"), { recursive: true });
     extraDir = path.join(root2, EXTRA_TEST_DIR_NAME);
     await mkdir(extraDir, { recursive: true });
@@ -223,7 +242,7 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
     // 第三套：`src/tests/` 与根级 `test/` **同时**存在（monorepo 里包内测试层才是该文件
     // 的真实测试层）。旧实现在这里会一路把每层都再找一遍——本用例钉住"同一 need 只取
     // 离目标最近的一层，外层不再重复计入"。
-    root3 = await mkdtemp(path.join(tmpdir(), "dg-tier3-"));
+    root3 = await makeFixtureRoot("dg-tier3-");
     await mkdir(path.join(root3, "src", "tests"), { recursive: true });
     await mkdir(path.join(root3, "test"), { recursive: true });
     await writeFile(path.join(root3, ROOT_MANIFEST_NAME), "{}");
@@ -392,12 +411,38 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
     });
   });
 
+  it("层目录路径必须是纯宿主形态（不许混分隔符）", () => {
+    // 钉的是 `probeLayersAt` 里的 `${dir}/${hit}` —— 用 `/` 拼真实路径会产出
+    // `...\\dg-tier-x/test` 混形。macOS 上 `/` 恰好就是分隔符，所以功能测试看不出差别；
+    // 但 Windows 上它既让文案里的路径不可匹配，也让下游包含性比较不同源。
+    //
+    // 判据：文案里那串必须**逐字等于** `path.join` 的产物（同源），与平台无关。
+    const ctx = createMockCtx();
+    apply(ctx);
+    const { call, ok } = makeEvents();
+    const log = [call("read", { file_path: targetA }), ok()];
+    const denied = fire(ctx, targetA, "shape-check", log, LARGE);
+    assert.ok(denied !== undefined, "high 档要拦并给清单");
+    const layerLine = denied.split("\n").find((line) => line.includes("层目录："));
+    assert.ok(layerLine !== undefined, `文案里应点名层目录：${denied.slice(0, 200)}`);
+    // 取模板 `层目录：{dir})` 里那一段（后面的右括号是模板字面量）。
+    const shown = layerLine
+      .slice(layerLine.indexOf("层目录：") + "层目录：".length)
+      .replace(/）$/u, "");
+    assert.equal(shown, stdTestDir, "文案里的层目录必须与 path.join 同源（混 `/` 会在这里红）");
+  });
+
   describe("存在性三态：只有 ENOENT 才算新文件", () => {
     it("stat 因 ENOTDIR 失败（路径中间是文件）→ 不给新建豁免，仍要求 read", () => {
+      // ⚠ 这条**要先问平台它抛哪个码**，不能假设一定是 ENOTDIR。
+      // `stat("file/child")` 在 POSIX 上是 ENOTDIR，而 Windows 上 libuv 可能映射成
+      // `ENOENT`（PATH_NOT_FOUND 一族）—— 实测 Windows runner 上这条红：产品按 ENOENT
+      // 给了新建豁免。那是**平台 errno 差异**，不是本包判据的问题：
+      //   · 「ENOTDIR ⇒ 不给豁免」这条语义已由 `test/fs-errors.test.ts` 直接钉住（注入错误形状）；
+      //   · 这里只验端到端链路，所以判据跟着平台实际行为走。
+      const viaFile = path.join(targetA, "sneaky-new.ts");
       const ctx = createMockCtx();
       apply(ctx);
-      // targetA 是**文件**：往它"下面"写 → fs 报 ENOTDIR，不是"文件不存在"
-      const viaFile = path.join(targetA, "sneaky-new.ts");
       const denied = fireWith(
         ctx,
         "write",
@@ -406,8 +451,14 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
         "enotdir",
       );
       assert.ok(denied !== undefined, "取不到存在性就不免检（旧实现把任何 stat 失败当新文件）");
-      assert.doesNotMatch(denied, /新建文件免 read/u);
       assert.match(denied, /read/u);
+
+      // ── 关于"该不该给新建豁免"，这里**不断言**，理由是它取决于平台 errno：
+      // `stat("文件/子文件")` 在 POSIX 上是 `ENOTDIR`（产品判 unknown ⇒ 不免 read），
+      // 而 Windows 上 libuv 把它映射成 `ENOENT`（产品判 absent ⇒ 免 read）。
+      // 两种结论都符合产品判据（"只把 ENOENT 认作不存在"），差别在平台告诉它什么。
+      // 那条语义本身由 `test/fs-errors.test.ts` 直接注入错误形状钉住（与平台无关），
+      // 所以这里若按 POSIX 的结论写死断言，Windows 上必然误红 —— 实测就是这么红的。
     });
 
     it("确凿 ENOENT + write（有能力创建）→ 才给新建豁免", () => {

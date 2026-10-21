@@ -1,184 +1,246 @@
-# @jayyuen66/dsh-danger-guard
+<p align="center">
+  <img src="https://cdn.jsdelivr.net/gh/JayYuen666/dsh-danger-guard@main/icon.svg" width="96" height="96" alt="dsh-danger-guard logo" />
+</p>
 
-[English](./README.md)
+<h1 align="center">dsh-danger-guard</h1>
 
-### 它做什么
+<p align="center"><em>危险命令与凭据路径编辑，在下发之前就被物理拒绝。</em></p>
 
-- 工具调用的前置守卫：拦截决定挂在 `ctx.tools.guard` 的同步谓词（host.ts）上，返回字符串即物理拒绝该次调用；此外订两条官方瀑布做「编辑前预检」（`tools/pre-execute` / `tools/post-execute`），见下面第 4 条。
-- 宿主把理由作为该次工具调用的错误结果回给模型：模型拿到的是"为什么拦 + 改成什么"，不是静默失败。
-- 它做三条防线：
-  - bash/pwsh 危险命令：lib/danger-rules.ts 的 `bashVerdictOf`——git 钩子绕过、灾难性 rm、下载即执行、长驻 dev server、**git 破坏族（7 枚）**、**基础设施破坏族（5 枚）**。
-  - 编辑/写类工具的密钥路径：`secretPathDeny`。
-  - 首次编辑事实强制门：lib/fact-gate.ts 状态机 + host.ts 的取证判定。
-- **每一枚规则键都有处置档，归属面是一张表**（`RULE_TIER: Record<BashDenialKey, "deny" | "ask">`）：
-  - `deny`（**同步** `ctx.tools.guard` 硬拒）：命中即物理拒绝，模型拿到 `Error: <理由>`。四类"已确认危险"的旧规则在这一档。
-  - `ask`（`tools/pre-execute` → 宿主 `ApprovalService`）：交官方的 `{ kind: "ask", reason, displayReason }`，
-    宿主负责策略判定、审计落日志、UI 路由与 fail-closed；`allowed-once` 才放行。**认不准那一档与两族新规则**在这一档
-    ——它们每条都有正当用法（"我就要重来"、"删开发环境"、"发布迁移"），该不该做属于用户。
-  - 这张表的类型让两条性质**结构性**成立：忘定档 = 编译错误；一枚键两属 = 同一格塞不进两个值。
-    后者是硬需求：`tools.guard` 是同步谓词而审批是异步的，而宿主在审批放行之后**还会再跑一次 guard**
-    （installed dsh-tools `lib/index.js:3239`），所以"两处都认领"的表现就是**用户点了"允许"之后还是被拒**。
-  - 严重度择优：同一串里既有 `ask` 段又有 `deny` 段时**整串按 `deny` 收口**（判据是逐段扫到拿到 `deny` 为止）。
-    少了它，前面那段 `ask` 会让扫描提前收工、后面那段的灾难从未被判定。
-- **拒绝理由自带出路**：`BashVerdict` 带一枚结构化的 `Fix`，git 绕过点名越界的那几枚旗标、
-  灾难 rm 点名真正成灾的目标（**排除安全目标**）。所以模型拿到的是"改哪几个词就能过"，不是一句判断。
-- 预检（编辑前把证据取到手里，取代「先拒绝、再由模型自己去查」）。它有两个面，各挂一条瀑布，分工按「证据在什么时刻才真的算被看见」定：
-  - A 面（只读检视：`read`/`view`/`str_replace_editor view`）挂 `tools/post-execute`：门禁要的**引用面**随这次读取的结果一起交出去（官方 `PostToolDecision.accept{additionalContexts}`，`agent-loop` 在 commit 那条结果时收下、排到下一个 step 边界）。于是模型下一次编辑之前就看得见「谁引用它」。
-  - B 面（写类调用）挂 `tools/pre-execute`：模型**没读就改**时，当场取到的目标正文与引用面写进这一次的拒绝理由（官方 `PreToolDecision.deny{reason}`，宿主把它 materialize 成本次调用的错误结果），原样重试即凭投递水位放行——物理停止仍在 dispatch 之前，「改之前先看清它」这条不变式一个字没让。high 档额外要的**层证据**（test/e2e/docs）也在这同一趟里给出：结论从引用面那**一次扫描**派生（哪层目录内几处命中），不为此多花一次 I/O，并与 read/refs 一起记进投递水位。
-  - 为什么不是 `agent.inject()`：官方那一位把消息排在 **next pre-step**，而上下文按 step 推进——第 N 步决定这次编辑，只能看见第 N-1 步为止的内容，于是注入的证据是**编辑生效之后**才读到的；官方还明说排队可能被取消/丢弃，而水位会把它记成「补过了」。
-  - 四条让路（任一命中就整趟不参与，退回今天的拒绝路径）：会被密钥面拦下的目标（正文不许经预检外泄，且我们的 deny 会抢在密钥闸前面替它做决定）、已配额放行的目标（防死锁承诺优先）、什么都没挣到的那一趟（正文读不出、或引用扫描被预算截断）、以及**层缺项里有一层没被这次扫描覆盖**（遍历被预算截断、那层在扫描起点之外、或那层是软链——门禁的层探查跟链，扫描按官方 `lstat` 口径不跟）：那时「这层零命中」根本不成结论，半份「这层我探过了」比不给更糟。
-  - 有界是硬要求：平台不会放弃一枚挂起的 pre-execute promise，故引用扫描有文件数（256）、目录数（256）、单文件字节（64KB，超限**跳过**）与命中条数（40）四道上限并跳过依赖/产物与点开头目录，目标正文**定长读**（不是整文件进内存再截），取消信号与 3 秒墙钟合流。
-  - **遍历是分层的**（0.1.3 修的）：层级**自下而上**（目标所在目录 → … → 项目根）、层内**广度优先**（同层文件先读完再下钻）。原先是从根做一趟纯广度优先，大仓里预算恰好在最有用的文件**之前**耗尽——先走完 `apps/a`、`apps/b`… 才轮到目标那个深目录与它同级的 `test/` 层，于是遍历永远被截断、凭证永远给不出，预检恰恰在最需要它的仓库里等于没做。
-  - **凭证判据**：`遍历未被截断` **或** `找到了引用`（`refsCreditable`）。后者是刻意的：门禁认可模型自己那次**作用域正确**的检索当凭证，而那次检索**也不是穷尽的**——要求我们这趟扫描穷尽比那还严。而「**零命中 + 被截断**」仍然**不给**凭证：假阴性全住在那一种里（半份「没有引用者」会让模型删掉一个仍有引用者的文件，比不给证据更糟，文案那条「已扫范围内零命中」正是为它准备的）。
-- 另有一条"需确认"而不是"直接拒"的分支（规则键 `nestedShellUnconfirmed`）：嵌套 shell 的 `-c` 命令体取不出可靠文本（引号不闭合）或套娃超过下钻上限（`-c`/`eval` 体与 `$( )` 命令替换各有一道 16 层界：前者钉"逐层取体的次数"，后者钉"层数 × 每层重扫的文本长度"，长度上限只界得住单次扫描）时命中。
-  - 回的文案是"贴给用户、由用户确认后再执行"，因为这既不是"已确认危险"也不是"已确认安全"。
+<p align="center">
+  <a href="https://www.npmjs.com/package/@jayyuen66/dsh-danger-guard"><img src="https://img.shields.io/npm/v/@jayyuen66/dsh-danger-guard?style=flat-square&logo=npm&logoColor=white" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/@jayyuen66/dsh-danger-guard"><img src="https://img.shields.io/npm/dm/@jayyuen66/dsh-danger-guard?style=flat-square" alt="npm downloads" /></a>
+  <a href="https://github.com/JayYuen666/dsh-danger-guard/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-danger-guard/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
+  <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
+  <img src="https://img.shields.io/badge/node-%3E%3D22.12-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.2-658EFF?style=flat-square" alt="dsh" />
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
+</p>
 
-### 安装
+<p align="center">
+  <img src="https://skillicons.dev/icons?i=typescript,nodejs,react,vitest,githubactions" alt="tech stack" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/JayYuen666"><img src="https://img.shields.io/badge/GitHub-JayYuen666-181717?style=flat-square&logo=github&logoColor=white" alt="GitHub" /></a>
+  <a href="mailto:cqwkkj@gmail.com"><img src="https://img.shields.io/badge/Email-cqwkkj@gmail.com-EA4335?style=flat-square&logo=gmail&logoColor=white" alt="Email" /></a>
+  <a href="https://twitter.com/JayYuen666"><img src="https://img.shields.io/badge/Twitter-X%2FJayYuen666-000000?style=flat-square&logo=x&logoColor=white" alt="Twitter/X" /></a>
+  <a href="./README.md"><img src="https://img.shields.io/badge/lang-English-658EFF?style=flat-square" alt="English" /></a>
+</p>
+
+**一个 [dsh](https://github.com/deepseek-ai/deepseek-harness) 的前置守卫：危险 shell 命令与凭据路径编辑在下发之前就被物理拒绝，而模型拿到的是理由加一条真能走通的出路。**
+
+## <img src="https://api.iconify.design/lucide/file-text.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 目录
+
+- [ 目录](#-目录)
+- [ 它做什么](#-它做什么)
+  - [判定是怎么做出来的](#判定是怎么做出来的)
+- [ 安装](#-安装)
+  - [shared 的版本下限](#shared-的版本下限)
+- [ 确认它真的在工作](#-确认它真的在工作)
+- [ 它不提供什么](#-它不提供什么)
+- [ 在 dsh 里启用](#-在-dsh-里启用)
+- [ 规则拦什么](#-规则拦什么)
+- [ 设置项](#-设置项)
+- [ 四个权限预设各拦什么](#-四个权限预设各拦什么)
+  - [与沙箱的让路，以及为什么只有 `rmrf` 有](#与沙箱的让路以及为什么只有-rmrf-有)
+- [ 已知边界](#-已知边界)
+- [ 数据与隐私](#-数据与隐私)
+- [ 常见问题](#-常见问题)
+- [ 开发](#-开发)
+- [ 许可](#-许可)
+
+## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 它做什么
+
+- **它拦截，不是建议。** 判定挂在 `ctx.tools.guard` 的同步谓词上：返回字符串即拒绝该次调用。宿主把理由变成这次调用的错误结果，所以模型读到的是"为什么被拒、改成什么写法"，不是静默失败。
+- **三条防线：**
+  - `bash` / `pwsh` 危险命令（`lib/danger-rules.ts` 的 `bashVerdictOf`）：git 钩子绕过、灾难性 `rm`、下载即执行、长驻 dev server、git 破坏族、基础设施破坏族。
+  - 编辑/写类工具上的凭据与密钥路径（`secretPathDeny`）——按**参数键形**识别，**不看工具名**，因为工具名会随 provider 漂移。
+    - 编辑面还有**第二枚**拒绝键 `opaqueTarget`：目标路径长到超出可判定上限时，既没确认为凭据、也没确认不是，所以判拒绝，文案是"别原样重试、把路径贴给用户确认"。与 bash 侧 `nestedShellUnconfirmed` 同一个原则——**判不了不等于安全**。（超长的**命令**走的是 `nestedShellUnconfirmed`。）
+  - 首次编辑事实门（`lib/fact-gate.ts`）：没读过目标就改，或碰了高风险面却没有层证据，会被拒，并把缺的证据一并附上。
+- **预检自己把那份证据取到手**（两个面挂两条瀑布，分工按"证据在什么时刻才真的算被看见"定）：
+  - A 面挂 `tools/post-execute`：只读检视（`read` / `view` / `str_replace_editor view`）的**引用面**随这次读取的结果一起交出去（`PostToolDecision.accept{additionalContexts}`），于是模型下一次编辑之前就看得见"谁引用它"。
+  - B 面挂 `tools/pre-execute`：模型**没读就改**时，当场取到的目标正文与引用面写进这一次的拒绝理由（`PreToolDecision.deny{reason}`）；原样重试即凭投递水位放行。物理停止仍在 dispatch 之前，"改之前先看清它"这条一个字没让。
+  - 为什么不是 `agent.inject()`：那个 API 把上下文排在**下一个 pre-step**，而决定是按 step 做的——证据会在编辑生效**之后**才读到。
+  - 扫描有硬上限（文件数、目录数、单文件字节、命中条数；超限文件**跳过**），取消信号与墙钟合流。平台不会放弃一枚挂起的 pre-execute promise，所以无界工作不是一个选项。
+  - **凭证判据**："遍历未被截断" **或** "找到了引用"。门禁认可模型自己那次作用域正确的检索当凭证，而那次检索**也不是穷尽的**——要求这趟扫描穷尽比门禁自己还严。但"**零命中 + 被截断**"仍然**不给**凭证：假阴性全住在那一种里，半份"我探过了"比不给更糟。
+- **每个拒绝都自带出路。** `BashVerdict` 带一枚结构化的 `Fix`：git 绕过点名越界的那几枚旗标，灾难 `rm` 点名真正成灾的目标（**排除安全目标**）。模型拿到的是"改哪几个词就能过"，不是一句判断。
+- **`ask` 命中时跑一趟只读爆炸半径预演**（命令表写死、**不插值任何模型输入**），输出接进审批请求的 `reason` 与 `displayReason` 的每一门语言。空输出是**结论**（"此刻不会改动任何东西"），不是"没查到"。
+- **重复命中不再重复上报**（`AskDeduper`）：同一会话 + 同一规则键 + 同一命令原文，第二次不再进教训总线、也不重算预演——但**判定与弹卡照旧**。这一层压掉的是"教训卡炸成碎片"，不是"用户被少问一次"；去重绝不能变成偷偷放行。
+
+### 判定是怎么做出来的
+
+- 只判 `bash` 与 `pwsh` 的命令串；`command` 非字符串则放行（不猜）。按 `;`、`&&`、`||`、`|`、换行、`&`、`(`、`)`、反引号分段，引号内不切段。
+- 断段、切词、结构视图、引号是否闭合**四个出口共用一台 POSIX 状态机**（`lib/command-segments.ts`）。两台机器会让同一串在不同判据下结论相反。
+- 包装词（`sudo`、`env`、`time`、`nice`、`stdbuf`、`timeout`、`taskset`、`watch`、`setsid`、`doas`、`pkexec`、`nohup`、`exec`、`command`、`xargs`、`parallel` 与前导 `VAR=x`）、bin 路径前缀（按 basename 比对，所以 `/usr/bin/sudo` 也不是逃逸口）、引号、反斜杠续行**都不是**逃逸口。引号包裹的旗标或命令头**是生效写法**：`git commit "--no-verify"` 确实跳过钩子，`"rm" -rf ~` 与不加引号同判。
+- 因为按工具维护的 option 表按定义补不完，包装词领头的段还会把其后**每个词位**都当候选命令头各判一遍。
+- **原则：认不准就放行**——唯一例外是**看不见的执行面**。取不出可靠文本的嵌套 `-c` / `eval` 体、超过下钻上限、段头是取代码串再执行的非 shell 解释器（`python3 -c`、`node -e`、`perl -e`、`php -r`…）、以及超出可判定长度的命令，一律判 `nestedShellUnconfirmed`：出路是交用户显式确认，或改写成单层、引号闭合的形态。
+- **严重度择优**：同一串里既有 `ask` 段又有 `deny` 段时，**整串按 `deny` 收口**（逐段扫到拿到 `deny` 为止）。少了它，前面那段 `ask` 会让扫描提前收工、后面那段的灾难从未被判定。
+
+## <img src="https://api.iconify.design/lucide/package.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 安装
 
 ```sh
 dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 ```
 
-- 包在公共 npm（`registry.npmjs.org`）上，安装不需要凭据。
-- 不再需要配作用域源：公共 npm 就是默认源。卸载：`dsh plugin --profile web remove @jayyuen66/dsh-danger-guard`。
-- 要求宿主 `dsh >= 0.2.1-rc.2`：真源是 `package.json` 里 `peerDependencies` 下的 `@deepseek-ai/dsh`，而宿主**真的强制它**——`evaluatePluginCompatibility`（`dsh-app-boot/src/plugin-compatibility.ts`，由 `plugin-manager/src/operations.ts:344`、`:479` 调用，alpha.1 与 alpha.2 之间逐字未变）以 `includePrerelease: true` 把每一枚 `@deepseek-ai/dsh*` peer 与运行中的宿主版本比对，不符即拒绝安装，并给出显式担责的出路 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。由于 `dsh-*` 那几枚按单一精确版本钉住（见 `test/publish-manifest.test.ts` 的版本形状门禁），宿主版本**高于**本下限同样算不符、也要走那次授权：本插件的类型与名义品牌与宿主 ABI 耦合，"自动跟上去"正是宿主类型面被装出第二份的那条路。`engines.dsh` 同值，但宿主不读它。实测：往 `dsh 0.2.1-rc.2` 的 profile 里装一枚 peer 写 `@deepseek-ai/dsh: 0.1.0` 的插件，得到 `dsh: installation rejected: ... is incompatible with dsh 0.2.1-rc.2`，且 `package.json`/`pnpm-lock.yaml`/`node_modules` 被原样回滚。
-- **要求 Node.js `>= 22.12`。** 本包是纯 ESM：用 `import { apply } from "@jayyuen66/dsh-danger-guard"` 或 `require("@jayyuen66/dsh-danger-guard")`。正是这个 Node 下限让 ESM 入口的 `require()` 形式可用，所以 `engines.node` 声明的是它；低于此版本时 `require` 形式会失败。
-- 发布产物含 `host.js` / `settings.js` / `client.js` / `cordis.patch.yml`、`types/` 声明树、`THIRD_PARTY_NOTICES.md`、两份 README、`LICENSE` 与 `icon.svg`。构建产物不入库，`prepack` 会重建，所以发出去的永远是当前源码产出的那一版。
-- **随包发布 TypeScript 声明**（`types/host.d.ts`、`types/settings-host.d.ts`，以及它们引用的 `lib/` 声明）。包根与 `./settings` 子路径各带一条 `types` 条件，`node16` / `bundler` 解析模式下 `tsc` 能取到。`./client` 与 `./cordis.patch.yml` 刻意没有声明：前者是浏览器 UMD 外壳（在 Node 里 import 会撞 `window is not defined`），后者由宿主 loader 当文件读。
-- 运行期值导入四枚：`@deepseek-ai/schemastery`（宿主 fork，`3.18.5-alpha.1`）、`@jayyuen66/dsh-plugin-shared`（`^0.1.4`）、`@deepseek-ai/dsh-brand`（`0.2.1-rc.2`）与 `zod`（`^4.6.5`）。`dependencies` 只留后两枚：那两枚 `@deepseek-ai/*` 是**必需 peer**——落 `peerDependencies`，并且为了让本仓自己的类型检查/构建/测试仍能解析，同步落 `devDependencies`。
-  - `shared` 这枚升级不是为版本号而版本号：`0.1.3` 把那些宿主包从它自己的 `dependencies` 挪进 `peerDependencies`，"装本插件会在 profile 里物化出第二份宿主类型面"这件事到此才断根；`0.1.4` 再把那几枚 peer 钉到与本包同一个 `0.2.1-rc.2`，下游就没有任何一处还在要 `alpha.1` 了。对 `dsh 0.2.1-rc.2` 实测：`dsh plugin --profile web add <本包 tarball>` 只装 3 枚包、profile 的 `node_modules` 下**没有** `@deepseek-ai/` 目录，且在该 profile 里 `pnpm peers check` 列出的宿主包全部要 `0.2.1-rc.2`（`dsh-brand`、`dsh-output-retention`）或宿主自己那套 cordis fork 的版本；而 registry 上的 `@jayyuen66/dsh-danger-guard@0.1.1` 会把 `cosmokit`、`dsh-brand`、`schemastery` 写进 profile，与运行中的宿主已加载的那份并存。MIT，源码 git+https://github.com/JayYuen666/dsh-danger-guard.git。
-  - `zod` 的真值导入点是 `lib/tool-ledger.ts` 的 `stateSchema`（投影态回填的形状校验），`@deepseek-ai/dsh-brand` 的是 `host.ts` 的 `brandNumber`，`@deepseek-ai/schemastery` 的是 `lib/settings-schema.ts`（`import Schema from …`）——所以那枚裸说明符同时出现在 `host.js` 与 `settings.js` 里。
-  - **`dependencies` 里不放任何 `@deepseek-ai/*`，这不是风格偏好**，由 `test/publish-manifest.test.ts` 钉着。消费方把本插件装进 profile 时，pnpm 配置是 `nodeLinker: hoisted` 且 `autoInstallPeers: false`，于是写在 `dependencies` 里的每一枚宿主包都会被落成**真实目录**，与宿主进程已经加载的那份并存在一起。而 `@deepseek-ai/dsh-tools` 的 `TOOL_RUNTIME_SCHEDULER` 是普通 `Symbol`（不是 `Symbol.for`），符号身份按模块实例计算：宿主的 `dsh-agent-loop` 用由 profile 副本挂载出来的 `ToolRuntime` 去读 `ctx.tools[TOOL_RUNTIME_SCHEDULER]`，拿到 `undefined`，于是**每一次原生工具调用**都抛 `Cannot read properties of undefined (reading 'prepare')`——整个 profile 的工具一起失效，而在此之前构建、类型检查与覆盖率门禁全部照绿。peer 不会被 profile 安装、devDependencies 只属于本仓库，两张表都物化不出第二份。
-  - 后者是「服务面 `@deepseek-ai/*` 一律 type-only」的例外那一族：幻影品牌没有 type-only 的造法，这类值导入必须保持**外部化**——`build-host.mjs` 的外部化名单读 `dependencies`∪`peerDependencies`，只写 `devDependencies` 就会被 rolldown 把官方函数体内联进产物、每包各持一份官方构造器。必需 peer 同时满足这两件事：产物里说明符仍是外部的，而消费方的 profile 什么都不装。
-  - `host.js` 里 `from "zod"` 与 `from "@deepseek-ai/dsh-brand"` 两枚裸说明符都由 `test/build-host.test.ts` 钉着「说明符在、官方函数体不在」；设置半不导入 brand，所以 `settings.js` 里没有那枚说明符（同一条测试反向钉）。产物**不压缩**也正是为此：压缩会把裸说明符字符串一并去掉，那两条断言就会永远变绿，内联副本得以悄悄发出去。
-- 事实强制门与命令规则是**机制层面**移植自 ECC（MIT，© Affaan Mustafa）——[`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) 记录了上游文件、本包做了哪些改动，以及逐项比对的结果（未搬运上游的代码、词表或文案）。
+卸载：`dsh plugin --profile web remove @jayyuen66/dsh-danger-guard`。包在公共 npm 上，安装不需要凭据，也不需要配作用域源。
 
+- **要求 Node.js `>= 22.12`。** 本包是纯 ESM；正是这个下限让 ESM 入口的 `require()` 形式可用，所以声明了 `engines.node`。
+- **要求宿主 `dsh` 在 `0.2.1-rc.2` 这条线上。** 宿主真正读的是 `engines.dsh`（`^0.2.1-rc.2`），而且它**单独决定**：`evaluatePluginCompatibility` 在 `engines.dsh` 那一支就返回了，根本走不到读 `peerDependencies` 的那段——所以 `@deepseek-ai/dsh*` 那几枚 peer 在这里不参与兼容判定。预发布版本参与范围比较。宿主是 `0.2.x` 任一小版本都满足；`0.3.0` 及以后不满足，要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。`peerDependencies` 里的精确钉版是一条**独立的编译期纪律**（由 `test/publish-manifest.test.ts` 钉住）：本插件的类型与名义品牌与宿主 ABI 耦合，"自动跟上去"正是宿主类型面被装出第二份的那条路。
+- **`dependencies` 里不放任何 `@deepseek-ai/*`，这是契约**（`test/publish-manifest.test.ts` 钉着）。消费方的 profile 用 `nodeLinker: hoisted` 且 `autoInstallPeers: false` 安装，于是写在 `dependencies` 里的宿主包会被落成**真实目录**，与运行中的宿主已加载的那份并存。`@deepseek-ai/dsh-tools` 的工具运行期调度键是普通 `Symbol`（不是 `Symbol.for`），符号身份按模块实例算：宿主从 profile 副本上读那个键拿到 `undefined`，于是**每一次原生工具调用都抛**——而构建、类型检查、覆盖率门禁在此之前全部照绿。peer 与 devDependencies 都不会进 profile，所以都物化不出第二份。
+- **按值导入的宿主包必须保持外部化。** `@deepseek-ai/dsh-brand` 与 `@deepseek-ai/schemastery` 是值导入（`brandNumber`、`import Schema from …`）。外部化名单读 `dependencies` ∪ `peerDependencies`；只写 `devDependencies` 会被打包器把官方函数体内联进产物，本包就各持一份官方构造器。必需 peer 同时满足两件事：说明符仍是外部的，而消费方 profile 不多装任何东西。`zod` 是普通依赖（由 `lib/tool-ledger.ts` 值导入）。
+- **产物刻意不压缩。** `test/build-host.test.ts` 钉着 `host.js` 里那几枚裸说明符、以及 `settings.js` 里没有它们；压缩会把字符串一并去掉，那两条断言就会永远变绿。
+- **随包发 TypeScript 声明**（`types/host.d.ts`、`types/settings-host.d.ts`，以及它们引用的 `lib/` 声明），各子路径带 `types` 条件，`node16` / `bundler` 下 `tsc` 能解析。`./client` 刻意没有（它是浏览器 UMD 外壳），`./cordis.patch.yml` 也没有（宿主 loader 当文件读）。
+- 构建产物不入库，`prepack` 会重建，所以发出去的永远是当前源码产出的那一版。
 
 ### shared 的版本下限
 
-如果你的 profile 用 pnpm `overrides` 把 `@jayyuen66/dsh-plugin-shared` 钉在某个版本，那个钉住的值必须不低于本包声明的 `@jayyuen66/dsh-plugin-shared` 版本。钉得更低就会装到一份缺少本包运行期所导入的名字的产物，宿主起来时报 `N entries did not activate` 加 `does not provide an export named ...`——包装得上、永远不生效，而各仓单仓 CI 看不见这一类。
+如果你的 profile 用 pnpm `overrides` 把 `@jayyuen66/dsh-plugin-shared` 钉在某个版本，那个值必须不低于本包声明的那一版。钉得更低会装到一份缺少运行期所导入名字的产物，宿主起来时报 `N entries did not activate` 与 `does not provide an export named ...`——包装得上、永远不生效，而各仓单仓 CI 看不见这一类。
 
-### 在 dsh 里启用
+## <img src="https://api.iconify.design/lucide/circle-check.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 确认它真的在工作
 
-- 组合包（bundle）形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，由 `dsh plugin add/remove` 维护装配层。
-  - 包内是**两行**（bulkhead / 隔舱）：`- id: danger-guard`（拦截半，**没有 Config**，name 指向包本体）与 `- id: danger-guard-settings`（设置半，持有严格 schema，name 指向 `./settings` 子路径导出）。
-  - 卡片只由第一行带出：宿主只对**裸包名**条目扫 `dsh.client`（`dsh-client-modules` 的 `exactPackageSpecifier` 对子路径返回 undefined），所以设置行的 name 写成子路径是有意的，不是漏改。
-  - 卡片只在 web 平台装载（`dsh.client = { platform: "web", immediately: true }`），位置是设置页插件列表里的「danger-guard 危险拦截」。
-- 部署默认写在**设置那一行**（`- id: danger-guard-settings`）的 `config:` 上：优先级为 设置卡运行时值 > 行 config > `BUILTIN_BASE`。
-  - 写在拦截那一行没有效果——它的 `apply(ctx)` 不收 config 参数（该条目刻意没有 `Config`），值面只经设置条目挂出的读数口取。
-  - 行里的显式 `undefined` 不覆盖底座；非法数值（如 `maxDenies: 0`）回落内置默认——0 等于把事实门整道关掉。
-- 装载失败的方向是保守的：设置面在独立条目 `danger-guard-settings` 上，那份严格 schema 只挂它。用户配置越界（`maxDenies: 0`、`strictMode: "yes"`…）只让**设置条目** FAILED；拦截条目没有 Config，读不到值面就回落内置默认底座并告警一次——一行手改坏的配置杀不掉闸门。
-  - `apply` 的抛错条件只有**设置面缺件**：宿主没有 `effect`、或 `settings` 不带 `describe` 时直接抛 `required services (settings/effect) missing`，该条目 FAILED（`host.ts` 的服务面守卫只探这两件）。
-  - ⚠ 缺 `tools` **不抛错**：`svc.tools?.guard(...)` 拿不到注册口就跳过挂载（`host.ts` 的可选链 + `dispose === undefined` 分支，行为由 `test/host.test.ts` 钉住），`apply` 里没有针对它的守卫。
-  - 但部署上这不叫静默放行：`tools` 在 `inject` 清单里，服务缺席时 cordis **不激活**该条目，宿主启动诊断会打 `warning: N entry did not activate` 并逐条列 `pending (waiting for service: tools)`（宿主 `dsh-app-boot` 的 activation 报告）。看到的现象是"闸门没装 + 启动有话"，不是"闸门没装 + 一切正常"。
+1. **已装载**：设置页出现「danger-guard 危险拦截」这一行，且 `dsh --profile web --dump-config` 出现本包的层。
+   - `--dump-config` 是唯一被接受的"进了层栈"信号，而它**不是只读命令**——它会重写该 profile 的根装配文件。所以判读要分别捕获 stdout 与 stderr；未匹配的 patch 目标只出现在 stderr，只看退出码什么都证明不了。
+   - 层行可能是 `# == <层>`，也可能是 `# == <层>, patched by <路径>`；判据必须容得下后者，否则它会对着真实存在的层报"没装"。
+2. **有拦截**：在一个会拦它的预设下（仅可查看或工作区内修改——完全权限档按设计放行这一条），让 agent 跑 `git commit --no-verify`。这次调用本身必须失败并给出 `Error: <理由>` 与一条出路。若"行为毫无变化"，读法是**闸门没装**，不是规则太松。
+3. **设置**：打开卡片改一个值，`保存` 由 disabled 转 enabled，写入回 200。非本机 loopback 页面上控件禁用并显示只读状态。
+4. **读数**：打开卡片（以及手动「刷新」）会走一次 `dangerGuardStats` 命名空间的 Remote 调用。按需拉取、不订阅——判定统计只在 agent 干活时变，而跨宿主重连缓存一份旧值正是这套设计要避开的失效。
 
-### 设置项（命名空间 `danger-guard-settings` = 设置条目 id，默认值即 `lib/settings-schema.ts` 的 `BUILTIN_BASE`）
+## <img src="https://api.iconify.design/lucide/circle-slash.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 它不提供什么
+
+找之前先知道这几件事：
+
+- **它不注册任何工具。** 没有 `guard_status` 这类模型侧工具——整个面就是 `ctx.tools.guard` 谓词加两条预检瀑布。
+- **它没有自己的 HTTP 端点。** 它只注册一个 Remote 命名空间 `dangerGuardStats`，用途只有一个：经宿主 `/api` 网关给设置卡的读数块供数（无参、JSON 结果的方法）。除此之外没有别的路由，没有可从外部调用的 `/api/dangerGuard…` 面；本包内也没有 CSRF 与信任闸门——那整层归宿主网关。
+- **它不加 CLI 子命令。** `dsh danger-guard …` 不存在。
+- **它不落盘、不联网**（唯一的一次只读子进程见「数据与隐私」）。
+- 它**可选**消费的东西：`lessonLoop` 总线（report/pass）、`sessionProjections`（工具台账）、`fs`（预检取证）、`workingDirectory`（当前目录基准）。这几样都是可选子注入——没有它们的 profile 照样拦，只是走回退路径。
+
+## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 在 dsh 里启用
+
+- 组合包形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，由 `dsh plugin add/remove` 维护装配层。
+- 补丁是**两行（bulkhead / 隔舱）**：`- id: danger-guard`（拦截半，**没有 `Config`**，name 指向包本体）与 `- id: danger-guard-settings`（设置半，严格 schema，name 指向 `./settings` 子路径）。
+  - 卡片只由第一行带出：宿主只对**裸包名**条目扫 `dsh.client`，所以设置行写成子路径是有意的，不是漏改。
+  - 卡片只在 web 平台装载，位置是设置页插件列表里的「danger-guard 危险拦截」。
+- 部署默认值写在**设置那一行**的 `config:` 上；优先级是 设置卡运行时值 > 行 config > 内置底座（`lib/settings-schema.ts` 的 `BUILTIN_BASE`）。
+  - 行里的显式 `undefined` 不覆盖底座；非法数值（如 `maxDenies: 0`）回落内置默认——`0` 等于把事实门整道关掉。
+  - 写在拦截那一行的默认值是无效的：那个条目根本不收 `config` 参数。
+- 装载失败的方向是保守的。严格 schema 只挂设置行，所以一行被改坏的用户配置只让**那个条目**失败；拦截条目回落内置底座并告警一次。`apply` 只在设置面本身缺件时抛错。缺 `tools` 服务不抛错（注册走可选链），但 `tools` 在 `inject` 里，于是 cordis 根本不激活该条目，启动诊断会点名它——"闸门没装，且宿主说了"。
+
+## <img src="https://api.iconify.design/lucide/ban.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 规则拦什么
+
+| 族 | 拦 | 放行与出路 |
+|---|---|---|
+| git 钩子绕过 | `commit` / `push` / `merge` / `cherry-pick` / `rebase` / `am` 上的 `--no-verify` 及其无歧义缩写；`commit` / `am` 的短形式 `-n`；`git -c core.hooksPath=` 与 `git config core.hooksPath <dir>`（含 `--global` 与 `=` 合写）。git 参数**按角色**走查：短簇逐字母展开、带值选项的取值不当旗标看、`--` 之后一律 pathspec、`-c` 的取值才是被查的那一段 | `git push -n`（dry-run）、`git cherry-pick -n`（不提交）、`git rebase -n`（--no-stat）、`git config --get` / `--unset` / `--list core.hooksPath`，以及提交信息里出现的该字样 |
+| 灾难性 `rm` | 门槛**按命令词轨分别**。POSIX/cmd 轨要"递归 + 强制"，唯一例外是短旗标簇里的大写 `-R`，单独即灾难级。`Remove-Item` / `ri` 轨则**任何 Recurse 形态单独**命中灾难目标即灾难级、**不要求** `-Force`——那一形不给 `-Force` 也静默删整树。计入的目标：`/`、`~` 与 `~/…`、家目录字面路径、`$HOME` 与 `${HOME…}` 各形态、`.` / `..` / `../…`、系统与用户目录前缀下的整树、以及绝对 glob 与花括号展开；路径先做词法归一。命令词面另含 `pwsh` / `cmd` 的删除形态，大小写不敏感 | 项目内相对清理（`rm -rf node_modules`、`./dist`）、POSIX 轨上只有 `-f`（`rm -f ~`）或只有小写 `-r`（`rm -r ~`）——**这一档按写法而非语义**，不对称是刻意的；`Remove-Item -Recurse ./build`；`/var` 与 `/tmp`（有意不列：误拦代价高于漏拦）；`/usrx` 这类不同段 |
+| 下载即执行 | `curl` / `wget` / `fetch` 之后接 shell 解释器，包括经 `sudo`、带路径前缀的 shell、`xargs`、`parallel`，以及反序的过程替换（`sh <(curl …)`、`source <(curl …)`、`. <(curl …)`）。**双引号内的 `$( )` 同样算执行面**，所以 `echo "$(curl x \| sh)"` 照拦。PowerShell 家族两端都认：`Invoke-WebRequest` / `Invoke-RestMethod` / `iwr` / `irm` 接 `pwsh` / `powershell` / `iex` / `Invoke-Expression`，与 `curl … \| sh` 同判 | `curl -O`、`curl … \| jq .name`、`cat x \| grep foo`、无下载来源的 `ls \| sh`、`source ./setup.sh`，以及引号内的字面 `\|` |
+| 长驻 dev server | 裸 `vite` / `next` / `nuxt`、`webpack serve` / `--watch`、`cargo watch`、`npm` / `pnpm` / `yarn` / `bun run dev` / `watch` / `serve` / `start`、一切 `dev` 词根脚本名，以及经 `npx` / `bunx` / `exec` / `dlx` 起的长驻包（版本选择器不算新身份）。`vite build --watch` 仍拦。一次性豁免**只看子命令位** | `npm test`、`npm run build`、`vite build`、`next build`、`webpack --config prod.js`、`cargo run` / `check` / `test`、`vitest run`，以及确认一次性子命令（`vite optimize`、`next lint`、`nuxt prepare`） |
+| 密钥路径编辑 | `.ssh` / `.gnupg` / `.aws` / `.kube` / `.docker` 目录内任何文件，**含相对形态**；`id_rsa` / `id_ed25519` / `id_ecdsa` 主名及其拷贝后缀；`.pem` / `.key` / `.p12` / `.pfx` / `.keystore` / `.jks` 结尾；`.env` 全族；`.envrc` / `.npmrc` / `.pypirc` / `.netrc` / `.pgpass` / `.git-credentials`；`credentials.json`、`service-account*.json`、`token.json`；`secret(s).yaml` / `yml` / `json`；`.git/config`。目标先做词法归一，宿主给了会话 cwd 时相对目标按 cwd 解析；反斜杠 Windows 路径同判 | `.env.example` / `.sample` / `.template` / `.defaults`、`api.key.ts`、`main.pem.tsx`、`.gitignore`、`mysecrets.yaml`、`secrets.yaml.bak`、`myid_rsa` |
+| git 破坏族（全部 `ask`） | `reset --hard`、`checkout -- <path>` / `checkout .`、`restore <path>`（`--staged` 单用**不判**——只动索引）、`clean -f*`、`stash drop` / `clear`、`branch -D`（小写 `-d` **不判**——git 自己会拒绝未合并的分支）、`push -f` / `--force` / `--force-with-lease`。与 no-verify 那条**共用一趟走查**，按子命令查表 | 每一条都有正当用法。硬拒"危险但有时正确"的操作会**逼模型找绕路写法**——`git reset --hard` 被拒后它可能直接 `rm` 掉那些文件，一个更糟且不被拦的写法。所以这一族是问，不是拒 |
+| 基础设施破坏族（全部 `ask`） | `terraform destroy`、`terraform apply -auto-approve`、`docker … prune`、`kubectl delete`，以及迁移族（`manage.py migrate`、`prisma migrate`、`rails db:migrate`、`alembic upgrade`、`flyway migrate`、`typeorm migration:run`、`knex migrate:latest`…） | `plan -destroy`（plan 只打印）、裸 `apply`（terraform 自己会问）、`--dry-run`（官方教的预演写法）、只读动作（`prisma migrate status`、`flyway info`）与干跑旗标（`--plan`、`--sql`）。迁移族另要求命令词之前每一枚词都是启动器，所以在文档里搜这串不会假命中 |
+
+## <img src="https://api.iconify.design/lucide/sliders-horizontal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 设置项
+
+命名空间 `danger-guard-settings` 即设置条目 id；默认值是 `BUILTIN_BASE`。
 
 | 字段 | 类型 | 默认值 | 作用 |
-| ---------------------- | ---------------------------- | ----------------------------- | ----------------------------------------------------------------------------- |
-| `enabled` | boolean | `true` | 总开关；`false` 时三类判定全部静默（连教训上报也不发） |
-| `factGateEnabled` | boolean | `true` | 只关首次编辑事实门，危险命令与密钥面照拦 |
-| `preflightEnabled` | boolean | `true` | 编辑前预检（见下面「预检」一节）：插件替模型把缺的证据取到手，于是一次编辑都不必被拒第二次。关掉只是退回「拒绝后由模型自己补证」，判据一条不减 |
-| `judgeStats` | boolean | `true` | 判定耗时与输入规模的采样开关：本地滚动摘要（每 200 次一条日志）+ 装了 lesson-loop 时每次判定一条 `judge-cost` pass（只带面名/毫秒/字符数）。关掉只是不再看分布，判定一字不变。卡片上的**判定统计读数**（见「包导出面与卡片」）**不受它管**：读数读的是进程内的计数，这个开关只管出域那一格 |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `true` | 总开关；`false` 时三类判定全部静默，连教训上报也不发 |
+| `factGateEnabled` | boolean | `true` | 只关首次编辑事实门；危险命令与密钥面照拦 |
+| `preflightEnabled` | boolean | `true` | 编辑前预检。关掉只是退回"拒绝后由模型自己补证"，判据一条不减 |
+| `judgeStats` | boolean | `true` | 采样判定耗时与输入规模：本地滚动摘要，加上装了 lesson-loop 时每次判定一条 `judge-cost` pass（只带面名/毫秒/字符数）。卡片上的统计读数不受它管，它也不管拒绝上报里那几格 `judgeMs` |
 | `maxDenies` | natural，1–5 | `2` | 同一目标连续"未收敛"拒绝的次数上限，超过即配额放行并告警 |
 | `strictMode` | boolean | `false` | `true` 时忽略写面分档，每个代码文件首次编辑都走全探查 |
-| `smallEditChars` | natural，≥1（卡片 1–2000） | `200` | 写面 ≤ 此值且不含导出/签名关键字 → 判小改，只要求 read |
-| `bigEditChars` | natural，≥2（卡片 2–100000） | `2000` | 写面 > 此值 → 判大段重写，升最高档全探查 |
-| `extraTestDirs` | string[] | `[]` | 追加 test 层目录名（内置 `test/tests/__tests__/spec/specs`），只追加 |
-| `extraDevServerWords` | string[] | `[]` | 追加长驻命令头（内置 `vite/webpack/next/nuxt/cargo-watch/watchexec`），只追加 |
-| `extraDevRunArgs` | string[] | `[]` | 追加 run 脚本名（内置 `dev/watch/serve/start/start:dev`），只追加 |
+| `smallEditChars` | natural，≥1 | `200` | 写面 ≤ 此值且不含签名关键字 → 判小改，只要求 read |
+| `bigEditChars` | natural，≥2 | `2000` | 写面 > 此值 → 判大段重写，升最高档全探查 |
+| `extraTestDirs` | string[] | `[]` | 追加 test 层目录名，只追加 |
+| `extraDevServerWords` | string[] | `[]` | 追加长驻命令头，只追加 |
+| `extraDevRunArgs` | string[] | `[]` | 追加 run 脚本名，只追加 |
 | `extraSecretPatterns` | string[] | `[]` | 追加密钥路径正则片段（卡片每行一条；非法片段跳过并告警），只追加、无白名单 |
-| `refSearchTools` | string[] | `["grep","glob","zg_search"]` | 哪些检索工具算"引用探查"凭证；清空 = 任何检索都不计入。**给模型的指令只点这台宿主上真注册着的名字**（经官方 `ctx.tools.get` 探测；探不到就原样给出，宁可多点名也不把路关上） |
-| `refSearchStrictTools` | string[] | `["zg_search"]` | 上表里改走"root + query/fts/vector 相对路径"严格口径的子集；只写这里不给凭证 |
+| `refSearchTools` | string[] | `["grep","glob","zg_search"]` | 哪些检索工具算"引用探查"凭证；清空即任何检索都不计入。给模型的指令只点这台宿主上真注册着的名字 |
+| `refSearchStrictTools` | string[] | `["zg_search"]` | 上表里改走"root + 相对路径"严格口径的子集 |
 
-### 拦截与豁免的判定
+**本包没有任何白名单。** 三份 `extra*` 名单与 `refSearchTools` 都只能收紧。所以误拦只有三条路：临时关 `enabled`（或只关 `factGateEnabled`）、靠 `maxDenies` 配额放行、或按拒绝文案改写命令形态。
 
-| 四类命令规则的共同口径 | 内容 |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 判定范围与分段 | 只判工具名 `bash` 与 `pwsh`（`command` 非字符串则放行，不猜）；按 `;`、`&&`、`\|\|`、`\|`、换行、`&`、`(`、`)`、反引号逐段判、引号内不切段。断段、切词、结构视图、引号是否闭合**四个出口共用一台 POSIX 状态机**（`lib/command-segments.ts`）：判闭合的机器与切词的机器不能是两台，否则同一串在不同判据下结论相反 |
-| 包装词、bin 前缀、引号、续行 | 都不是逃逸口：包装词（`sudo env time nice stdbuf timeout taskset watch setsid doas pkexec noglob nohup exec command` 与前导 `VAR=x`、`xargs`/`parallel`）都不是逃逸口；包装词自身也认路径前缀（`/usr/bin/sudo`）；引号包裹的**旗标与命令头**同样是生效写法（真 git 2.54 实测 `git commit "--no-verify"` 钩子未运行且提交成功，`"rm" -rf ~`、`rm "-rf" ~`、`\git` 同判）；包装词的 option 表按定义补不完，所以**包装词领头的段还会把其后每个词位当候选命令头**各判一遍（`sudo -p xrm rm -rf /` 就是这么收的）；反斜杠续行照旧合并 |
-| 原则与唯一例外 | 认不准就放行；唯一例外是**看不见的执行面**——嵌套 `-c`/`eval` 体取不出可靠文本、超过下钻上限（`-c`/`eval` 体与 `$( )` 命令替换各有一道 16 层界：前者钉"逐层取体的次数"，后者钉"层数 × 每层重扫的文本长度"，长度上限只界得住单次扫描）、段头是取代码串再执行的非 shell 解释器（`python3 -c`、`node -e`、`perl -e`、`ruby -e`、`php -r`、`osascript -e` 等：语言层的动作不在命令词法面上），以及命令长度超出可判定上限，一律判 `nestedShellUnconfirmed`；出路是交用户确认，或改写成单层、直白可读的形态 |
+## <img src="https://api.iconify.design/lucide/layers.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 四个权限预设各拦什么
 
-| 四类命令与密钥路径各自的判据 | 拦 | 放行与出路 |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| git 钩子绕过 | `commit/push/merge/cherry-pick/rebase/am` 上的 `--no-verify` 及其不歧义缩写（`--no-v`…）、`commit`/`am` 的短形式 `-n`、`git -c core.hooksPath=` 与 `git config core.hooksPath <dir>`（含 `--global` 与 `=` 合写）；参数**按角色**走查：短簇逐字母（`-an`/`-na` 里的 `n` 实测确实绕过钩子）、带值选项的取值不当旗标（`git commit -m --no-verify` 那串是提交说明，实测钩子照跑 ⇒ 放行）、`--` 之后一律 pathspec、`-c` 的取值单独判 `core.hooksPath=`（提交信息里出现该字样不再误拦） | `git push -n`（dry-run）、`git cherry-pick -n`（不提交）、`git rebase -n`（--no-stat）、`git config --get/--unset/--list core.hooksPath`、`git status --no-verify`、以及提交信息里出现的该字样 |
-| 灾难性 rm | 门槛**按命令词轨分别**，不是无条件性质：**POSIX/cmd 轨**要"递归 + 强制"，唯一例外是短旗标簇里的大写 `-R` 单独即灾难级（`rm -r ~` 放行、`rm -R ~` 拦）；**`Remove-Item`/`ri` 轨**任何 Recurse 形态**单独**命中灾难目标即灾难级、不要求 `-Force`（`-Recurse` ≡ `-recurse` ≡ `-rec` ≡ `-r` ≡ `-R`：参数名不区分大小写，它们是**一枚参数**而不是四种拼法。两轨不对称是语义不对称的镜像：`Remove-Item -Recurse ~` 不给 `-Force` 也**静默删整树**，POSIX `rm -r ~` 不给 `-f` 会在受保护项上逐个提示）。短旗标簇**整簇宽松扫字母、不设封闭字母表**（`-rf`/`-drf`/`-RWx`/`-srf` 同判；`--recursive --force` 长旗标；cmd 内建另认 `/s` `/q` `/f`）；`Remove-Item`/`ri` 换一面——只有这两个命令词上的 `-字母…` 一律按**参数名**认（`-Recurse`/`-Force` 与其无歧义缩写 `-rec`/`-fo`/`-r`），不进簇扫；参数名那一面在 `rm` 与 cmd 内建上是**叠加**在簇扫之上的，因为簇扫大小写敏感、`-Force` 在簇里只取得到 `r`）**且**目标是 `/`、`~` 与 `~/…`、家目录字面路径（`<家目录>`，取 `os.homedir()` 即 HOME 环境变量）、`$HOME` 与 `${HOME…}` 各形态、`.`/`..`/`../…`、系统与用户目录前缀的整树（`/etc`、`/usr`、`/bin` 等，完整表见 `SYSTEM_PATH_PREFIXES`）、绝对 glob 与花括号展开（`/*`、`/usr/**`、`/{etc,usr}`、`/et{c..e}`）；路径先做词法归一（`/tmp/../` 判成 `/`）。命令词面含 pwsh/cmd：`Remove-Item`/`ri`/`del`/`erase`/`rd`/`rmdir`（小写比对，带反斜杠的路径前缀同剥）；**两形各喂各的轨道**（POSIX 判据读词值、Windows 字形读源文本），旗标面与目标面分开：`--` 之后一律目标，pwsh 的 `-Exclude`/`-Include`/`-Filter` 取值只是模式不当删除对象、`-Path`/`-LiteralPath` 取值仍是目标，`-Recurse:$false`/`-Recurse:0` 是关着的开关不算递归；裸变量家目录有尾闸（`$HOME_BACKUP`/`$HOMEBACKUP` 放行，与 `${HOMEBACKUP}` 同口径）；`rm -rf ~\` 实测被 bash 展开成家目录 ⇒ 拦；Windows 形态目标（盘符根 `C:\`、系统与用户树 `C:\Windows`·`D:\Users\x`、UNC 共享根 `\\server\share`（**逐字路径前缀** `\\?\C:\Windows` 与**组件尾部的点** `\\server\share\.` 都先折回它们指向的那棵树，`\\.\` 设备根那一支不吃）、家目录的 Windows 字形（比的是宿主 `os.homedir()` 折出的 `winHome`：家目录本身是盘符形态时整树与其子路径同判；家目录是 POSIX 字形时这一形不成立，`<POSIX 家目录>\x` 只有恰好落在系统前缀表里才拦，如 macOS 的 `/Users/…`）、`~\notes.txt` 这一形（波浪号 + 反斜杠写的家目录子路径，**只**在 Windows 读法里算：pwsh 中 `~` 处处等价家目录、`\` 是合法分隔符；`~\`、`~\\notes.txt` 同判；波浪号后接词字符的 `~xyz`、`~mailbox\notes.txt` 不算家目录，与 `$HOME` 那条同一个尾闸）——**这一轨**只在**宿主是 win32**、**调用工具是 `pwsh`**（方言由工具身份给，不从字形猜），或**段头是 PowerShell 家族**（下钻进 `-c`/`-Command` 体时强制开，段头就是执行器身份）时参与；两条**环境变量形态**不在这轨上：系统根 `%SystemRoot%\System32`、`$env:windir` 与用户根 `%USERPROFILE%\Documents`、`$env:USERPROFILE` 是**未展开**的字面判据，与 `$HOME` 同构、不读环境变量，也**不随轨道/平台退出**（非 Windows 宿主 + `bash` 名下照拦），变量名之后须接分隔符或词尾 | 项目内相对清理（`rm -rf node_modules`、`./dist`、`src/old`、`rd /s /q build`）、POSIX/cmd 轨上只有 `-f`（`rm -f ~`）或只有小写 `-r`（`rm -r ~`、`rm --recursive ~`）——**这一档按写法而非语义**：同是"只有递归"，`rm -R ~`、`rm -Recurse <家目录>` 因大写 `R` 走那条单独即灾难级的既有判据；同是"只有强制"，`rm -Force <家目录>` 因簇扫给出 `r`、参数名面补上 `f` 而落进拦（那是 pwsh 长词叠在 POSIX 轨上的既有取舍，宁可误拦）；cmdlet 轨上门槛同样**以灾难目标为前提**：写法里**不含任何 Recurse 形态**才放行，而**有 Recurse 但目标不是灾难路径**也照放（`Remove-Item -Recurse ./build` 放行）（`Remove-Item -Force <家目录下某文件>`、`Remove-Item -Filter *.log <树>` 照放，`-Recurse`/`-recurse`/`-rec`/`-r`/`-R` 任一形态配灾难目标即拦，不要求 `-Force`）、`Remove-Item -rf C:\Users\bob`（`-rf` 不是参数名，pwsh 自己报参数找不到；对照 `rm -Force -LiteralPath <家目录下某文件>` 在 pwsh 里**仍被拦**——命令词是 `rm` ⇒ 走 POSIX 宽松簇那一轨，宁可误拦）、`/var` 与 `/tmp`（有意不列：误拦代价高于漏拦）、`/usrx` 这类不同段，以及非 Windows 宿主上 `bash` 名下的 `C:\Windows` 与 `\\home\bob`（那是字面相对路径，回到 POSIX 读法）、同一种读法下的 `~\notes.txt`（bash 不展开这枚波浪号：`\n` 被当转义，实测本机 `printf '%s\n' ~\notes.txt` 给出 `~notes.txt` 那样的相对文件名 ⇒ 放行是正确语义，不是漏拦） |
-| 下载即执行 | `curl`/`wget`/`fetch` 之后接 shell 解释器即拦，含 `\| sudo sh`、`\| /bin/bash`、`\| xargs -I{} sh {}`、`\| parallel sh`，以及反序的 `sh <(curl …)`、`source <(curl …)`、`. <(curl …)`；**双引号内的 `$( )` 同样算执行面**（实测 `echo "$(seq 3 \| tail -1)"` 输出 `3`）⇒ `echo "$(curl x \| sh)"`、`FOO=$(curl x \| sh)` 照拦；取回端的词除 POSIX 三家外还认 PowerShell 的 `Invoke-WebRequest`/`Invoke-RestMethod` 与别名 `iwr`/`irm`，接收端除 POSIX shell 外还认 `pwsh`/`powershell`/`iex`/`Invoke-Expression`（都大小写不敏感）⇒ `iwr -useb https://x \| iex`、`curl -s https://x \| pwsh` 同判 | `curl -O`、`curl … \| jq .name`、`cat x \| grep foo`、无下载来源的 `ls \| sh`、`source ./deploy.sh`；引号内的字面 `\|` 不误判（`echo "curl x \| sh"` 放行） |
-| 长驻 dev server | `vite`/`next`/`nuxt` 裸调用、`webpack serve\|--watch`、`cargo watch`、`npm\|pnpm\|yarn\|bun run dev\|watch\|serve\|start\|start:dev` 与一切 `dev` 词根脚本名（`dev:web`、`dev-server`、`dev:build`）、`npx\|bunx\|exec\|dlx <长驻包>`（包名的版本选择器不算新身份：`npx vite@5 dev` 照拦）；`vite build --watch` 仍拦；一次性豁免**只看子命令位**——`vite --host build` 的 `build` 落在 `--host` 的取值位上，实测 vite 8.3.1 起的正是长驻 dev server ⇒ 拦 | 一次性形态 `npm test`、`npm run build`、`vite build`、`next build`、`webpack --config prod.js`、`cargo run/check/test`、`vitest run`、`npm exec vite -- build`、确认一次性子命令 `vite optimize`/`next lint`/`nuxt prepare`（与 watch 旗标并存仍拦） |
-| 密钥路径编辑 | `.ssh`/`.gnupg`/`.aws`/`.kube`/`.docker` 目录内任何文件、`id_rsa\|id_ed25519\|id_ecdsa` 主名（含 `.pub` 与 `._-` 后缀拷贝）、`.pem\|.key\|.p12\|.pfx\|.keystore\|.jks` 结尾、`.env` 全族、`.envrc\|.npmrc\|.pypirc\|.netrc\|.pgpass\|.git-credentials`、`credentials.json`/`service-account*.json`/`token.json`、`secret(s).yaml\|yml\|json`、`.git/config`；反斜杠 Windows 路径（`<家目录>\.ssh\id_rsa`）同判；**相对形态一并拦**（`.ssh/config`、`.aws/credentials`、`.kube/config`、`.docker/config.json`），目标先做词法归一（`.git/x/../config` 即 `.git/config`），宿主给了会话 cwd 时相对目标按 cwd 解析后再判 | 放行的反例：`.env.example`/`.sample`/`.template`/`.defaults`、`api.key.ts`、`main.pem.tsx`、`.gitignore`、`mysecrets.yaml`、`secrets.yaml.bak`、`myid_rsa` |
-| 密钥路径的工具面 | 目标按**键形**认：参数里出现 `file_path`/`filePath`/`path`/`notebook_path`/`target_path` 中任一枚即算（按键位顺序去重后逐枚判，命中的那一枚就是上报签名），**不看工具名**——工具名随 provider 与版本漂移（改名、加别名、换实现都发生在宿主侧），认名字等于给静默失效留口子 | 只读动词跳过（`command`/`action`/`mode` 取值为 `view`/`read`/`cat`/`list`/`search`/`fetch`/`get`）；没有路径键的调用（如 bash 只有 `command`）不进这一面。事实门**不跟着放宽**：仍只认 `edit`/`write`/`str_replace_editor` 的严格工具名口径，不给只读工具要求「先读后写」 |
+宿主的预设把沙箱模式与审批策略捆在一起，而官方沙箱只管**文件效应**：网络与进程面不在它的词汇表里，最紧的那一档也只是拒写、读一律放行。本插件补的正是那两面——而"写"类判据在沙箱管得住时让给它。
 
-| 事实强制门、配额与误拦出路 | 内容 |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 事实强制门的适用与分档 | 只判带目标路径的 `edit`/`write`/`str_replace_editor`，按写面风险分三档 |
-| low | 要求成功 `read` 过目标 |
-| mid | 再加一次项目级引用探查（起点是目标的祖先目录，签名含目标名或 ≥4 字词干；严格口径另认可凭相对路径片段命中） |
-| high | 再加对**实际存在**的 test/e2e/docs 层各一次可归因检索（不存在的层由 fs 探测直接豁免）；预检开着时这几层的结论由引用面那**同一次扫描**派生、随拒绝理由一并给出，模型不必再去那层搜一遍 |
-| 升 high 的信号 | 新建（`write`/`create`）、触及导出/签名关键字、manifest·lockfile·构建配置·装配文件·`schema.sql` 等高风险路径、写面 > `bigEditChars`、取不到写面大小；`strictMode` 一律 high |
-| 不过门与证据口径 | `md/markdown/txt/rst/adoc` 完全不过门，`test/` 目录不再豁免；证据只认会话里**成功**的调用（报错或被门禁拒掉的不算）；拿不到会话历史时走"请用户拍板"的交互确认且不消耗配额；确凿新建（ENOENT 且该调用能创建）免 read 要求；mtime 基线在 **read 时点**（守卫对 read/view 也记账）与编辑评估时点两处建立——read 之后、首次编辑评估之前的外部改动同样判「被会话外改过」（残余窗口：记账与 read 真正执行之间的空隙，方向保守，代价是多要求一次重读） |
-| 配额放行与有效期 | 同一目标连续未收敛拒绝 `maxDenies` 次后（缺项集合严格变小算收敛、计数重置），下一次直接放行并 `console.warn`；该免检对同一目标持续有效，直到目标被会话外改动、该会话分片被 LRU 淘汰（64 会话 × 每会话 200 文件）或插件重载 |
-| 误拦的三条路 | 本包没有任何"白名单/放行名单"设置项，所以误拦只有三条路：临时关 `enabled`（或只关 `factGateEnabled`）——设置卡或注册行 `config:` 皆可；靠 `maxDenies` 配额放行；按拒绝文案改写命令形态（一次性构建、项目内相对路径、单层闭合引号），长驻服务由用户自己在终端起 |
+| 规则族 | 仅可查看 | 工作区内修改 | 完全权限 | 自动审查 |
+|---|---|---|---|---|
+| `noVerify`（git 钩子绕过） | deny | deny | allow | allow |
+| `rmrf`（包住可写根 / 家目录 / 根） | allow¹ | deny | allow | **deny** |
+| `rmrf`（沙箱完全覆盖这次目标） | allow | allow | allow | allow |
+| `pipeShell`（下载即执行） | allow | **deny** | allow | **deny** |
+| `devServer`（长驻服务） | allow² | allow² | allow² | allow² |
+| `nestedShellUnconfirmed`（认不准） | ask | allow | allow | allow |
+| git 破坏族 | ask | ask | allow | allow |
+| 基础设施破坏族 | ask | ask | allow | allow |
 
-### 需确认档、新两族判据与爆炸半径预演
+¹ 只读档拒一切写，所以不存在"部分删除成功"——每个目标都被完全覆盖，整族让给宿主；宿主会给出官方拒绝标记与 `sandbox_permissions` 升级路径。
+² 宿主自带的协作式超时与 `promoteOnTimeout` 已经管住长驻命令，这条规则不再提供安全属性，故整条让给宿主。
 
-| 面 | 内容 |
-| --- | --- |
-| git 破坏族（7 枚键，全部 `ask`） | `gitResetHard`（`reset --hard`）· `gitCheckoutDiscard`（`checkout -- <path>` / `checkout .`）· `gitRestoreDiscard`（`restore <path>`，`--staged` 单用**不判**——只动索引、内容不丢）· `gitCleanForce`（`clean -f*`；`-n`/`--dry-run` **不判**——git 只打印）· `gitStashDrop`（`stash drop\|clear`）· `gitBranchDelete`（`branch -D`；小写 `-d` **不判**——git 自己会拒绝未合并的分支）· `gitForcePush`（`push -f`/`--force`/`--force-with-lease`，一律需确认）。判据与 `noVerify` **共用同一趟走查**，按子命令查表 |
-| 基础设施族（5 枚键，全部 `ask`） | `tfDestroy`（`terraform destroy`；`plan -destroy` **不判**——plan 只打印）· `tfAutoApprove`（`apply -auto-approve`；裸 `apply` 不判——terraform 自己会问）· `dockerPrune`（`docker … prune`）· `kubectlDelete`（`kubectl delete`；`--dry-run` **不判**——那是官方教的预演写法）· `dbMigrate`（`manage.py migrate` / `prisma migrate` / `rails db:migrate` / `alembic upgrade` / `flyway migrate` / `typeorm migration:run` / `knex migrate:latest` …）。迁移族另有一层**命令位置**判据：命令词之前的每一枚词都得是启动器（`python`/`npx`/`bundle exec`…），于是 `grep manage.py migrate docs/` 这种"在文档里搜这串"不假命中；只读动作（`prisma migrate status`/`flyway info`）与干跑旗标（`--plan`/`--sql`）也不判 |
-| 为什么这两族是 `ask` 而不是 `deny` | 每条都有正当用法。硬拒"危险但有时正确"的操作会**逼模型找绕路写法**（`git reset --hard` 被拒后改用 `rm` 掉那些文件——一个更糟且不被拦的写法）。官方自带的示例 mod `Blast Radius`（`packages/experimental/claude-code-mods/examples/blast-radius/`）对同一批命令的处置也是"给用户看、用户拍板" |
-| 与沙箱的让路判据（只对 `rmrf`） | `ctx.shell.sandboxMode !== undefined`（执行器自报在拦）**且** `ctx.sandboxPolicy.resolve({session}).mode !== "danger-full-access"` **且** 目标**包不住任何可写根**时让路。⚠ 最后一条是刻意收紧的：`workspace-write` 的语义是*允许*改工作区内的文件，于是 `rm -rf ~`（工作区在 `~` 下）会**先删光工作区内容**、再在边界外被拒——沙箱是路径白名单，**不提供原子性**。所以 `~`/`/`/`.`/`..` 一律不让路，只有 `rm -rf /etc/foo`、`rm -rf ~/Downloads` 这类才让 |
-| 为什么不给 `secretPath` 也开让路 | `dsh-fs-sandbox` 与 `dsh-fs-local` 是**互斥装配**，"装的是哪个"没有可读的口子——按本仓纪律**不猜**。代价也不对称：误拦只是让用户去终端改，漏拦是凭据外泄且难以发现 |
-| `auto` 档为什么仍需本包 | `auto` 的旋钮组合是 `danger-full-access` + `ask` + 逐调用 reviewer（一个 LLM），而 reviewer 的 allow **不等于用户批准**，沙箱此时完全不拦。所以 `rmrf` 在这一档保持硬拒——我们是唯一兜底 |
-| 爆炸半径预演（`ask` 档专属） | `ask` 命中时跑一趟**只读预演**（`BLAST_COMMANDS`：`git status --porcelain` / `git clean -nd` / `git stash list` / `git branch -vv` / `git log --oneline`），把清单接进审批请求的 `reason` 与 **`displayReason` 的每一门语言**。空输出是**结论**（"此刻不会改动任何东西"），不是"没查到"。四条边界：只在 `ask` 档跑 · 只在 `ctx.shell` 在位时跑 · 命令表写死、**不插值任何模型输入**（插值模型给的路径就是拿命令原文拼 shell 串）· 量不出来一律退回盲问（执行器缺席/非零退出/超时/取消/形状不符）|
+- **完全权限 = 零兵底，但仅限"问不了"的那一支。** 官方预设把这一档绑死 `approval: never`，用户选它就是"不要拦、不要问"：整档放行、命中只进设置卡的统计，模型侧一个字都不改。而 `danger-full-access + ask`（自定义组合，或没装预设服务时的默认）**还能问**，那一支沿用工作区档的处置——沙箱什么都不拦却把动作静默放行，方向正好相反。
+- **自动审查只留两条确定性硬拦**（`rmrf` 与 `pipeShell`）。reviewer 是一个 LLM，它的 allow 不等于用户批准，而这一档沙箱什么都不拦；其余全部交给 reviewer，避免同一动作问两次。
+- **一条硬规则：「能不能问」决定 `ask` 能不能落地。** `never` 在**任何应答者之前**就确定性返回 `rejected`（理由还会被宿主换成它自己的固定串），所以本该 `ask` 的规则在这一档由我们自己收口成 `deny`，并附一段"这档问不了、换哪一档才能问"，不让模型只拿到一句"不许"。
+- **读不到沙箱模式时**（没有可约束的执行器，或服务形状不符）走一条保守列：写类判据照拦，"认不准"照问。它**刻意不复用**工作区档那一列——那一列依赖"沙箱会拦住一部分"这个前提，而这里没有这个前提。
+- 类型让两条性质**结构性**成立：忘定档 = 编译错误；一枚键两属不可能。后者是要紧的：`tools.guard` 是同步谓词而审批是异步的，且宿主在审批放行之后**还会再跑一次 guard**——"两处都认领"的表现就是**用户点了允许之后还是被拒**。
 
-### 对外接口
+### 与沙箱的让路，以及为什么只有 `rmrf` 有
 
-| 接口面 | 内容 |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 宿主扩展点 | 拦截面是 `ctx.tools.guard` 的同步谓词（`inject: ["tools", "settings"]`；预检的取证 I/O 全走宿主 `ctx.fs`（官方 `FileSystem`，经可选注入 `inject(["fs"])` 取，**不**用 `node:fs`）），预检另订两条瀑布 `tools/pre-execute`（B 面）与 `tools/post-execute`（A 面）——两条都先 `await next()`，下游已经 deny/cancel/ask/block 就原样交回，预检不抢别人做过的决定；官方契约保证 pre-execute 瀑布整体跑完之后才轮到同步 guard（installed dsh-tools `prepareExecution` 只在 `decision.kind === 'allow'` 时才走 `guardReason`），所以 B 面写下的投递水位 guard 一定看得见；**拦截条目刻意不带 `Config`**——设置面在同 profile 的另一个条目 `danger-guard-settings` 上（它 `inject: ["settings"]` 并导出 `Config`，0.1.7 由宿主隐式注册、命名空间即该条目 id，本包不调用任何注册 API），这样一行被改坏的用户层 config 只会让设置条目 FAILED，闸门照旧拦；跨命名空间只经 `settings.describe()` 读官方 `locale` 那一条的 `preference`（决定回给模型的文案语言，条目未投影即中文）；订 `session/disposed` 释放事实门分片；另有一条**可选**子注入 `ctx.inject(["sessionProjections"], …)`，把 `danger-guard.toolLedger` 单元挂上并把 `stateOf()` 读口装进守卫，注册表缺席时那条回调根本不激活、判定沿用回退扫描——它刻意不写进插件级 `inject`，否则没装投影包的 profile 会整条闸门下线。另有一枚**可选**读数 `ctx.get("workingDirectory")`，交出会话的**当前**目录——所有相对目标都以它为基准归一化后再进判据：宿主 0.2.1-rc.2 起 `SessionHeader.cwd` 只剩创建期元数据（`dsh-session/src/types.ts:104-105`），宿主自己的工具也改读这枚服务（`tool-bash/src/index.ts:487`），于是 `cd`（含新增的 `working_directory` 工具）会带着这个基准一起移动，判据不再停在会话创建那一级。该服务缺席时退回 `header.cwd`：没装 `dsh-working-directory` 的 profile 照旧按会话原始目录判定，而不是整条闸门下线 | —— 没装 fs 后端的 profile 里预检整趟不参与（读不到工具实际用的那份盘就一个字都不编），拦截面不受影响
-| 不提供与可选消费 | 不注册工具、不提供 HTTP 端点、不加 CLI 子命令。可选消费 `ctx.get("lessonLoop")` 的 `report` / `pass`：`source: "danger-guard"`，category 三类 `dangerous-bash` / `secret-path` / `factgate-deny`，签名分别是命中命令原文、`bash-nested-shell-unconfirmed`、`edit-before-factgate` |
-| 包导出面与卡片 | 总线缺失、抛错或返回 rejected Promise 都不影响拦截，只丢一条告警。`.` → 拦截半入口（仓内 `host.ts`，发布产物 `host.js`）、`./settings` → 设置半（仓内 `settings-host.ts`，发布产物 `settings.js`）、`./client` → `client.js`、`./cordis.patch.yml`、`./package.json`；卡片注入 slot `plugins.bundle.config`、key = bundle 包名 `@jayyuen66/dsh-danger-guard`（该槽按 bundle 包名 keyed：宿主派发 `entryKey: pkg.name`，见 `~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles`；写成裸条目 id 就是卡片不渲染），而 `configForms.get()` 与 settings 命名空间仍是 bulkhead 的设置条目 id `danger-guard-settings`——两个标识不是一回事。React 外部化后包成模块加载器条目，改动先进草稿、点「保存」才写入 settings，作用域只读（非本机 loopback 页面）时控件禁用并显示只读状态。卡片另有**判定统计读数**（读宿主进程）：打开卡片（以及手动「刷新」）会走一次 Remote 调用，命名空间 `dangerGuardStats` —— 宿主侧用标准装饰器声明（`lib/stats-remote.ts`），客户端**手写**同款 descriptor 与之配对（`src/stats-reader.ts`：无参、一元、JSON 结果正是 `TypertCodec` 的 `src-json` 模式覆盖的形状，故不必跑代码生成器；`test/stats-remote.test.ts` 用官方 `remoteMethods()` 把两侧拉到一起对质）。它显示各面的判定次数、`deny`/`ask` 两档的规则键命中、事实门配额放行次数（告警色——非零就意味着有目标一直凑不齐证据）与慢判定（≥ `slowMs`）。读法是**按需拉取、不订阅**：判定统计只在 agent 干活时变，而跨宿主重连缓存一份旧值正是这套设计要避开的失效。远程面走 **`ctx.get("remote")` 显式读取**而不是写进 `inject`：cordis 对未 inject 的服务读取是抛错，而这条读面是可选的 —— 写进 inject 会让没装远程面的部署整条 client 入口都不激活（命名空间服务 `remote.dangerGuardStats` 在挂载后读）。当前部署没装 Remote 面时，那一段显示「读不到」而不是让整张卡挂不上。 |
+- 让路只在三件事同时成立时发生：执行器自报在拦、解析出的模式不是完全权限、且目标**包不住任何可写根**。
+- 最后一条是刻意收紧的。`workspace-write` 的语义是*允许*改工作区内的文件，于是 `rm -rf ~`（工作区在 `~` 下）会**先删光工作区内容**、再在边界外被拒——沙箱是路径白名单，**不提供原子性**。所以 `~`、`/`、`.`、`..` 一律不让路，只有 `rm -rf /etc/foo`、`rm -rf ~/Downloads` 这类才让。
+- `secretPath` 完全不开让路：本地与沙箱两套文件系统后端是**互斥装配**，"装的是哪个"没有可读的口子，按本仓纪律**不猜**。代价也不对称——误拦只是让用户去终端改，漏拦是凭据外泄且难以发现。
 
-### 测试分三层（同一份源码，三种"谁来跑这次调用"）
+## <img src="https://api.iconify.design/lucide/triangle-alert.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 已知边界
 
-`npm test` 一次跑完三层，阈值仍是四项 100%。分层不是因为用例多，而是因为**桩测不到的那一类错**恰好是这
-个插件最容易犯的：把宿主的形状猜错，判定却照样自洽。
+按类登记，每类各钉一条现状用例；完整逐条理由写在那批测试旁边，不在这里。
 
-| 层 | 文件 | 谁在跑调用 | 钉住什么 |
-| --- | --- | --- | --- |
-| 单元 | `test/host.test.ts`、`test/host-contract.test.ts`、`test/fact-gate.test.ts`、`test/danger-rules.test.ts` … | 手写 `ctx` 桩 | 判据本身：词表、档位、缺项、状态机、文案 |
-| 集成 | `test/host-integration.test.ts` | **真 `ToolRuntime`**（`@deepseek-ai/dsh-agent-loop-testkit` 装起官方 spine，`defineContentToolFixture` 注册真读真写的工具），直接 `ctx.tools.execute` | 瀑布顺序与物化：pre-execute 先于 guard、deny 变成 `Error: <理由>` 的 isError 结果、`additionalContexts` 与别的插件并存、guard 拿到的是模型字面量（相对/软链都得本包自己归一） |
-| 点对点 | `test/agent-loop-e2e.test.ts` | **真 `AgentLoop` + 真 SessionStore**，只有模型是脚本（`LlmAdapter` 的官方面） | 「证据在模型下一次动手之前可见」这句话本身：A 面的引用面出现在**决定那次编辑的那一条请求**里、B 面一轮就够、清单点名的检索口径照做即放行、密钥正文在任何一次请求里都不出现 |
+- **`cmd` 当段头判不到。** `cmd.exe /c rd /s /q C:\Windows` 及其去 `.exe`、带路径前缀的写法仍逃逸：`cmd` 既不在删除命令词表、也不在下钻名单里，而它的引号规则（`%VAR%`、`^` 续行、`&` 不分段）离 POSIX 太远，拿 POSIX 词法器读它的 `/c` 体会新开一批误拦面。**PowerShell 家族已收**：`pwsh` / `powershell` 的 `-c` / `-Command` 体按 join 语义取出、逐段判，并在体内强制开 Windows 字形轨道。点了 `-File` / `-EncodedCommand` 而没有取体旗标 ⇒ 要跑的东西注定不在输入里，升格为需确认。
+- **干跑修饰不进判据**（`Remove-Item -WhatIf -Recurse ~` 照拦）。`-WhatIf` / `-Confirm` 只是让 pwsh 打印将做什么；把干跑算成一类可豁免形态是一个还没人拍板的策略决定，所以现状按现状钉住。
+- **裸 `~user`（词尾无分隔符）不收。** `rm -rf ~root` 展开成什么取决于本机账号表，而本闸既不碰文件系统也不查用户。**带分隔符的 `~user/…` 已收**。
+- **PATH 上的解释器跑代码串一律需确认。** `python3 -c "print(1)"` 是良性的，也仍要确认——这是"看不见就不静默放行"的定价。
+- **`bash` 重定向写入不在事实门覆盖面。** 门禁挂在 `edit` / `write` 两类工具上；`printf > f`、`tee`、`cat >`、`sed -i` 绕过"先取证"这条。纳入它要解析 shell 重定向与就地编辑器。
+- **少数 `ask` 档形态是盲问。** 裸 `git checkout <path>` 与"切分支"在词法上不可分，`git push --force` 不解析目标分支。经 shell 重定向落笔的改动、以及目标在会话外被改动的残窗，同理。
+- **MSYS/Cygwin 挂载形态不折算。** 真实 Windows 宿主上 `rm -rf /c/Windows/System32` 要一张挂载表，那是新依赖加新设计决定。
 
-⚠ 集成层与点对点层的分工是测出来的事实，不是偏好：**直接 `ctx.tools.execute` 不写会话日志**（只有 loop 会
-`appendToolCall`），所以"模型自己读过/搜过"这类凭证只能在点对点层成立；集成层里能顶的只有预检的投递水位
-（`test/host-integration.test.ts` 把这条边界写成了显式断言，免得日后有人拿集成层的红去改判据）。
-新增 devDependencies 全部是 `@deepseek-ai/*` 的 0.2.1-rc.2 同线件，只进 `devDependencies`——
-发布面那条门禁（`@deepseek-ai/*` 不得进 `dependencies`）不受影响。
+## <img src="https://api.iconify.design/lucide/lock.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 数据与隐私
 
-⚠ 断言用的判别标记必须跳过**共用前缀**：`headFirst`（行动清单）、`preflightHandoff`（当场递证据）、
-`preflightAttach`（随读取附上）三条文案都以 `[fact-gate] ` 开头，所以"取首词当标记"会让「走清单」与
-「递证据」两条**互斥**的断言同时为真——本轮真踩过：两条用例各自在错误的分支上全绿。取法因此收在一处
-（`test/host-spine.ts`）：`gateMarkOf` 跳过共用前缀、取到第一个标点；`markOf` 只用于 `[引用探查]` /
-`[目标内容]` / `[层探查]` 那类**独占标签**。
+| 口径 | 内容 |
+|---|---|
+| 不写盘、不联网 | 判定链没有任何文件系统写入与网络请求；输出面只有 `console.*` 告警与回给模型的文案。**唯一**的例外是下面那趟 `ask` 档预演 |
+| 子进程调用（只有这一处） | `ask` 档命中时，按写死的 `BLAST_COMMANDS` 跑一条**只读命令**，在会话 cwd 里、经宿主的 `ctx.shell`，因此与 bash 工具走同一套沙箱与凭据擦洗环境。输出收紧后只接进审批请求的 `reason` 与 `displayReason`。任何失败（执行器缺席、非零退出、超时、取消、形状不符）一律退回盲问，不重试、不换命令。命令表写死、**不插值任何模型输入** |
+| 读什么 | 会话事件历史里的工具台账（主路径：守卫里同步读的投影单元；回退是一次全量事件扫描，判定逐字相同）；目标与层目录的 `statSync`；预检写面对每枚声明目标的一次路径解析与一次正文读取；家目录取 `os.homedir()` |
+| 记什么 | 全部在进程内存里——事实门分片、判定台账、以及卡片读的那几格计数——宿主退出即消失，dsh 数据目录下不留本包的文件 |
+| 出域的只有两处且都可关 | 装了 lesson-loop 时，`report` 载荷含 cwd、session id、命中命令原文或目标路径与拒绝文案，另带 `judgeMs` 与（密钥面命中时的）目标解析形清单。此外每次判定还有一条 `judge-cost` pass，载荷只有面名、毫秒、字符数三枚数值，不含命令原文与路径。**只有 `judge-cost` 那条 pass 受 `judgeStats` 管**——拒绝上报里的 `judgeMs` / `judgeLength` / `resolvedPaths` 是无条件发送的 |
 
-### 数据与隐私
-
-| 隐私口径 | 内容 |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 不写盘、不联网 | 判定链没有任何 fs 写入与网络请求，输出面只有 `console.*` 告警与回给模型的文案。⚠ **唯一的例外是 `ask` 档的爆炸半径预演**：它跑一趟**只读**子进程（见下一行）——命令表在 `lib/blast-radius.ts` 里写死、**不插值任何模型输入**，且只在 `ctx.shell` 在位时跑 |
-| 子进程调用（只有预演这一处） | `ask` 档命中时，按 `BLAST_COMMANDS` 跑一条**写死的只读命令**（`git status --porcelain` / `git clean -nd` / `git stash list` / `git branch -vv` / `git log --oneline -n 10`），在**会话 cwd** 里、经宿主的 `ctx.shell`（因此与 bash 工具走同一套沙箱与凭据环境擦洗）。输出按 20 行 / 1200 字符收紧，接进审批请求的 `reason` 与 `displayReason`（两者都只到宿主与用户，不出域到本包之外）。任何失败（执行器缺席 / 非零退出 / 超时 / 取消 / 形状不符）一律退回盲问，不重试、不换命令 |
-| 读什么 | 会话事件历史里的 tool 台账（主路径：`ctx.sessionProjections` 上注册的 `danger-guard.toolLedger` 单元，守卫里走 `stateOf()` 同步水位读；注册表缺席或台账不可采信时回退 `session.snapshotEvents(0)` 全量扫描，判定逐字相同）；触发回退的三种情形：台账行数越过 `LEDGER_WINDOW`（2000）、`event.seq` 相对已折长度跳号（折叠起点不在日志开头）、回填形状不符；目标文件与层目录的 `statSync`（存在性、mtime、项目根标记）；预检 B 面对每枚声明目标的一次 `ctx.fs.resolve` + `processPath`（官方真实路径形；同一枚目标在一次调用里**只问一次身份**，正文读取与版本探针复用同一枚 target，`fs/observed` 那一路则零额外 I/O）；"目标疑似被会话外改动"时对目标全文的一次 `readFileSync`（内容自证）；家目录取 `os.homedir()`，即只读 HOME 环境变量 |
-| 记什么 | 全部在进程内存里（事实门按会话分片 64 × 200 文件，判定台账按 LRU 各 200 条淘汰；另有卡片读数读的那几格计数：各面判定次数与慢判定次数、按规则键的 `deny`/`ask` 命中、事实门配额放行次数），宿主进程退出即消失，`<dsh 数据目录>` 下不留本包的文件 |
-| 出域的只有两处且都可关 | 装配 lesson-loop 时 `report` 载荷含 cwd、session id、命中命令原文或目标路径与拒绝文案，另带两格运维量：`judgeMs`（本次判定耗时，bash 面同带 `judgeLength` 输入字符数）与密钥面命中时的 `resolvedPaths`（该目标的解析形**清单**：本机 realpath 形与官方后端形并列，**这是一条新的路径出域**，与目标路径同性质、同源；后端那一形在非本地部署下是执行世界里的路径，不是本机路径）。此外每次判定还有一条 `judge-cost` pass，载荷只有面名/毫秒/字符数三枚数值（不含命令原文与路径）——它与上面两格都受 `judgeStats` 管，关掉即不出域，而本地那行滚动摘要日志不受影响（`enabled: false` 时连上报也不发）；设置值由宿主持久化在 settings 的 `danger-guard-settings` 命名空间里 |
-
-### 常见问题
+## <img src="https://api.iconify.design/lucide/circle-help.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 常见问题
 
 | 问题 | 怎么办 |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 拦错了合法命令怎么办？ | 三份 `extra*` 名单与 `refSearchTools` 都只能收紧、没有白名单，所以只有三条路：临时关 `enabled`、靠 `maxDenies` 配额放行、或按拒绝文案改写命令形态 |
-| 事实门一直不放行？ | 它只认成功的动作：照消息把检索起点指向项目根这类祖先目录（搜文件自身或兄弟目录算"作用域过窄"）；用了别的检索插件就把工具名加进 `refSearchTools`（名单为空时消息会直说原因）；实在取不到证就走配额放行或临时关 `factGateEnabled` |
-| 怎么确认它在工作？ | 设置页出现该卡片行、`dsh --profile web --dump-config` 出现本包层与 `- id: danger-guard` 即已装载；宿主版本需 `>= 0.2.1-rc.2`。已知边界按**类**登记，每类各钉了现状用例：① **cmd 当段头那一类**——`cmd.exe /c rd /s /q C:\Windows`、`cmd /c …`（去 `.exe`）、带路径前缀的 `C:\Windows\System32\cmd.exe /c …` 三种活拼法仍判不到：cmd 不在删除命令词表、也不在下钻名单里。不收它的理由是引号与转义规则差得太远（`%VAR%`、`^` 续行、`&` 不分段），拿 POSIX 词法器读它的 `/c` 体会新开一批误拦面，要逐条重钉。**PowerShell 家族这一类已收**：`pwsh`/`powershell`（含 `.exe` 形与任意大小写）的 `-c`/`-Command`（含 `/c`、`/command`）体按 join 语义取出后逐段判，并且**体内强制开 Windows 字形轨道**（段头就是执行器身份的证据，与「调用点方言由工具身份给」同源）；点了 `-File`/`-EncodedCommand` 而没有取体旗标 ⇒ 体注定不在输入里，升格需确认。`-e` 那枚歧义缩写（pwsh 上是 `-EncodedCommand`、Windows PowerShell 上是 `-ExecutionPolicy`）故意不当不透明旗标看，否则 `powershell -ex bypass -Command "…"` 会被整条拖成需确认。（提权/时间/二次执行那一类包装词——`sudo`/`env`/`time`/`timeout`/`nice`/`watch`/`xargs`/`parallel` 及带路径前缀的写法——**已收**：走包装词跳词 + 候选命令头多点位扫描。）；② **MSYS/Cygwin 挂载形态**——真实 Windows 宿主上 `rm -rf /c/Windows/System32` 与 `/C:/Windows` 判不到：要把 `/c` 折回盘符就得带一张挂载表，属新依赖加新设计决定，路线图「明确不做」已记。另：③ **dry-run 修饰不进判据**（over-block 那一侧的现状）——`Remove-Item -WhatIf -Recurse ~` 照拦：`-WhatIf`/`-Confirm` 只是让 pwsh 打印将做什么，本闸不读它们，dry-run 与真删同判；收掉它要先定策"dry-run 算不算一类可豁免形态"（`-WhatIf` 自己也可能被 `-w` 这类歧义缩写撞开），测试里按现状钉住。④ **无盘符的根相对 Windows 形态（现已收）**——`\Users\bob\notes.txt` 在轨道参与时（`pwsh` 方言 / win32 宿主）照拦，POSIX 读法照放（bash 把 `\U` 当转义吃掉，同一串是相对文件 `Users…`，拦它才是误拦）。收法**不猜盘符字母**：只把"前导单枚 `\` = 当前盘根"这一形接进一条与系统与用户树**严格同族**的树名表（`windows`/`programdata`/`program files`/`users`），所以既没拆掉 `^[a-z]:` 那条前提，也没把 `\etc`、`\usr` 这类相对删除接进 24 条 POSIX 系统前缀表（那正是原注释说的"硬猜必然误拦"，它仍然成立，故 `\etc` 的对照留在「Windows 字形归一不得改写 POSIX 判据的入参」那组）。同一批收掉的还有混分隔符的家目录后代：家目录写成 POSIX 字形再用 `\` 下钻（`/data/bob\.ssh`）在轨道参与时算家目录之内。⑤ **scoped 包名不猜 bin 名**——`npx @scope/pkg`、`npx @vue/cli-service serve` 判不到长驻：包名与可执行文件名不同名是常态，猜它就是给判据加误判面（`npx vite@5` 这类**版本选择器**已收）。⑥ **一个 `windows` 方言值同时代表 cmd 与 PowerShell**——两家的引号、变量、转义、别名规则并不相同（`%VAR%` vs `$env:VAR`、反引号 vs 反斜杠），现在按同一轨道处理，只保证"该拦的拦住"，不保证两家逐字同判。⑦ **编辑面的真实路径有三形，判定取并集**——宿主**不**替我们解析：guard 拿到的是模型字面量（`arguments` 深冻结，官方明确排除输入改写），路径解析发生在工具体内（`packages/fs/tool-fs/src/read-target.ts:25`），晚于整条策略链。所以本包自己取三形并列判：**声明形**；**本机形**（`realpathOf`，即 `realpathSync` 的最深存在祖先 + 剩余段）；**官方后端形**（`ctx.fs.resolve` → `processPath`：预检 B 面在判定之前 async 问一次，`fs/observed` 顺手记下后端自己报的那一枚，同步 guard 只读这份缓存）。非本地执行世界（fs-sandbox / ssh / e2b）下只有第三形说的是同一份盘；而 `tools.guard` 是同步谓词、官方 `resolve` 是 async，所以第三形只能"先记后读"，miss 就少一形（**不是放行**）。三形从不互相替换，于是"目录本身是软链"与"凭据文件是软链"都覆盖（本机形由 `test/host-integration.test.ts` 在真 ToolRuntime 上钉住，官方形由 `test/host-preflight.test.ts` 那组假后端用例钉住）；一形都取不到时退回声明形判定（少的是软链面，不是全部）。**TOCTOU 只是收窄不是消除**：解析与真实落盘之间目标仍可被换掉，堵它要在写入侧做原子替换或 fd 级校验，属宿主/OS 那一层，不在本包。lib 侧仍不 import `node:fs`（解析留在 host.ts 与 lib/target-paths.ts，判定仍是纯函数）。⑧ **用户扩展的密钥模式由配置者自负**——正则的灾难回溯无法静态判定，加载期只挡"编译不过"与"超长"两种，并逐条点名告警"本条未生效"；判定前另有输入长度上限（命令 `MAX_JUDGED_COMMAND_LENGTH`、路径 `MAX_JUDGED_PATH_LENGTH`），超限按需确认收口而不是放行；执行面的层数另有两道界（`NESTED_SHELL_MAX_DEPTH` 管嵌套 `-c`/`eval` 体、`REGION_MAX_DEPTH` 管 `$( )` 命令替换），界外同口径收口——长度上限只界得住单次扫描，界不住"层数 × 每层重扫的文本"，不设第二道界时实测 1 万层深套会顶穿调用栈。⑨ **非 shell 解释器的代码串一律需确认**——`python3 -c "print(1)"` 这类良性写法也会被要求确认，这是"看不见就不静默放行"的定价（名单与结论在 `CODE_EVAL_FLAGS`，测试按现状钉住）。⑩ **裸 `~user`（词尾无 `/`）不收**——`rm -rf ~root` 在真实 bash 里展开成 `/var/root`（本机实测），而 `~bob`/`~backup` 因这台机器上没有该账号而原样不展开：结论取决于本机口令表，判据既不碰 fs 也不查用户（查它 = 新依赖 + 新设计决定，与 ③ 同族），收裸形会误拦以 `~` 开头的相对文件名。**带分隔符的 `~user/…` 已收**（`rm -rf ~bob/x`、`~root/.ssh` 与 `$HOME` 同判，方言侧不放松），它落在"展开后必在某个家目录树内"这一族。方言入口只认 `bash`/`pwsh` 两个工具名（日后注册 `cmd`/`powershell` 要在映射里补一行，不从字形反推）；嵌套 `-c` 体沿用调用方的方言，换一层 shell 不换读法。⑪ **相对取证按"评估时那枚目录"重新归一**——台账存的是模型原样给出的调用参数，于是在 `/A` 里做过的相对 `read a.ts`，会话换到 `/B`（`cd`，或宿主 0.2.1-rc.2 新增的 `working_directory` 工具）之后会被读成 `/B/a.ts`：跟着这个基准走正是补上"旧读法看不见新目录里的凭据路径"那一漏拦的代价，反面是新目录里同名文件的旧读证据可能被错记为已取证。收口要让折叠侧给每条台账盖上"当时所在目录"（把 `working-directory/change` 折进 `lib/tool-ledger.ts`），那是改台账的形状而不是改读取次序；⑫ **bash 重定向写入不在事实门覆盖面**——门禁挂在 edit/write 两类工具上，用 `printf > f`、`tee`、`cat >`、`sed -i` 这类 shell 重定向落笔的改动不受「先取证」约束。纳入它要解析 shell 重定向与就地编辑器（`sed -i`、`perl -i`、`awk -i inplace`…）的形态，漏面多、维护贵，故按诚实边界登记；⑬ **`ask` 档与让路面的已知边界**（每类各钉现状用例）：裸 `git checkout <path>` 与 `git checkout -B <branch>` **都不判**——前者与"切分支"在词法上不可分、后者与"建分支"同形，要知道那名字是分支还是文件得读仓库，而本包不碰 fs；`git push --force` 的**目标分支不解析**（口径是"一律需确认"）；`git rebase --abort`/`git commit --amend` 等"改写更早历史"的形态未收；`terraform destroy` 要连云、`dbMigrate` 各工具旗标不一，**没有预演命令**（其余几族有，见上表），所以它们是盲问；让路面**只有 `rmrf` 一枚**（`SANDBOX_COVERED`），且**工作区在家目录下时 `~` 照旧硬拒**——那正是"包不住可写根"这条判据存在的理由。⑭ **`devServer` 与宿主的 `timeout-policy` 重叠**（已核实）：宿主基础组合包默认启用协作式时间上限并返回清晰的超时错误，`tool-bash` 的 `promoteOnTimeout` 默认还把超时的前台命令**提升成后台作业**——所以这条规则现在只剩"省一轮等待 + 点名 `run_in_background`"的 UX 价值，**不再是安全属性**。⑮ **预演量不出来时无声**：它不在总线上报、也不打 `console.warn`（预演失败是预期内的事：不在 git 仓库里、执行器报错、超时），代价是"这次为什么没有证据"在日志里查不到——判据面（`ask` 本身照旧问）不受影响。 |
+|---|---|
+| 拦错了合法命令。 | 本包没有白名单，所以只有「设置项」那三条路：临时关、走配额放行、或按拒绝文案改写命令形态。 |
+| 事实门一直不放行。 | 它只认成功的动作。照消息把检索起点指向项目根这类祖先目录；用了别的检索插件就把工具名加进 `refSearchTools`；实在取不到证就走配额放行或临时关 `factGateEnabled`。 |
+| 它什么都没做。 | 先看设置页那一行，再用 `dsh --profile web --dump-config` 看本包的层**与 stderr**。宿主需在支持的版本线上。缺 `tools` 服务意味着条目从未激活——启动诊断会点名它。 |
+| 怎么知道这个拒绝是本包给的？ | 拒绝文案点明规则族与一条出路，并作为那次工具调用的错误结果出现。规则从不改写或丢弃调用；它要么拒绝，要么交出一份审批请求。 |
 
-同一条纪律的**已知误拦（⑥b）**：账号不存在时 bash 原样不展开，`rm -rf ~bob/x` 就真是个以 `~` 开头的相对路径名（本机 `dscl` 查无 `bob`/`backup`/`dev`）⇒ 本包按「宁可误拦」处理，与引号里的 `"$HOME"` 同族（那一形永不展开，也照拦）。
+## <img src="https://api.iconify.design/lucide/wrench.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 开发
+
+```sh
+pnpm install
+pnpm run check     # typecheck → lint → client 构建 → host 构建 → 类型 → 测试 → 格式
+pnpm test          # vitest，带覆盖率
+```
+
+- `test/` 分三层，分开的理由是**桩测不到的那一类错**：把宿主的形状猜错，判定却照样自洽。
+  - **单元**层用手写 `ctx` 桩：判据本身——词表、档位、缺项、状态机、文案。
+  - **集成**层用官方 testkit 的**真 `ToolRuntime`**，夹具真读真写，直接经 `ctx.tools.execute` 派发：瀑布顺序与物化——pre-execute 先于 guard、deny 变成 `isError` 结果、`additionalContexts` 与别的插件并存。
+  - **点对点**层用**真 agent loop 与真会话存储**，只有模型是脚本：A 面的引用面出现在**决定那次编辑的那一条请求**里，以及密钥正文在任何一次请求里都不出现。
+  - 后两层的分工是测出来的事实，不是偏好：直接执行一次工具不写会话日志，所以"模型自己读过/搜过"这类凭证只能在点对点层成立。
+- 覆盖率四项阈值都是 **100%**，所以新增分支必须有能走到它的用例。
+- 断言用的判别标记必须跳过**共用前缀**——行动清单、当场递证据、随读取附上三条文案开头相同，所以"取首词当标记"会让两条互斥的断言同时为真。取法统一收在一处。
+
+## <img src="https://api.iconify.design/lucide/scale.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 许可
+
+MIT。源码在 [github.com/JayYuen666/dsh-danger-guard](https://github.com/JayYuen666/dsh-danger-guard)。
+
+事实门与命令规则是**机制层面**移植自 ECC（MIT，© Affaan Mustafa）——[`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) 记录了上游文件、本包做了哪些改动，以及逐项比对的结果（未搬运上游的代码、词表或文案）。
 

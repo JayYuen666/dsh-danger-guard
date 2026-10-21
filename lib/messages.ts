@@ -193,6 +193,17 @@ export interface DangerGuardMessages {
   readonly preflightReadTruncated: string;
   /** A 面注入消息的 `source.summary`（官方要求 notice 形必须带一行说明，≤120 字）。 */
   readonly preflightSummary: string;
+  // ── 权限档位说明（同一枚规则键在不同预设下成因不同，见 lib/mode-policy.ts）──────────
+  /** 仅可查看档：沙箱拒一切写，我们只补沙箱盖不到的那些面。 */
+  readonly noteReadOnly: string;
+  /** 工作区内修改档：沙箱允许改工作区、但不提供原子性，于是包住可写根的删除要我们拦。 */
+  readonly noteWorkspaceWrite: string;
+  /** 完全权限档（带 reviewer）：只留两条确定性硬拦，其余交给 reviewer。 */
+  readonly noteFullAccess: string;
+  /** 读不到沙箱模式：按保守列处置，没有沙箱兜底。 */
+  readonly noteUnknown: string;
+  /** 本来要问、但这档问不了（审批策略为 never）时的降级说明：给换档出路。 */
+  readonly askBlockedGeneric: string;
 }
 
 export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
@@ -369,6 +380,23 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
     preflightReadHead: "[目标内容] `{name}`（{bytes} 字节）：",
     preflightReadTruncated: "[已截断] 原文超过单文件上限 {bytes} 字节，以上仅是开头部分。",
     preflightSummary: "danger-guard 预检：随本次读取附上目标的引用面",
+    noteReadOnly:
+      "[档位] 当前是「仅可查看」：文件写入由宿主的只读沙箱统一拒绝，这一层不重复拦写。" +
+      "上面那条属于沙箱管不到的面（命令形态、网络/进程、远端状态），所以由本插件补。",
+    noteWorkspaceWrite:
+      "[档位] 当前是「工作区内修改」：沙箱允许改工作区，但它是路径白名单、**不提供原子性**" +
+      "——先落下的删除不会因为后面的越界被拒而回滚，所以「包住可写根」的删除由我们提前拦。",
+    noteFullAccess:
+      "[档位] 当前是「自动审查」：本档沙箱不拦文件效应，逐调用 reviewer 已负责判定其余动作。" +
+      "这一层只保留少数几条 reviewer 盖不住的确定性硬拦（如灾难删除、下载即执行），" +
+      "避免同一动作问你两次。",
+    noteUnknown:
+      "[档位] 认不出宿主的沙箱模式：这个部署没有可约束的执行器、服务形状不符，" +
+      "或模式名不在本包认识的集合里（宿主新增了模式）。按最保守口径处置，不假设有沙箱兜底。",
+    askBlockedGeneric:
+      "[档位] 这条本应弹审批问你，但当前档位**不允许询问**（审批策略为 never，宿主会在任何应答者之前" +
+      "直接拒绝）。要么把动作改写成不需要确认的形态（见上面每条给出的做法），" +
+      "要么把审批策略改成会询问（或换到会询问的档位）再执行——请不要再原样重试这一类命令。",
   },
   en: {
     fixBypassFlag:
@@ -589,6 +617,31 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "[truncated] the original is larger than the {bytes}-byte per-file limit; only its head is " +
       "shown above.",
     preflightSummary: "danger-guard preflight: reference surface attached to this read result",
+    noteReadOnly:
+      '[mode] This is "read-only": the host\'s read-only sandbox refuses every file write, so this ' +
+      "layer does not re-block writes. The rule above covers a face the sandbox cannot reach " +
+      "(command shape, network / process, remote state), which is why this package still judges it.",
+    noteWorkspaceWrite:
+      '[mode] This is "workspace-write": the sandbox permits writing inside the workspace, but it ' +
+      "is a path allow-list and provides **no atomicity** - a deletion that already happened is not " +
+      "rolled back because a later part was refused outside the boundary. So a deletion that " +
+      "encloses a writable root is stopped here first.",
+    noteFullAccess:
+      "[mode] This is the Auto-review preset: this mode's sandbox does not restrict file effects, " +
+      "and the per-call reviewer already decides everything else. This layer keeps only a few " +
+      "deterministic hard stops the reviewer cannot be trusted with (catastrophic deletion, " +
+      "download-and-execute) so that one action is never asked about twice.",
+    noteUnknown:
+      "[mode] The host's sandbox mode is unrecognised: this deployment has no confining executor, " +
+      "the service shape differs, or the mode name is outside the set this package knows (the host " +
+      "added one). The conservative column applies and no sandbox is assumed to be backing this " +
+      "layer.",
+    askBlockedGeneric:
+      "[mode] This should have prompted the user, but the current preset does **not allow asking** " +
+      "(the approval policy is never, so the host rejects before any answerer runs). Either rewrite " +
+      "the action into a form that needs no confirmation (see the guidance above for each rule), or " +
+      "change the approval policy to one that asks (or switch to a preset that asks) before running " +
+      "it - do not retry this kind of command verbatim.",
   },
 };
 

@@ -11,6 +11,7 @@
 //   ④ 量不出来一律**退回盲问**（量证据是增强，不是判据）。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import path from "node:path";
 
 import {
   BLAST_COMMANDS,
@@ -25,8 +26,22 @@ import {
 import { MESSAGES } from "../lib/messages.ts";
 import { RULE_TIER } from "../lib/danger-rules.ts";
 import { askRequestOf } from "../lib/confirm.ts";
+import type { PolicyFacts } from "../lib/mode-policy.ts";
+
+/** 夹具 cwd：按平台根拼（写死 `/w/proj` 在 Windows 上没有盘符）。 */
+const FIXTURE_CWD = path.resolve(path.parse(process.cwd()).root, "w", "proj");
 
 const ZH = MESSAGES.zh;
+
+/** 「工作区内修改」档：能问、不是自动审查、沙箱不管这次目标 —— git 族在这档走审批。 */
+const WS_MODE = "workspace-write";
+
+const WORKSPACE_ASKABLE: PolicyFacts = {
+  mode: WS_MODE,
+  askable: true,
+  autoReview: false,
+  sandboxCovers: false,
+};
 
 /** 一条 `ask` 档请求的常驻夹具（git 族里最典型的那条）。 */
 const ASK_COMMAND = "git reset --hard";
@@ -157,7 +172,7 @@ describe("blast-radius：上限收紧与渲染", () => {
 describe("blast-radius：接进 ask 的每一处文案", () => {
   it("接进 `reason`（模型侧）与 `displayReason` 的**每一门语言**（用户侧）", () => {
     // 只接 `reason` 不够：审批弹窗优先显示 `displayReason`，那样用户看不到证据。
-    const ask = askRequestOf("bash", { command: ASK_COMMAND }, undefined, ZH);
+    const ask = askRequestOf("bash", { command: ASK_COMMAND }, undefined, WORKSPACE_ASKABLE, ZH);
     assert.ok(ask !== undefined);
     const enriched = withBlast(ask, "[预演] 证据");
     assert.ok(enriched.reason.endsWith("[预演] 证据"));
@@ -168,7 +183,7 @@ describe("blast-radius：接进 ask 的每一处文案", () => {
   });
 
   it("没有预演时原样交回（不凭空添一句『没有证据』）", () => {
-    const ask = askRequestOf("bash", { command: ASK_COMMAND }, undefined, ZH);
+    const ask = askRequestOf("bash", { command: ASK_COMMAND }, undefined, WORKSPACE_ASKABLE, ZH);
     assert.ok(ask !== undefined);
     assert.equal(withBlast(ask, undefined), ask);
   });
@@ -181,7 +196,7 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
       shellRaw: shell,
       policyRaw: undefined,
       command: STATUS_COMMAND,
-      cwd: "/w/proj",
+      cwd: FIXTURE_CWD,
       session: undefined,
       signal: signalOf(),
       messages: ZH,
@@ -192,7 +207,7 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
     // 入参按官方 `ShellExecRequest` 给：到点杀进程、带取消信号、工作目录是会话 cwd。
     assert.equal(specOf(calls).onExpiry, "kill");
     assert.equal(specOf(calls).timeoutMs, BLAST_TIMEOUT_MS);
-    assert.equal(specOf(calls).workdir, "/w/proj");
+    assert.equal(specOf(calls).workdir, FIXTURE_CWD);
   });
 
   it("预演带上 sandboxPolicy：只读预演不许回落到部署级宽松策略", async () => {
@@ -201,7 +216,7 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
     // 与 runGate 那条路同口径：两处读同一个服务，只一处传就是两条纪律。
     const { shell, calls } = fakeShell(" M a.ts");
     const policy = {
-      resolve: (request: { session?: unknown }) => ({ mode: "workspace-write", request }),
+      resolve: (request: { session?: unknown }) => ({ mode: WS_MODE, request }),
     };
     const session = { id: "s1" };
     await measureBlastOf({
@@ -214,7 +229,7 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
       messages: ZH,
     });
     assert.deepEqual(specOf(calls).sandboxPolicy, {
-      mode: "workspace-write",
+      mode: WS_MODE,
       request: { session },
     });
     // 策略面读不到 ⇒ 不传这一位（预演照跑，失败即盲问，不额外造分支）。

@@ -200,27 +200,71 @@ describe("引用扫描器：层覆盖位（`dirs`）如实记录走没走到", (
 
 describe("引用扫描器：祖先层级链（纯字符串函数，导出只为可测）", () => {
   it("自下而上：目标所在目录打头，root 收尾", () => {
-    assert.deepEqual(ancestorLevelsOf("/w/proj", "/w/proj/src/a/b/mod.ts"), [
-      "/w/proj/src/a/b",
-      "/w/proj/src/a",
-      "/w/proj/src",
-      "/w/proj",
+    const root = path.resolve(path.parse(process.cwd()).root, "w", "proj");
+    assert.deepEqual(ancestorLevelsOf(root, path.join(root, "src", "a", "b", "mod.ts")), [
+      path.join(root, "src", "a", "b"),
+      path.join(root, "src", "a"),
+      path.join(root, "src"),
+      root,
     ]);
   });
 
   it("目标就在 root 下 ⇒ 只有一层（目标所在目录**就是** root）", () => {
-    assert.deepEqual(ancestorLevelsOf("/w/proj", "/w/proj/mod.ts"), ["/w/proj"]);
+    const root = path.resolve(path.parse(process.cwd()).root, "w", "proj");
+    assert.deepEqual(ancestorLevelsOf(root, path.join(root, "mod.ts")), [root]);
   });
 
-  it("root 是文件系统根 ⇒ 前缀不拼成 `//`（否则整条链空掉）", () => {
-    // 只有"目标直接在 `/` 下"才走得到：`\`${root}/\`` 对 `root = "/"` 得到 `"//"`，
-    // 而 `"/tmp".startsWith("//")` 恒假 —— 少了这条归一，链会空成 `[root]`。
-    assert.deepEqual(ancestorLevelsOf("/", "/tmp/mod.ts"), ["/tmp", "/"]);
-    // 上面那条里 `"/"` 是被**补**上去的（`/tmp` 往上一级是空串，循环在那里就退了）——
-    // 少了那次补，`/` 自己的文件与其余兄弟目录永远不会被走。
+  it("root 是文件系统根 ⇒ 前缀不拼成两个分隔符（否则整条链空掉）", () => {
+    // 判据要平台无关：Windows 的文件系统根是 `C:\`、POSIX 是 `/`。写死 `/` 时这一条在
+    // Windows 上测的就不是"根"，而是一个没有盘符的相对串。
+    const { root } = path.parse(process.cwd());
+    const under = path.join(root, "tmp", "mod.ts");
+    assert.deepEqual(ancestorLevelsOf(root, under), [path.join(root, "tmp"), root]);
+    // 上面那条里根是被**补**上去的（`<root>tmp` 往上一级收敛到根，循环在那里就退了）——
+    // 少了那次补，根自身的文件与其余兄弟目录永远不会被走。
+  });
+
+  it("windows 形态的层级链：反斜杠路径逐级上溯，且盘符根收敛到自身", () => {
+    // 这两条在 macOS 上也跑得起来：切分已改成**平台无关**的 `dirnameOf`（认两种分隔符、
+    // 保留原形态），所以 Windows 串能在本地验证。修前用 `path.dirname` 时，这里对
+    // `C:\...` 恒给出 `.`，层级链塌成 `[root]`。
+    const bs = String.fromCodePoint(92);
+    const root = `C:${bs}w${bs}proj`;
+    assert.deepEqual(ancestorLevelsOf(root, `${root}${bs}deep${bs}mid${bs}m.ts`, path.win32), [
+      `${root}${bs}deep${bs}mid`,
+      `${root}${bs}deep`,
+      root,
+    ]);
+    // 盘符根自身：上溯必须收敛到根，不能退化成空串（否则链空掉 ⇒ 扫描退化成平坦一趟）。
+    // ⚠ 目标本身不入链（它是文件，链上是它所在的目录）——所以这里期望的就是 `[driveRoot]`。
+    const driveRoot = `C:${bs}`;
+    assert.deepEqual(ancestorLevelsOf(driveRoot, `${driveRoot}tmp`, path.win32), [driveRoot]);
+  });
+
+  it("目标就是 root 的直接子项时，上溯一步到 root 即停（不越过它）", () => {
+    // 这一条钉的是"上行终止"：`dirnameOf(root)` 等于 root 自身，于是循环在 root 处 break。
+    // 少了它，`levels` 会继续往上爬，把 root 之外的兄弟目录也纳入扫描预算。
+    const projectRoot = path.resolve(path.parse(process.cwd()).root, "w", "proj");
+    assert.deepEqual(ancestorLevelsOf(projectRoot, path.join(projectRoot, "a.ts")), [projectRoot]);
+  });
+
+  it("没有分隔符的目标与根级起点：上溯收敛，不退化成空链", () => {
+    // ① 目标就是一个裸名（无分隔符）⇒ 它所在目录无从谈起，链只剩 root。
+    // ② root 是文件系统根时，任何绝对目标都落在它之下 ⇒ 链必须非空（空链等于"没有一层要扫"）。
+    const bs = String.fromCodePoint(92);
+    // ⚠ 这里的入参是**纯字符串判据的输入**（`ancestorLevelsOf` 不碰文件系统），所以可以
+    // 直接给任意形态；但为了不给"夹具写死 POSIX 路径"开先例，仍按平台根构造。
+    const projectRoot = path.join(path.parse(process.cwd()).root, "w", "proj");
+    assert.deepEqual(ancestorLevelsOf(projectRoot, "mod.ts"), [projectRoot]);
+    assert.deepEqual(ancestorLevelsOf(`C:${bs}`, `C:${bs}a${bs}b.ts`, path.win32), [
+      `C:${bs}a`,
+      `C:${bs}`,
+    ]);
   });
 
   it("目标**不在** root 之下 ⇒ 退回落成 `[root]`（那时『最近的祖先』无从谈起）", () => {
-    assert.deepEqual(ancestorLevelsOf("/w/proj", "/elsewhere/mod.ts"), ["/w/proj"]);
+    const root = path.resolve(path.parse(process.cwd()).root, "w", "proj");
+    const elsewhere = path.resolve(path.parse(process.cwd()).root, "elsewhere", "mod.ts");
+    assert.deepEqual(ancestorLevelsOf(root, elsewhere), [root]);
   });
 });

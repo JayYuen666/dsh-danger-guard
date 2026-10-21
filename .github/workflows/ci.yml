@@ -1,0 +1,215 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+  # 每周跑一次，抓的是**上游漂移**：宿主 @deepseek-ai/dsh 与工具链升级不会伴随
+  # 本仓的提交，只靠 push/PR 触发的门禁永远看不见它们。public 仓的标准 runner 免费。
+  # 注意：public 仓 60 天无活动时，GitHub 会自动停用定时工作流——这不需要额外维护，
+  # 但「上周没跑」不等于「上周全绿」，读结论时别把它当连续证据。
+  schedule:
+    - cron: "37 3 * * 1"
+# 同一分支上后到的提交取消前一个。发布用的是另一套口径（publish.yml 的
+# cancel-in-progress: false）——发布不能中途取消。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+# 门槛只需要读代码。写成白名单而不是省略：省略会拿到仓库默认权限，而默认可能是读写。
+permissions:
+  contents: read
+jobs:
+  gate:
+    name: gate (${{ matrix.os }}, node ${{ matrix.node }})
+    strategy:
+      # fail-fast: false —— 一格红不该藏起其余格的结论。矩阵的价值在于「哪一档坏了」，
+      # 默认的快速失败会把它压成一个布尔值。
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [22, 24]
+        exclude:
+          # 平台行为与 node 版本是两个正交维度：macOS 那一格只跑 node 24，
+          # 不让矩阵从 2 格变 4 格。全 9 仓的门禁在本机（darwin）上实跑通过，
+          # 所以这一格验的是真实 darwin 行为，不是重复劳动。
+          - os: macos-latest
+            node: 22
+    runs-on: ${{ matrix.os }}
+    # 官方对单 job 的上限是 6 小时，那是「系统允许」不是「应该允许」。不设这一行，
+    # 一个卡住的 install 或测试会烧满 6 小时 runner 分钟才被杀，而期间没有任何信号。
+    timeout-minutes: 35
+    # 定时触发的运行会把整个矩阵跑一遍。这里**不能**用 job 级 if 去裁矩阵：
+    # jobs.<job_id>.if 可用的上下文只有 github / needs / vars / inputs，没有 matrix，
+    # 写 matrix.os 会被判「Invalid workflow file」而让整个工作流加载失败。
+    # 想只跑主格只能放进 matrix 本身或拆成独立工作流；全矩阵每周跑一遍在 public 仓免费。
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 12
+      # registry-url 留空：本仓 CI 不发布，装依赖走包自己的 .npmrc（@jayyuen66 指向公共 npm）。
+      # 配上 registry-url 会让 setup-node 生成一份用户级 .npmrc，把 CI 的解析口径改成和开发者不一样。
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      # --frozen-lockfile：lockfile 与 package.json 不一致时直接失败，而不是在 CI 里静默改一份
+      # lockfile 后继续跑——那样绿的是「CI 现场解出来的那棵树」，不是仓库里这一份。
+      - run: pnpm install --frozen-lockfile
+      # Windows 那一格不是重复劳动：本仓的灾难删除判据有两条轨道，Windows 字形轨道只在宿主
+      # 平台为 win32 时参与判定，而本机（darwin）只能靠桩值模拟。真实 win32 上 path.sep、
+      # os.homedir() 与 cmd/pwsh 的引号规则才是它们真正的样子。
+      - run: pnpm run check
+      # 门禁不该改写仓库内容。判据落在**跟踪文件**上：产物（host.js / client.js / types/）都在
+      # .gitignore 里，所以这里为「零」意味着构建没有回头动过被跟踪的字节。
+      # 只在 ubuntu 格判：win32 上 core.autocrlf 会让检出本身带上 CRLF，那与门禁无关。
+      # 覆盖率只在一次运行的日志里滚一遍就没了，翻起来费劲。落成产物之后，
+      # 「这次为什么掉了」可以直接把报告下下来看，而不必重跑一次。
+      # 只收 ubuntu 的 node 24 那一格：九格各传一份是九份同样的报告。
+      - name: 上传覆盖率报告
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 7
+      # 运行页顶部的摘要：把结果留在这一页，不必点进每一步的日志里找。
+      - name: 运行摘要
+        if: always()
+        # 脚本体是 bash 写法（`{ …; } >> "$GITHUB_STEP_SUMMARY"`）；矩阵含 windows 格，
+        # 而 Windows runner 的默认 shell 是 pwsh，不显式声明的会解析失败。
+        shell: bash
+        run: |
+          {
+            echo "### ${{ matrix.os }} / node ${{ matrix.node }}"
+            echo ""
+            echo "- 门禁：${{ job.status }}"
+            echo '- 门禁命令：pnpm run check'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: 门禁没跑过就别留下产物
+        if: matrix.os == 'ubuntu-latest'
+        run: test -z "$(git status --porcelain --untracked-files=no)"
+
+  # install-probe：门禁绿了不等于「装出去能用」。本仓的故障形态是构建、类型检查与全量用例
+  # 全绿，而装载时入口解析不到、bundle patch 没随包发出、或 dsh 声明缺一半。判据只能在
+  # 消费侧的安装布局上，所以这里打真包、进干净目录、真 import。
+  install-probe:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # 这个 job 要给自己打出来的 tarball 签来源证明：id-token 换 Sigstore 身份，
+    # attestations 落证明。两者都只在这一 job 内有效，工作流级仍是只读。
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 12
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # 只用 pnpm pack：`npm pack` 不解析 `catalog:`，会把未解析的协议原样写进 tarball 的
+      # package.json，随后任何 `npm install` 都在
+      # EUNSUPPORTEDPROTOCOL Unsupported URL Type "catalog:" 上失败——那不是产物缺陷，
+      # 是打包器选错了。publish.yml 走的是 `pnpm publish`，用户拿到的从来不是 npm 打的那个包。
+      - name: 打包（发布器与 CI 都用 pnpm）
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pkg
+          pnpm pack --pack-destination /tmp/pkg
+      # 在消费侧安装**之前**签：证明的是「本 workflow 打出来的这份产物」本身，
+      # 而不是装完之后目录里的任何东西。public 仓走 Sigstore 公共实例，无额外费用。
+      - name: 生成构建来源证明
+        uses: actions/attest@v4
+        with:
+          subject-path: /tmp/pkg/**/*.tgz
+      - name: 干净目录安装 tarball（不带任何 flag）
+        run: |
+          set -euo pipefail
+          tarball="$(find /tmp/pkg -name '*.tgz' -print -quit)"
+          mkdir -p /tmp/probe && cd /tmp/probe
+          npm init -y >/dev/null
+          # 不传 --legacy-peer-deps：那正是本包 peer 面能不能被默认安装语义吃下去的判据。
+          npm install "$tarball" --no-audit --no-fund
+      - name: 装载探针（入口形状 + bundle patch 随包）
+        run: |
+          # 单引号是刻意的：脚本体里有 JS 模板串，交给 shell 展开就坏了。
+          set -euo pipefail
+          cd /tmp/probe
+          node --input-type=module -e '
+          import { existsSync, readFileSync } from "node:fs";
+          import { createRequire } from "node:module";
+          import path from "node:path";
+          const NAME = "@jayyuen66/dsh-danger-guard";
+          const mod = await import(NAME);
+          // 入口形状两态都收：本仓用默认导出，而同级包里既有默认导出也有纯命名导出
+          // （apply/Config 平铺在模块顶层）。写死一种形态会让另一种假红——判据是
+          // 「apply 与 Config 能从一个入口拿到」，不是「它们挂在 default 上」。
+          const plugin = mod.default ?? mod;
+          if (typeof plugin?.apply !== "function") throw new Error("入口没有 cordis 插件形状：缺 apply");
+          // 设置卡是**独立条目**，config 面挂在 ./settings 子路径：拦截半的入口刻意不带 Config
+          // （它的存活不该绑在用户可手改的配置上）。所以在两个入口各判各的那一半。
+          const settings = (await import(NAME + "/settings")).default;
+          if (typeof settings?.apply !== "function") throw new Error("设置入口缺 apply：设置卡不会挂载");
+          if (settings.Config === undefined) throw new Error("设置入口缺 Config：设置卡不会挂载");
+          const require = createRequire(import.meta.url);
+          const pkgDir = path.dirname(require.resolve(NAME + "/package.json"));
+          const manifest = require(NAME + "/package.json");
+          const patchRel = manifest.dsh?.bundle?.patch;
+          if (!patchRel) throw new Error("package.json 缺 dsh.bundle.patch：宿主不会把它 reconcile 进层栈");
+          const patch = path.join(pkgDir, patchRel);
+          if (!existsSync(patch)) throw new Error(`bundle patch 没随包发出：${patchRel}`);
+          // 行按裸包名引用本包：bundle 注册行扫不到它，`dsh plugin add` 会静默少一个条目。
+          const text = readFileSync(patch, "utf8");
+          if (!/-\s*id:\s*\S/u.test(text)) throw new Error(`bundle patch 里没有 id 行：${patchRel}`);
+          if (!text.includes(NAME)) throw new Error(`bundle patch 没按裸包名引用 ${NAME}`);
+          console.log("装载通过：apply / Config / bundle patch 均就位");
+          '
+
+  # 依赖审查：只在 PR 上跑。它比的是「这个 PR 引入的依赖」与 GitHub Advisory Database，
+  # 拦的是「今天能装、明天被披露有洞」那一类。push 上没有「引入」这个概念，所以不跑。
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: 依赖审查
+        uses: actions/dependency-review-action@v5.0.0
+        with:
+          # 高危即拦；低危只记录，否则一次上游披露会把所有仓的门都堵上。
+          fail-on-severity: high
+
+  # 工作流文件自身的静态检查。它抓的是「YAML 合法但 GitHub 不接受」那一类：
+  # 未知上下文、表达式语法、事件与输入拼写、shell 片段问题。job 级 if 里写 matrix
+  # 就属于这一类——YAML 解析得过，但整份工作流在 GitHub 上加载不起来。
+  #
+  # 用官方 docker 镜像并钉版本，不走 curl | bash。只读挂载：lint 不该有写仓库的能力。
+  # 只列本仓 CI 自己的三份：publish.yml 的既有 shellcheck 提示尚未清理，
+  # 一起纳进来会让这道门从第一天起就是红的（红着的门等于没有门）。
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: 跑 actionlint
+        run: |
+          set -euo pipefail
+          # -ignore SC2016：探针脚本刻意用单引号包住 JS（脚本体里有 JS 模板串，
+          # 交给 shell 展开就坏了）。这是 shellcheck 的误报，而 shellcheck 指令在
+          # 跨行单引号构造上不被采信（已实测），所以只忽略这一条规则。
+          # 覆盖本仓全部工作流（含 publish.yml）：shell 在 runner 上先把 glob 展开，
+          # 再把文件清单交给容器。
+          docker run --rm -v "$PWD:/repo:ro" -w /repo rhysd/actionlint:1.7.12 \
+            -ignore 'SC2016' \
+            .github/workflows/*.yml

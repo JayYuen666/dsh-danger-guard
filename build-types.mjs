@@ -104,7 +104,16 @@ export async function buildTypes() {
   // 先清空：tsc 不清 outDir，留着旧声明等于把陈旧类型一起发出去。
   await rm(outDir, { recursive: true, force: true });
   // tsc 自己已经按 tsconfig 排好了依赖与增量，交给它报错即可；这里只把失败原样抛出。
-  run("npx", ["tsc", "-p", "tsconfig.types.json"]);
+  //
+  // 直接跑**本地 tsc 的入口 JS**，不经 `npx`：Windows 上 `npx` 实际是 `npx.cmd`，而
+  // `execFileSync` 不按 PATHEXT 解析（`shell` 默认 false），于是那条调用在 Windows runner 上
+  // 一律 `spawnSync npx ENOENT`——构建在 `build:types` 这一步必红，与代码无关。
+  // 用 `process.execPath`（当前 node）跑 `.bin` 指向的同一个文件，则不依赖任何 shell 与扩展名。
+  run(process.execPath, [
+    path.join(root, "node_modules", "typescript", "bin", "tsc"),
+    "-p",
+    "tsconfig.types.json",
+  ]);
   const files = await listDeclarations(outDir, "");
   await Promise.all(
     files.map(async (file) => {

@@ -23,6 +23,7 @@
 // "本地盘就是执行世界"那层假定——远程后端给的 displayPath 是 URI 也一样能取出末段。
 import path from "node:path";
 import type { FactNeed } from "./fact-gate.ts";
+import type { PathApi } from "./path-format.ts";
 import { fillTemplate } from "./messages.ts";
 import type { DangerGuardMessages } from "./messages.ts";
 // 官方文件系统面（type-only：dsh-fs 是 devDependency，产物里不出现对它的运行时引用）。
@@ -249,7 +250,12 @@ async function listChildren(ctx: ScanCtx, item: ScanItem): Promise<ScanItem[]> {
     // 软链一律不进（与迁移前的 `withFileTypes` 同一条口径，但这次是**官方给的判据**：
     // `resolve` 会跟链，`lstat` 不跟，官方注释明说 lstat 就是给"要在跟之前先拒掉"的用方的。
     // 跟随软链会把扫描面弹到目录树之外——一枚指向 `/` 的链就能让"项目级引用探查"去读整机。
-    const childPath = `${item.path}/${entry.name}`;
+    // ⚠ `item.path` 是**真实文件系统路径**（`fs.resolve` / `entryKindOf` / `visited` 都用它），
+    // 所以拼子项必须走平台实现。写 `${item.path}/${name}` 在 Windows 上给出
+    // `C:\w\proj\src/x.ts` 这种混形，后果是同一棵子树被两种键各走一遍：
+    // 目录展开两次（`dirs` 重复）、文件被扫两次（命中重复）。
+    // 展示用的 `/` 形是另一件事，由下面的 `joinRel(item.rel, name)` 负责。
+    const childPath = path.join(item.path, entry.name);
     // 逐子项探类型是这条扫描的中断检查点；并发探会一次打开成百上千个句柄（见文件头"有界"）。
     // oxlint-disable-next-line eslint/no-await-in-loop -- 理由见上
     const kind = await entryKindOf(ctx, childPath);
@@ -339,27 +345,80 @@ async function scanOneFile(ctx: ScanCtx, item: ScanItem): Promise<boolean> {
  * 不假定）只交回 `root` 一层 —— 那时"最近的祖先"无从谈起，退回从起点扫一遍。
  * 全用字符串切分，不 import `node:path`（本文件不假定本地盘，见文件头）。
  */
-export function ancestorLevelsOf(root: string, targetN: string): readonly string[] {
-  // 根为 `/` 时 `\`${root}/\`` 会拼出 `//`，`startsWith` 恒假 ⇒ 整条链空掉。带尾斜杠的根
-  //（`/`、`C:/`）因此单独归一，与 lib/sandbox-scope.ts 的 contains 同一条纪律。
-  const prefix = root.endsWith("/") ? root : `${root}/`;
-  const under = (item: string): boolean => item === root || item.startsWith(prefix);
+/**
+ * `path` 是否就是 `root` 或落在它之下（照官方 `workspace-changes/src/paths.ts` 的 `isInside`）。
+ *
+ * 判"某一级在不在 root 之下"不能拼前缀：分隔符在 Windows 上是 `\\`，写死 `/` 会让
+ * `startsWith` 恒假，整条层级链被丢空、扫描退化成从根平坦跑一遍。
+ *
+ * @param root      绝对目录。
+ * @param candidate 待判的绝对路径。
+ * @returns 自身与所有后代为 true。
+ */
+
+function isInside(pathApi: PathApi, root: string, candidate: string): boolean {
+  // 包含性判据**吃注入的路径实现**，不读宿主平台。
+  //
+  // 为什么不直接 `path.relative`：它按宿主平台解释分隔符，于是 macOS 上拿到 Windows 串
+  // （`C:\\w\\proj`）时把 `\\` 当普通字符，包含性恒假 —— 这类失败只有 Windows runner
+  // 能发现。注入之后，同一份逻辑在 macOS 上就能用 `path.win32` 验证（见测试）。
+  //
+  // 为什么不用"把 `\\` 一律替换成 `/`"那种写法：那假设了 `\\` 永远是分隔符，
+  // 而在 POSIX 上它是**合法文件名字符**。交给 `pathApi` 判，这个假设就不存在。
+  const rel = pathApi.relative(root, candidate);
+  // ⚠ 判"是否上跳出根"必须比**路径组件边界**，不能只看 `rel.startsWith("..")`：
+  // `relative()` 对根内名为 `..cache` 的目录返回 `..cache`，那个前缀判断会把它误判成
+  // "跑到根外面" —— 方向是**放行**（"沙箱盖不住"为真 ⇒ 灾难删除让路给同样管不了它的沙箱）。
+  return (
+    rel === "" || (rel !== ".." && !rel.startsWith(`..${pathApi.sep}`) && !pathApi.isAbsolute(rel))
+  );
+}
+
+/** 平台无关的 `dirname`：认两种分隔符，但**保留原串的分隔符形态**。
+ *
+ *  与 `unifySeparators` 分工不同：那个为比较服务（归一成一种形），这个为"逐级上溯"服务
+ *  （结果还要交给真实文件系统解析，形态不能变）。`C:\a\b` → `C:\a`、`/a/b` → `/a`；
+ *  根收敛到自身，避免退化成空串。
+ *
+ *  @param value 原生路径（可能含两种分隔符）。
+ *  @returns 上一层目录（同形态）；已是根时返回自身。
+ */
+function dirnameOf(pathApi: PathApi, value: string): string {
+  return pathApi.dirname(value);
+}
+
+export function ancestorLevelsOf(
+  root: string,
+  targetN: string,
+  pathApi: PathApi = path,
+): readonly string[] {
+  // 层级切分走 `path.dirname` 而不是 `lastIndexOf("/")`：这两枚入参来自**宿主真实路径**
+  //（`resolveTarget` 用 `path.resolve` 折出来的形），Windows 上是 `C:\a\b`。
+  // 写死 `/` 切分时 `lastIndexOf` 恒为 -1 ⇒ 每一级都退化成空串 ⇒ 整条层级链塌成 `[root]`，
+  // 而"近邻优先"正是靠这条链把预算先花在目标附近；塌了之后它等同于从根做一趟平坦扫描。
+  const under = (item: string): boolean => isInside(pathApi, root, item);
   const levels: string[] = [];
-  let current = targetN.slice(0, Math.max(targetN.lastIndexOf("/"), 0));
-  // `current.length > 0` 是终止条件：往上走时它严格变短（`\`a/b\` → `\`a\` → `\`\``）。
+  // 逐级上溯用**平台无关**的 `dirnameOf`：`path.dirname` 按宿主平台解释分隔符，
+  // 于是 macOS 上拿到 `C:\a\b` 时把它整个当成一个文件名（dirname 恒为 `.`），
+  // 层级链塌成 `[root]`、"近邻优先"退化成平坦扫描 —— 这类失败只有 Windows runner 能抓。
+  // 产出的每一级**保持入参的原生形态**（不归一成 `/`）：它们随后要交给 `ctx.fs.resolve`
+  // 去真实解析，交给它一串 `/` 形会改变含义（Windows 上那是根相对路径）。
+  // 循环条件只看 `current` 自身与包含性：**不能**把 `current !== dirnameOf(current)` 放进
+  // 条件里 —— `C:\tmp` 的上层恰好是根 `C:\`，而根的上层是它自己，于是那个判断在根这一级
+  // 立刻为假，`C:\tmp` 永远收不进链。收敛改由"必须更短"来保证，见下。
+  let current = dirnameOf(pathApi, targetN);
   while (current.length > 0 && under(current)) {
     levels.push(current);
     if (current === root) {
       break;
     }
-    current = current.slice(0, Math.max(current.lastIndexOf("/"), 0));
+    // 上行一步。**不需要**再判"到顶了"：循环入口的 `current === root` 与 `under(current)`
+    // 已经把根/盘符根拦下，而 `dirnameOf` 对它们恒等 ⇒ 那条 break 结构上不可达。
+    current = dirnameOf(pathApi, current);
   }
-  // ⚠ root 本身**必须**在链上：`root = "/"` 时往上一级会走到空串（`/tmp` → `""`）而
-  // 循环就此退出 —— 少了这一句，`/` 自己的文件与其余兄弟目录永远不会被走，
-  // 而"分层"的全部意义正是"每一层都走到"。
-  if (levels.length > 0 && levels.at(-1) !== root) {
-    levels.push(root);
-  }
+  // `root` 一定已入链：`under(current)` 保证了目标落在 root 之下，而循环只在
+  // `current === root` 或到顶时退出；到顶（盘符根/文件系统根）时最后那级就是这个根。
+  // 故这里不再补一次 `root`（那条分支结构上不可达，留着只会让覆盖率与判据各背一份债）。
   return levels.length === 0 ? [root] : levels;
 }
 
@@ -419,7 +478,13 @@ async function walkForRefs(ctx: ScanCtx, rootTarget: FsTarget): Promise<void> {
     if (ctx.signal.aborted || ctx.state.capped) {
       return;
     }
-    const rel = level === ctx.root ? "" : level.slice(ctx.root.length + 1);
+    // ⚠ 不能用 `level.slice(root.length + 1)`：这两个是**宿主真实路径**，分隔符在 Windows 上
+    // 是 `\`，而下面 `joinRel` 拼的是 `/` 形。少切/切错一律产出 `deep\mid/test` 这种
+    // 混分隔符的坏串（实测在 Windows runner 上就是这个形态），于是：
+    //   · 报给模型的命中路径不可读；
+    //   · `dirs` / `visited` 的比对键各不相同，同一个文件被扫两次。
+    // 用 `path.relative` 拿相对形，再折成 `/`（`toPosix` — 与官方 paths.ts 同法）。
+    const rel = level === ctx.root ? "" : path.relative(ctx.root, level).split(path.sep).join("/");
     let target: FsTarget | undefined;
     if (level === ctx.root) {
       target = rootTarget;
@@ -625,7 +690,7 @@ export function renderContentBlock(
   content: TargetContent,
 ): string {
   const head = fillTemplate(messages.preflightReadHead, {
-    name: path.posix.basename(targetN),
+    name: path.basename(targetN),
     bytes: String(content.bytes),
   });
   const tail = content.truncated

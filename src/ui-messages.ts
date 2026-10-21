@@ -84,6 +84,10 @@ export interface UiMessages {
   readonly statsHits: string;
   /** 需确认的命中分布（槽位 summary）。 */
   readonly statsAsks: string;
+  /** 本档看见了但没拦的命中（按规则键）：零兵底与"交给 reviewer"两类的合计口径。 */
+  readonly statsAllowed: string;
+  /** 重复命中未再上报的次数（同一会话同一命令）。 */
+  readonly statsSkipped: string;
   /** 配额放行次数（槽位 count）——防死锁出口被用到了，这一格最该被看见。 */
   readonly statsQuota: string;
   /** 慢判定分布（槽位 ms/summary）。 */
@@ -200,6 +204,8 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     statsCalls: "判定次数：{summary}",
     statsHits: "拦截命中（直接拒）：{summary}",
     statsAsks: "需确认（问过用户）：{summary}",
+    statsAllowed: "已放过（按当前档位未拦）：{summary}",
+    statsSkipped: "重复命中未再上报：{count} 次",
     statsQuota:
       "⚠ 配额放行 {count} 次：连续未收敛拒绝达上限后的出口，用到它说明有目标一直凑不齐证据。",
     statsSlow: "慢判定（≥{ms}ms）：{summary}",
@@ -268,6 +274,8 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     statsCalls: "Judgements: {summary}",
     statsHits: "Blocked (hard refusal): {summary}",
     statsAsks: "Needs confirmation (asked the user): {summary}",
+    statsAllowed: "Allowed by the current preset: {summary}",
+    statsSkipped: "Repeat hits not re-reported: {count}",
     statsQuota:
       "⚠ {count} quota release(s): the exit after consecutive unconverged refusals — using it means some target never gathered its evidence.",
     statsSlow: "Slow judgements (≥{ms}ms): {summary}",

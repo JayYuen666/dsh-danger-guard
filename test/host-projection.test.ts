@@ -13,6 +13,7 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import path from "node:path";
 import plugin, { BUILTIN_BASE } from "../host.ts";
 import type { Config } from "../host.ts";
 import { SETTINGS_READER } from "../lib/settings-schema.ts";
@@ -21,6 +22,9 @@ import { asLedger, LEDGER_KEY, toolLedgerProjection } from "../lib/tool-ledger.t
 import { foldLedger } from "./ledger-fold.ts";
 import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 import { call as fxCall, result as fxResult } from "./fixtures/events.ts";
+
+/** 夹具 cwd：按平台根拼（写死 `/w/proj` 在 Windows 上没有盘符）。 */
+const FIXTURE_CWD = path.resolve(path.parse(process.cwd()).root, "w", "proj");
 
 /** `ctx.sessionProjections` 替身：register 收下单元；stateOf 按用例交给它的 fold 现算。
  *  fold 由用例显式给出（而不是自己去读 session），"投影路径从不碰 snapshotEvents"才是可断言的。 */
@@ -103,11 +107,11 @@ function applyPlugin(ctx: MockCtx): void {
 function guardExec(id: string, log: readonly SessionEvent[], scans: { value: number }): unknown {
   return {
     name: "edit",
-    arguments: { file_path: "/w/proj/src/cfg.ts" },
+    arguments: { file_path: path.join(FIXTURE_CWD, "src", "cfg.ts") },
     agent: {
       session: {
         id,
-        header: { cwd: "/w/proj" },
+        header: { cwd: FIXTURE_CWD },
         snapshotEvents: () => {
           scans.value += 1;
           return log;
@@ -120,9 +124,9 @@ function guardExec(id: string, log: readonly SessionEvent[], scans: { value: num
 /** 取证齐备的日志：read 目标 + 项目级 grep 命中，均成功回填。 */
 function evidenceLog(): SessionEvent[] {
   return [
-    fxCall("r1", "read", JSON.stringify({ file_path: "/w/proj/src/cfg.ts" })),
+    fxCall("r1", "read", JSON.stringify({ file_path: path.join(FIXTURE_CWD, "src", "cfg.ts") })),
     fxResult("r1"),
-    fxCall("g1", "grep", JSON.stringify({ path: "/w/proj", pattern: "cfg.ts" })),
+    fxCall("g1", "grep", JSON.stringify({ path: FIXTURE_CWD, pattern: "cfg.ts" })),
     fxResult("g1"),
   ];
 }

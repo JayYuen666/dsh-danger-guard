@@ -32,6 +32,8 @@ import path from "node:path";
 // 段边界这一层单列在 lib/command-segments.ts：四类规则都只在"段"上判定，断在哪里与判成什么无关。
 // 同一个模块也负责切词与结构视图——三处读法必须同源，否则"这一段里有哪些词"会随判据而变。
 import { hasUnclosedQuote, lexTokens, splitSegments, structureView } from "./command-segments.ts";
+import { asOsPath } from "./path-format.ts";
+import type { OsPath } from "./path-format.ts";
 import type { ShellToken } from "./command-segments.ts";
 import type { Fix } from "./fix.ts";
 // 出路形状住在零依赖的 ./fix.ts（为什么不在本文件：见那枚模块的头部注释）。
@@ -1000,6 +1002,15 @@ export interface BashDangerOptions {
    *  跑 PowerShell Core 时平台不是 win32，但 pwsh 读 `C:\Windows` 读的就是那个树）。
    *  缺省 = POSIX 读法：「非 Windows 宿主上轨道退出」的结论一字不动。 */
   shellDialect?: ShellDialect;
+  /** **调用点上下文，不是用户配置**：这条规则键在**本次权限档位**下的处置结论。
+   *
+   *  为什么扫描层需要它：串行合成的命令（`a && b`、`a; b`、管道）里，"哪一段最严重"决定
+   *  最终交回哪枚键。静态表把 `pipeShell` 记成 `deny`、`gitForcePush` 记成 `ask`，于是
+   *  `curl x | sh; git push -f` 会停在 `pipeShell` 上收工；可按档位分叉之后，前者在某些档位
+   *  是 `allow`、后者仍要 `ask` —— 用静态表排序就会把真正要拦的那一段整个吞掉。
+   *  给了这一位，排序与"已收工"的判据都按**真实档位**求值；不给则回落静态 `RULE_TIER`
+   *  （所有既有调用点与单测的行为一字不变）。 */
+  severityOf?: (key: BashDenialKey) => RuleTier | "allow";
 }
 
 /** git 里确实"旗标 + 空格 + 取值"分写的选项（全局 + 清单子命令的常见面，等值匹配）。
@@ -1639,6 +1650,28 @@ const HOME_VAR_RE = /^\$HOME(?![A-Za-z0-9_])/u;
  */
 const USER_HOME_RE = /^~[A-Za-z_][A-Za-z0-9_-]*\//u;
 
+/** 把一枚字面串转成可嵌进正则的形式（家目录里可能有 `.` 或 `+` 这类字符）。 */
+const escapeRegExp = (value: string): string =>
+  value.replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
+
+/** 家目录下的**深层普通后代**（相对部分形如 `a/b/…` 且不含 `..`）：日常清理目标。 */
+function isDeepHomeDescendant(target: string, home: string): boolean {
+  // ⚠ 不能用 `path.relative`：这里的入参是**词面**（`~`、绝对家目录形）与宿主路径混着来，
+  // 而 `~` 不是绝对路径，`relative` 对它给出的东西没有意义（实测会把 `rm -rf ~` 判成放行）。
+  //
+  // 判据必须同时容忍两种分隔符：宿主家目录在 Windows 上是 `C:\Users\x`，而 shell 词面
+  // 总用 `/` 写。写死 `${home}/` 时 Windows 上永远匹配不上，于是"家目录的深层后代"被误判成
+  // 灾难目标（实测在 Windows runner 上 `rm -rf <home>/.cache/x/y` 被拦）。
+  const separator =
+    home.endsWith("/") || home.endsWith(String.fromCodePoint(92)) ? "" : String.raw`[/\\]`;
+  if (!new RegExp(`^${escapeRegExp(home)}${separator}`, "u").test(target)) {
+    return false;
+  }
+  const rest = target.slice(home.length).replaceAll(/^[/\\]+/gu, "");
+  const segments = rest.split(/[/\\]+/u).filter((part) => part.length > 0);
+  return segments.length >= 2 && !segments.includes("..");
+}
+
 /**
  * Windows 字形轨道的判据体：**只在轨道参与时被调用**（`windowsTrack` 那道门留在调用方），
  * 吃 shell 源里的原词 `raw` 与 `os.homedir()` 的原值。
@@ -1664,11 +1697,36 @@ function isWindowsShapeTarget(raw: string, home: string): boolean {
   // 家目录在这一侧要过字形归一：Windows 上 os.homedir() 是 `C:\Users\x`，与折过斜杠的
   // winTarget 不同形，原样比较则永不成立（POSIX 侧那条字面比较用的仍是原值）。
   const winHome = normalizeWindowsShape(home);
+  // ── 家目录**深层普通后代**的豁免必须写成**守卫提前返回**，不能挂在 `||` 链上。
+  //
+  // 为什么（这是实测过的失败）：`||` 是从左到右短路，而 `WINDOWS_SYSTEM_AND_USERS_RE`
+  // 匹配 `^[a-z]:/users/`，于是「盘符 + users + 家目录名 + 深层子目录」会**直接命中它**并返回
+  // true —— 后面再挂一个"深层后代 ⇒ false"的分支永远走不到（`false || true` 恒为 true，
+  // 与顺序无关；把它挪到最前面也一样，因为它只是**新增一个条件**，抵消不了别的分支的命中）。
+  // 所以豁免只能放在所有 `return true` 路径**之前**，作为守卫。
+  //
+  // 门槛与 POSIX 侧严格同源（`isPosixDisasterTargetWord` 的双重检查）：`pointed` 保留 `..`
+  // 段、`winTarget` 已归一。**两形都必须是深层普通后代**才放行 —— 只看归一值会让
+  // `.../.cache/../project/output` 被误当成普通后代（`normalize` 吃掉了 `..`）。
+  // 守卫必须**先确认目标真的落在 winHome 之下**，不能只靠 `isDeepHomeDescendant` 自己判：
+  // 它对"前缀不匹配"虽然返回 false，但对 `C:/` 这类目标会走 `slice(home.length)` 切出
+  // 无意义的串（实测裸 `\` 被归一成 `/` 后，`segments.length >= 2` 竟然成立 ⇒ 把当前盘根
+  // 也放行了）。所以把"在不在家目录之下"显式写出来，两道条件同时成立才豁免。
+  const underHome = (form: string): boolean => form === winHome || form.startsWith(`${winHome}/`);
+  if (
+    underHome(pointed) &&
+    underHome(winTarget) &&
+    isDeepHomeDescendant(pointed, winHome) &&
+    isDeepHomeDescendant(winTarget, winHome)
+  ) {
+    return false;
+  }
   return (
     UNC_ROOT_RE.test(pointed) ||
     WINDOWS_DRIVE_ROOT_RE.test(winTarget) ||
     WINDOWS_SYSTEM_AND_USERS_RE.test(winTarget) ||
     winTarget === winHome ||
+    // 家目录的直接子项（`<home>/x`，不更深）照旧拦：只有深层后代才走上面的守卫。
     winTarget.startsWith(`${winHome}/`) ||
     // 波浪号根 `~\…`：家目录在 Windows 读法下就是 `~`，于是这一形落在 winHome 之内，
     // 与上面两条字面比较同一结论、同一条轨道（形状与尾闸的理由见 WINDOWS_TILDE_HOME_PREFIX）。
@@ -1677,8 +1735,7 @@ function isWindowsShapeTarget(raw: string, home: string): boolean {
     raw.startsWith(WINDOWS_TILDE_HOME_PREFIX) ||
     // 无盘符的当前盘绝对形态 `\Windows\System32`：盘符字母未知 ⇒ 只比树名，且树名集合与
     // WINDOWS_SYSTEM_AND_USERS_RE 严格同族（**不**扩到 SYSTEM_PATH_PREFIXES 那 24 条——
-    // `\etc`、`\usr` 这类相对删除在本包口径里是转义字面量，扩过来就是把 `\etc` 变成误拦，
-    // 那条边界在 normalizeWindowsShape 的文件头里已写明）。
+    // `\etc`、`\usr` 这类相对删除在本包口径里是转义字面量，扩过来就是把 `\etc` 变成误拦）。
     (DRIVELESS_SHAPE_RE.test(raw) &&
       DRIVELESS_SYSTEM_AND_USERS_RE.test(foldWindowsSeparators(raw))) ||
     // 混分隔符的家目录后代：家目录写成 POSIX 字形（`/data/bob`）再用 `\` 下钻。pwsh 两种
@@ -1688,15 +1745,6 @@ function isWindowsShapeTarget(raw: string, home: string): boolean {
     // WINDOWS_DRIVE_ROOT_RE 判的是同一类目标；轨道开着时这一形此前两头都不撞 ⇒ 补上。
     raw === "\\"
   );
-}
-
-/** 家目录下的**深层普通后代**（相对部分形如 `a/b/…` 且不含 `..`）：日常清理目标。 */
-function isDeepHomeDescendant(target: string, home: string): boolean {
-  if (!target.startsWith(`${home}/`)) {
-    return false;
-  }
-  const rest = target.slice(home.length + 1);
-  return rest.includes("/") && !rest.split("/").includes("..");
 }
 
 /**
@@ -2376,6 +2424,8 @@ interface DangerContext {
   /** 长驻一系认得的命令头（词表 + 包管理器 + npx/cargo），供两形选形用。 */
   devHeads: ReadonlySet<string>;
   windowsDialect: boolean;
+  /** 本次档位下的处置（缺席 = 回落静态 `RULE_TIER`，见 `BashDangerOptions.severityOf`）。 */
+  severityOf: ((key: BashDenialKey) => RuleTier | "allow") | undefined;
 }
 
 function dangerContextOf(opts: BashDangerOptions): DangerContext {
@@ -2390,6 +2440,7 @@ function dangerContextOf(opts: BashDangerOptions): DangerContext {
     runArgs: extraRun.length > 0 ? new Set([...DEV_RUN_ARGS, ...extraRun]) : DEV_RUN_ARGS,
     devHeads: new Set([...serverWords, ...PKG_MANAGERS, "cargo", "npx", "bunx"]),
     windowsDialect: opts.shellDialect === "windows",
+    severityOf: opts.severityOf,
   };
 }
 
@@ -2741,29 +2792,47 @@ function faceDenialOf(
   return denial;
 }
 
+/** 严重度次序：`allow` < `ask` < `deny`（数字只用于比较，不对外）。 */
+const SEVERITY_RANK: Readonly<Record<RuleTier | "allow", number>> = {
+  allow: 0,
+  ask: 1,
+  deny: 2,
+};
+
+/** 这条规则键在**本次判定**下的严重度（给了 `severityOf` 就按档位，否则回落静态表）。 */
+const severityIn = (ctx: DangerContext, key: BashDenialKey): number =>
+  SEVERITY_RANK[ctx.severityOf?.(key) ?? RULE_TIER[key]];
+
 /**
- * 严重度择优：`deny` 档压过 `ask` 档；**同档先到先得**（先命中的那个更贴近模型写的那一段）。
+ * 严重度择优：更严重的档压过较弱的；**同档先到先得**（先命中的那个更贴近模型写的那一段）。
  *
  * 为什么必须有它（引入 `ask` 档带出来的漏拦）：`commandDanger` 原本是"首命中即返回"，
  * 而一枚 `ask` 档命中会**让扫描提前收工**——`git push -f && rm -rf ~` 里第一段是 ask，
  * 函数当场返回，`rm -rf ~` **从未被判定**。宿主只在结论是 allow 时才 dispatch，而 guard
- * 读到的又正是这个 ask 结论（它按 `RULE_TIER` 让路，不拒），于是用户点了"允许"之后
- * 灾难照常执行。所以扫描要一直走到拿到 `deny` 为止，`ask` 只是记下来的备选。
+ * 读到的又正是这个 ask 结论，于是用户点了"允许"之后灾难照常执行。所以扫描要一直走到
+ * 拿到 `deny` 为止，`ask` 只是记下来的备选。
+ *
+ * 严重度按**本次档位**求值（见 `BashDangerOptions.severityOf`）：按静态表排序会把"本档已
+ * 放行的前段"排在"本档仍要拦的后段"之前，从而把后者整个吞掉。
  */
 function preferSevere(
+  ctx: DangerContext,
   current: BashVerdict | undefined,
   candidate: BashVerdict | undefined,
 ): BashVerdict | undefined {
   let result = current;
-  if (candidate !== undefined && (result === undefined || RULE_TIER[candidate.key] === "deny")) {
+  if (
+    candidate !== undefined &&
+    (result === undefined || severityIn(ctx, candidate.key) > severityIn(ctx, result.key))
+  ) {
     result = candidate;
   }
   return result;
 }
 
-/** 拿到 `deny` 了吗（拿到了就可以停止扫描——更严重的档已经确定，后续候选改变不了结论）。 */
-const settled = (verdict: BashVerdict | undefined): boolean =>
-  verdict !== undefined && RULE_TIER[verdict.key] === "deny";
+/** 拿到本档最严重的那一档（`deny`）了吗——拿到了就可以停止扫描，后续候选改变不了结论。 */
+const settled = (ctx: DangerContext, verdict: BashVerdict | undefined): boolean =>
+  verdict !== undefined && severityIn(ctx, verdict.key) === SEVERITY_RANK.deny;
 
 /**
  * 一段命令的判定：三类规则逐候选命令头点位 + 执行面（shell 的 `-c`、`eval`、非 shell
@@ -2781,7 +2850,7 @@ function segmentDenial(
   drill: (body: string, windowsFace: boolean) => BashVerdict | undefined,
 ): BashVerdict | undefined {
   const rules = ruleAtCandidates(tokens, starts, ctx);
-  if (settled(rules)) {
+  if (settled(ctx, rules)) {
     return rules;
   }
   // 规则面只命中了 `ask` 档 ⇒ **仍要下钻**：`-c` 体里可能藏着一条 `deny` 档
@@ -2792,15 +2861,15 @@ function segmentDenial(
   // 执行面按**整段**判一次：`su -c "<命令串>"` 的段头是 `su`，体是一枚带空格的参数。
   // 若只按候选起点取 `words.slice(start)`，起点落到 `-c` 或体上时段头就不再是包装词，
   // 取体那一步整个失效 —— 这正是 `su -c "rm -rf ~"` 此前放行的原因。
-  best = preferSevere(best, faceDenialOf(segText, words, drill));
-  if (settled(best)) {
+  best = preferSevere(ctx, best, faceDenialOf(segText, words, drill));
+  if (settled(ctx, best)) {
     return best;
   }
   for (const start of starts) {
     // "已确认危险"排在前：看不见才升格为需确认，看得见危险就用危险那条。
     const face = faceDenialOf(segText, words.slice(start), drill);
-    best = preferSevere(best, face);
-    if (settled(best)) {
+    best = preferSevere(ctx, best, face);
+    if (settled(ctx, best)) {
       break;
     }
   }
@@ -2847,14 +2916,15 @@ function commandDanger(
   // 良性替换一并拦下——那是误伤，而本仓的取舍是「认不准就放行」优先于误拦。
   const segmentation = splitSegments(normalized);
   for (const seg of segmentation.texts) {
-    // 只有拿到 `deny` 档才算"结论已定"：`ask` 档只是备选，扫描要继续（见 preferSevere）。
-    if (settled(result)) {
+    // 只有拿到本档最严重的 `deny` 才算"结论已定"：`ask` 档只是备选，扫描要继续（见 preferSevere）。
+    if (settled(ctx, result)) {
       break;
     }
     const segText = peelSeg(seg);
     const tokens = lexTokens(segText);
     const starts = headStarts(tokens);
     result = preferSevere(
+      ctx,
       result,
       segmentDenial(segText, tokens, starts, ctx, (body, windowsFace) =>
         depth >= NESTED_SHELL_MAX_DEPTH
@@ -2866,14 +2936,14 @@ function commandDanger(
   // 命令词位置是命令替换、且上面的常规判定没给出结论时，才升格为需确认：
   // `$(rm -rf /)` 的体本身就能判出 rmrf（那条更贴近模型写的东西，优先给），
   // 而 `$(echo rm) -rf ~` 这种"展开后才成命令词"的形状常规判定看不见，只能升格。
-  if (!settled(result) && substitutionMentionsDanger(normalized)) {
-    result = preferSevere(result, { key: "nestedShellUnconfirmed" });
+  if (!settled(ctx, result) && substitutionMentionsDanger(normalized)) {
+    result = preferSevere(ctx, result, { key: "nestedShellUnconfirmed" });
   }
   if (segmentation.truncated) {
     // 执行面区（`$( )`/反引号）套得比界内更深 ⇒ 还有一批体没扫到。与 `-c` 超界同一条纪律：
     // 看不见的那部分要升格为需确认，不能拿"扫到的这些没危险"当放行依据。
     // 它**不压**已拿到的 `deny`（同级取先到，且 deny 更严重）——`preferSevere` 已经管住这点。
-    result = preferSevere(result, { key: "nestedShellUnconfirmed" });
+    result = preferSevere(ctx, result, { key: "nestedShellUnconfirmed" });
   }
   return result;
 }
@@ -3076,7 +3146,17 @@ function secretRe(opts: EditDangerOptions = {}): RegExp {
  * POSIX 上带反斜杠的文件名——多算一种形态只可能**多拦**，方向与本包口径一致。
  */
 function targetForms(target: string, cwd: string | undefined): string[] {
-  const forms = new Set([target, path.posix.normalize(target), path.win32.normalize(target)]);
+  // 再加一份"把反斜杠折成正斜杠"的形态：用户配置的 `extraSecretPatterns` 是**正则**，
+  // 而人写这类模式时几乎总用 `/`（`secrets/`、`internal/keys/`）。Windows 形目标
+  //（`...\secrets\prod.env`）在只保留原形时永远匹配不上 —— 实测那个设置项在 Windows
+  // 上等于没配。多给一种形态只可能**多拦**，方向与本包口径一致（与"两种方言都算"同一条）。
+  const forms = new Set([
+    target,
+    path.posix.normalize(target),
+    path.win32.normalize(target),
+    // 第一个实参是"一个反斜杠字符"：这里不是正则，`"\\\\"` 会变成两个反斜杠。
+    target.replaceAll(String.fromCodePoint(92), "/"),
+  ]);
   if (cwd !== undefined && cwd.length > 0 && !path.isAbsolute(target)) {
     const joined = path.resolve(cwd, target);
     forms.add(joined);
@@ -3282,7 +3362,7 @@ export function bashVerdictOf(
  * @param cwd  - 会话工作目录（相对形按它归一）；缺席时相对形交回 `undefined`。
  * @returns 归一后的绝对路径；判不出来时 `undefined`。
  */
-export function disasterTargetPathOf(word: string, cwd: string | undefined): string | undefined {
+export function disasterTargetPathOf(word: string, cwd: OsPath | undefined): OsPath | undefined {
   const home = os.homedir();
   const homeItself = word === "~" || word === "$HOME";
   const homeChild = word.startsWith("~/") || word.startsWith("$HOME/");
@@ -3297,15 +3377,26 @@ export function disasterTargetPathOf(word: string, cwd: string | undefined): str
     if (homeItself) {
       result = home;
     } else if (homeChild) {
-      result = path.posix.join(
-        home,
-        word.startsWith("~/") ? word.slice(2) : word.slice("$HOME/".length),
-      );
+      // 家目录是**宿主真实路径**（Windows 上 `C:\Users\x`），它后面的子段来自 shell 词面
+      // （总用 `/` 写）。两者拼接必须走平台实现：`path.posix.join` 会给出
+      // `C:\Users\x/Documents` 这种混分隔符串，而下游的包含性比较是按平台分隔符做的
+      // ——拼错的后果是"这枚目标包不住可写根"判错，方向恰是放行一次灾难删除。
+      result = path.join(home, word.startsWith("~/") ? word.slice(2) : word.slice("$HOME/".length));
     } else if (path.posix.isAbsolute(word)) {
-      result = word;
+      // 词面是 **shell 文本**里的路径，归一要在它自己的坐标系（POSIX）里做：
+      // `path.posix.normalize("/etc/../usr")` 得 `/usr`，而 `path.win32.normalize("/etc")`
+      // 会给出 `\\etc` —— 那是当前盘根下的另一棵树，拿它跟宿主真实可写根比是错坐标系。
+      // 带盘符的 Windows 字形（`C:/etc`）**不在这条分支上**：`path.posix.isAbsolute` 对它是
+      // 假，而含反斜杠的形态已在 `opaque` 里被排除 ⇒ 本包对它们一律不归一（不猜落点）。
+      result = path.posix.normalize(word);
     } else if (cwd !== undefined) {
-      result = path.posix.resolve(cwd, word);
+      // 相对形要落到宿主世界，必须用平台实现拼（`path.posix.resolve` 在 Windows 上会
+      // 把 `D:\w\proj` 拼成 `/a/.../D:\w\proj/build`）。
+      result = path.normalize(path.resolve(cwd, word));
     }
   }
-  return result === undefined ? undefined : path.posix.normalize(result);
+  // 每条分支都已在**它自己的坐标系**里归过一次（绝对形走 posix/win32 归一，
+  // 相对形走平台 resolve），这里不再二次归一。
+  // 出参标成 `OsPath`：调用方拿它跟宿主给的沙箱可写根做包含性比较，两个世界必须同源。
+  return result === undefined ? undefined : asOsPath(result);
 }

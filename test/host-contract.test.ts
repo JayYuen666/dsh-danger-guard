@@ -14,7 +14,8 @@
 import { describe, it } from "vitest";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, mkdir, realpath, rm, symlink, writeFile, utimes } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile, utimes } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
 import plugin, { BUILTIN_BASE, noteJudgeCost } from "../host.ts";
@@ -62,9 +63,15 @@ const INDETERMINATE_MESSAGE = MESSAGES.zh.indeterminate;
 const RMRF_MESSAGE = MESSAGES.zh.rmrf;
 const NESTED_SHELL_UNDETERMINED_MESSAGE = MESSAGES.zh.nestedShellUnconfirmed;
 
+/** 夹具根：宿主**绝对**路径（Windows 上 `/w/proj` 没有盘符，会被当相对路径再解析一遍）。 */
+const FIXTURE_ROOT = path.resolve(path.parse(process.cwd()).root, "w", "proj");
+
+/** 另一棵树（`workingDirectory` 服务交出的"当前目录"）：与 `FIXTURE_ROOT` 平级、互不包含。 */
+const LIVE_ROOT = path.resolve(path.parse(process.cwd()).root, "w", "live");
+
 /** 取证夹具的目标文件：五种 exec 形状（有/无事件流、有/无证据、零证据）都指向同一份路径，
  *  散着写字面量改一处就漏（断言的是夹具自己造的目标，不是生产面的常量）。 */
-const EDIT_TARGET_PATH = "/w/proj/src/cfg.ts";
+const EDIT_TARGET_PATH = path.join(FIXTURE_ROOT, "src", "cfg.ts");
 
 /** 危险 bash 命中后上报教训总线的分类（report 载荷契约的期望值）。 */
 const BASH_DENIAL_CATEGORY = "dangerous-bash";
@@ -90,7 +97,7 @@ interface LessonLoopSpy {
 
 /** report 载荷的断言形状（与 lesson-loop LessonLoopReporter.report 入参对齐）。
  *  `evidence` 在这里是**必填**：入参类型把它标成可选是总线侧的宽容，而生产面
- *  `host.ts` 的 `reportDeny` 把它列成必填形参并原样带上（唯一一处 `bus.report` 调用），
+ *  `lib/lesson-report.ts` 的 `reportDeny` 把它列成必填形参并原样带上（唯一一处 `bus.report` 调用），
  *  所以断言侧按"发出必带"读——读它就不必再写 `?.`（那条守卫在类型面是空转）。 */
 interface ReportPayload {
   source: string;
@@ -140,14 +147,14 @@ type GuardExecParam = GuardCall["fn"] extends (exec: infer Exec) => unknown ? Ex
 const editExecWithEvents = (id: string): GuardExecParam => ({
   name: "edit",
   arguments: { file_path: EDIT_TARGET_PATH },
-  agent: { session: { id, header: { cwd: "/w/proj" }, snapshotEvents: () => [] } },
+  agent: { session: { id, header: { cwd: FIXTURE_ROOT }, snapshotEvents: () => [] } },
 });
 
 /** 无事件流的 edit 调用（证据不可判定 → 首拒给行动清单、重试走 indeterminate）。 */
 const editExecNoEvents = (id: string): Record<string, unknown> => ({
   name: "edit",
   arguments: { file_path: EDIT_TARGET_PATH },
-  agent: { session: { id, header: { cwd: "/w/proj" } } },
+  agent: { session: { id, header: { cwd: FIXTURE_ROOT } } },
 });
 
 /** 取证齐备（read + 项目级 grep 均成功回填）的会话日志。 */
@@ -157,7 +164,7 @@ function evidenceLog(): SessionEvent[] {
   return [
     fxCall("r1", "read", JSON.stringify({ file_path: EDIT_TARGET_PATH })),
     fxResult("r1"),
-    fxCall("g1", "grep", JSON.stringify({ path: "/w/proj", pattern: "cfg.ts" })),
+    fxCall("g1", "grep", JSON.stringify({ path: FIXTURE_ROOT, pattern: "cfg.ts" })),
     fxResult("g1"),
   ];
 }
@@ -166,7 +173,7 @@ function evidenceLog(): SessionEvent[] {
 const editExecWithEvidence = (id: string): GuardExecParam => ({
   name: "edit",
   arguments: { file_path: EDIT_TARGET_PATH },
-  agent: { session: { id, header: { cwd: "/w/proj" }, snapshotEvents: () => evidenceLog() } },
+  agent: { session: { id, header: { cwd: FIXTURE_ROOT }, snapshotEvents: () => evidenceLog() } },
 });
 
 /** 只有 read 证据的会话日志：缺项只落在**上层探查** —— 决策 ④ 之后配额要免的正是那一半，
@@ -179,14 +186,14 @@ function readOnlyLog(): SessionEvent[] {
 const editExecReadOnly = (id: string): GuardExecParam => ({
   name: "edit",
   arguments: { file_path: EDIT_TARGET_PATH },
-  agent: { session: { id, header: { cwd: "/w/proj" }, snapshotEvents: () => readOnlyLog() } },
+  agent: { session: { id, header: { cwd: FIXTURE_ROOT }, snapshotEvents: () => readOnlyLog() } },
 });
 
 /** 零证据的 edit 调用（必拒路径）：降级用例用它数内置 maxDenies 的配额轮次。 */
 const editWithoutEvidence = (id: string): GuardExecParam => ({
   name: "edit",
-  arguments: { file_path: "/w/proj/src/fallback.ts" },
-  agent: { session: { id, header: { cwd: "/w/proj" }, snapshotEvents: () => [] } },
+  arguments: { file_path: path.join(FIXTURE_ROOT, "src", "fallback.ts") },
+  agent: { session: { id, header: { cwd: FIXTURE_ROOT }, snapshotEvents: () => [] } },
 });
 
 const DEFAULT_CTX_VALUE: Config = { ...BUILTIN_BASE, enabled: true, factGateEnabled: true };
@@ -274,20 +281,20 @@ function emitDisposed(ctx: MockCtx, id: string): void {
 const bashExec: GuardExecParam = {
   name: "bash",
   arguments: { command: "rm -rf /" },
-  agent: { session: { id: "s-1", header: { cwd: "/w/proj" } } },
+  agent: { session: { id: "s-1", header: { cwd: FIXTURE_ROOT } } },
 };
 
 /** `-c` 体引号未闭合：lib 侧给不出危险结论、也给不出安全结论 → 需用户确认。 */
 const bashUnconfirmedExec: GuardExecParam = {
   name: "bash",
   arguments: { command: 'bash -c "rm -rf /' },
-  agent: { session: { id: "s-1", header: { cwd: "/w/proj" } } },
+  agent: { session: { id: "s-1", header: { cwd: FIXTURE_ROOT } } },
 };
 
 const editExec = {
   name: "edit",
   arguments: { file_path: EDIT_TARGET_PATH },
-  agent: { session: { id: "s-1", header: { cwd: "/w/proj" } } },
+  agent: { session: { id: "s-1", header: { cwd: FIXTURE_ROOT } } },
 };
 
 /**
@@ -402,7 +409,7 @@ describe("lessonLoop 总线降级（守卫热路径绝不因总线故障失败�
     const rep = reports[0] as ReportPayload;
     assert.equal(rep.source, "danger-guard");
     assert.equal(rep.category, BASH_DENIAL_CATEGORY);
-    assert.equal(rep.cwd, "/w/proj");
+    assert.equal(rep.cwd, FIXTURE_ROOT);
     assert.equal(rep.sessionId, "s-1");
     assert.equal(typeof rep.signature, "string");
     assert.equal(typeof rep.detail, "string");
@@ -452,12 +459,18 @@ describe("bash 闸的两种结论在总线侧必须可分辨（硬拒 vs 需确�
     );
     // 结论二：审批请求确实发出去了，并且把它翻成了宿主认的 `ask` 决定。
     const decision = askArmOf(await runPreExecute(ctx, bashUnconfirmedExec));
-    assert.equal(decision.reason, NESTED_SHELL_UNDETERMINED_MESSAGE);
+    // reason 现在 = 基础文案 + 档位说明（同一枚键在不同预设下成因不同，见 lib/mode-policy.ts）。
+    assert.equal(decision.reason?.startsWith(NESTED_SHELL_UNDETERMINED_MESSAGE), true);
+    assert.equal(
+      decision.reason,
+      `${NESTED_SHELL_UNDETERMINED_MESSAGE}\n${MESSAGES.zh.noteUnknown}`,
+    );
     // `displayReason` 官方定成 `{ readonly en: string; readonly [locale: string]: string }`
     // —— 人读那一面（弹窗），与回给模型的 `reason` 同源同键。
+    // 弹窗那面 = 规则本文 + 该档位的说明（只交规则本文会让用户看不到"这是哪一档"）。
     assert.deepEqual(decision.displayReason, {
-      en: MESSAGES.en.nestedShellUnconfirmed,
-      zh: MESSAGES.zh.nestedShellUnconfirmed,
+      en: `${MESSAGES.en.nestedShellUnconfirmed}\n${MESSAGES.en.noteUnknown}`,
+      zh: `${MESSAGES.zh.nestedShellUnconfirmed}\n${MESSAGES.zh.noteUnknown}`,
     });
     // 结论三：教训总线仍看得见它，且能与"已确认危险"区分开。
     assert.equal(reports.length, 1, "需确认同样进教训总线");
@@ -758,8 +771,8 @@ describe("判定耗时与解析形随上报一起发（长度上限要按真实�
     applyPlugin(ctx);
     const reason = ctx.guardInstalled!.fn({
       name: "read",
-      arguments: { file_path: "/w/proj/.ssh/id_rsa" },
-      agent: { session: { id: "s-1", header: { cwd: "/w/proj" } } },
+      arguments: { file_path: path.join(FIXTURE_ROOT, ".ssh", "id_rsa") },
+      agent: { session: { id: "s-1", header: { cwd: FIXTURE_ROOT } } },
     });
     assert.equal(typeof reason, "string", "键形口径下只读工具翻凭据也拦");
     const rep = reports[0] as ReportPayload;
@@ -783,7 +796,11 @@ describe("判定耗时与解析形随上报一起发（长度上限要按真实�
       // 交的是**清单**：本机 realpath 那一形在这里，官方后端那一形要 fs 面在位才有
       //（这个桩没装 ⇒ 清单只有一枚；两形并列的判定面见 test/danger-rules.test.ts 与
       // test/host-preflight.test.ts 的官方通道那组用例）。
-      const realDir = await realpath(dir);
+      // 期望值必须吃**产品所用的那一个** realpath 口径：产品走同步 `realpathSync`
+      //（`host.ts` 的 realpathOf —— 同步判定链只有它付得起），而 Windows 上同步版会把
+      // 8.3 短名（`RUNNER~1`）展开成长名；`node:fs/promises` 的 `realpath` 与它不保证逐字同形。
+      // 拿另一个 API 的产物当期望，测的就不是产品行为。
+      const realDir = realpathSync(dir);
       assert.deepEqual(rep.evidence["resolvedPaths"], [path.join(realDir, ".ssh", "id_rsa")]);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -959,13 +976,13 @@ describe("会话当前工作目录：判据跟到 cd 之后（ctx.workingDirecto
 
   it("会话不可得 ⇒ 不读服务也不炸：绝对路径的凭据形照判，相对 read 照常记账", () => {
     const ctx = createMockCtx({}, { factGateEnabled: false });
-    ctx.workingDirectory = { get: () => "/w/live" };
+    ctx.workingDirectory = { get: () => LIVE_ROOT };
     applyPlugin(ctx);
     assert.match(
       ctx.guardInstalled!.fn({
         name: "edit",
         // 声明形自己就带 .ssh：解析缺席也照拦（与「软链不再是出路」那组同一口径）。
-        arguments: { file_path: "/w/live/real/.ssh/id_rsa" },
+        arguments: { file_path: path.join(LIVE_ROOT, "real", ".ssh", "id_rsa") },
       }) ?? "",
       /密钥|凭据/u,
     );
@@ -1026,13 +1043,13 @@ describe("会话当前工作目录：判据跟到 cd 之后（ctx.workingDirecto
         return {};
       },
     });
-    ctx.workingDirectory = { get: () => "/w/live" };
+    ctx.workingDirectory = { get: () => LIVE_ROOT };
     applyPlugin(ctx);
     assert.equal(typeof ctx.guardInstalled!.fn(bashExec), "string", "bash 危险命令照拦");
-    assert.equal(reports[0]?.cwd, "/w/live", "deny 上报的归因目录是当前目录");
+    assert.equal(reports[0]?.cwd, LIVE_ROOT, "deny 上报的归因目录是当前目录");
     ctx.value = { ...ctx.value, judgeStats: true };
     ctx.guardInstalled!.fn(bashExec);
-    assert.equal(passes[0]?.["cwd"], "/w/live", "pass 载荷同口径（不是第二份读法）");
+    assert.equal(passes[0]?.["cwd"], LIVE_ROOT, "pass 载荷同口径（不是第二份读法）");
     const legacyReports: ReportPayload[] = [];
     const legacy = createMockCtx({
       report: (input) => {
@@ -1042,7 +1059,7 @@ describe("会话当前工作目录：判据跟到 cd 之后（ctx.workingDirecto
     });
     applyPlugin(legacy);
     legacy.guardInstalled!.fn(bashExec);
-    assert.equal(legacyReports[0]?.cwd, "/w/proj", "服务缺席 ⇒ 上报退回 header.cwd");
+    assert.equal(legacyReports[0]?.cwd, FIXTURE_ROOT, "服务缺席 ⇒ 上报退回 header.cwd");
   });
 });
 
@@ -1120,7 +1137,7 @@ describe("ask 档的爆炸半径预演：宿主侧读法与接线", () => {
     name: "bash",
     arguments: { command: "git reset --hard" },
     signal: new AbortController().signal,
-    agent: { session: { id: "s-1", header: { cwd: "/w/proj" }, snapshotEvents: () => [] } },
+    agent: { session: { id: "s-1", header: { cwd: FIXTURE_ROOT }, snapshotEvents: () => [] } },
   };
 
   it("`ask` 档会跑表里那条只读预演，结果接进 `reason` 与 `displayReason`", async () => {
@@ -1139,7 +1156,8 @@ describe("ask 档的爆炸半径预演：宿主侧读法与接线", () => {
     const { ctx } = reportSpy();
     applyPlugin(ctx);
     const decision = askArmOf(await runPreExecute(ctx, resetExec));
-    assert.equal(decision.reason, MESSAGES.zh.gitResetHard, "没有预演时理由就是基础文案");
+    // 没有预演时理由 = 基础文案 + 档位说明；预演那一块不出现。
+    assert.equal(decision.reason, `${MESSAGES.zh.gitResetHard}\n${MESSAGES.zh.noteUnknown}`);
     assert.doesNotMatch(decision.reason ?? "", /\[预演\]/u);
   });
 
@@ -1148,7 +1166,7 @@ describe("ask 档的爆炸半径预演：宿主侧读法与接线", () => {
     const denied = ctx.guardInstalled!.fn({
       name: "bash",
       arguments: { command: "rm -rf /" },
-      agent: { session: { id: "s-1", header: { cwd: "/w/proj" }, snapshotEvents: () => [] } },
+      agent: { session: { id: "s-1", header: { cwd: FIXTURE_ROOT }, snapshotEvents: () => [] } },
     });
     assert.ok(denied !== undefined, "deny 档照旧硬拒");
     assert.equal(specs.length, 0, "deny 档一枚子进程都不该起");
@@ -1160,11 +1178,11 @@ describe("ask 档的爆炸半径预演：宿主侧读法与接线", () => {
       name: "bash",
       arguments: { command: "terraform destroy" },
       signal: new AbortController().signal,
-      agent: { session: { id: "s-1", header: { cwd: "/w/proj" }, snapshotEvents: () => [] } },
+      agent: { session: { id: "s-1", header: { cwd: FIXTURE_ROOT }, snapshotEvents: () => [] } },
     };
     const decision = askArmOf(await runPreExecute(ctx, exec));
     assert.equal(specs.length, 0, "表里没有它的预演命令");
-    assert.equal(decision.reason, MESSAGES.zh.tfDestroy);
+    assert.equal(decision.reason, `${MESSAGES.zh.tfDestroy}\n${MESSAGES.zh.noteUnknown}`);
   });
 
   it("预演交回的清单**为空**时也给结论（『此刻不会改动任何东西』）", async () => {

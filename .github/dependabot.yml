@@ -1,0 +1,34 @@
+# 依赖更新：action 与 npm 两条线各一条。
+#
+# action 侧必须是这一条——本仓的 workflow 按 tag 引用（@v4），而 tag 是可以被上游
+# 移动的。Dependabot 提的 PR 会把「换了哪个提交」变成一次可评审的 diff。
+#
+# npm 侧刻意用 allow 收窄到 @deepseek-ai/*：本仓其余工具链依赖写成 catalog:，
+# 那条范围的真源在伞根的 pnpm-workspace.yaml（由根上的 sync 投影），不归这里管。
+# 在这里放开会造出「Dependabot 改 catalog 协议」这种两边打架的 PR。
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      # 三个基础 action 一起升，避免拆成三个 PR 各跑一遍完整门禁。
+      base-actions:
+        patterns:
+          - "actions/*"
+          - "pnpm/*"
+
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    allow:
+      - dependency-name: "@deepseek-ai/*"
+    groups:
+      # 宿主族必须同值升级：这九枚是同一版编译契约，拆开升会造出彼此不兼容的中间态。
+      host-family:
+        patterns:
+          - "@deepseek-ai/*"

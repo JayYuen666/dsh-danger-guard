@@ -636,7 +636,8 @@ describe("需确认档（ask 通道）：官方 serviceAsk 的四个出口", () 
     const { spine, agent } = await stageAsk();
     const text = modelText(await dispatch(spine, agent, "ask-none", TOOL_BASH, askExec));
     // 官方的降级臂给的是 `ask.reason ?? <它自己的兜底句>` —— 我们交了就一定是我们的那句。
-    assert.equal(text, `Error: ${MESSAGES.zh.nestedShellUnconfirmed}`);
+    // 理由 = 基础文案 + 档位说明。这个 spine 没装沙箱执行器 ⇒ 模式读不到 ⇒ 保守列。
+    assert.equal(text, `Error: ${MESSAGES.zh.nestedShellUnconfirmed}\n${MESSAGES.zh.noteUnknown}`);
   });
 
   it("allowed-once ⇒ 真的放行并执行（审批不是换一种方式的拒绝）", async () => {
@@ -676,11 +677,15 @@ describe("需确认档（ask 通道）：官方 serviceAsk 的四个出口", () 
     const req = requests.at(0);
     assert.ok(req !== undefined, "请求已记下");
     assert.equal(req.toolName, TOOL_BASH);
-    assert.equal(req.reason, MESSAGES.zh.nestedShellUnconfirmed, "reason 用当次语言（默认中文）");
+    assert.equal(
+      req.reason,
+      `${MESSAGES.zh.nestedShellUnconfirmed}\n${MESSAGES.zh.noteUnknown}`,
+      "reason 用当次语言（默认中文）并带上档位说明",
+    );
     // 逐语言的展示文案：写死 `{zh, en}` 会让宿主新增的语言静默取不到（见 displayReasonOf 注释）。
     assert.deepEqual(req.displayReason, {
-      en: MESSAGES.en.nestedShellUnconfirmed,
-      zh: MESSAGES.zh.nestedShellUnconfirmed,
+      en: `${MESSAGES.en.nestedShellUnconfirmed}\n${MESSAGES.en.noteUnknown}`,
+      zh: `${MESSAGES.zh.nestedShellUnconfirmed}\n${MESSAGES.zh.noteUnknown}`,
     });
   });
 

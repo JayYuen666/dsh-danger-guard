@@ -41,8 +41,12 @@ const pkgDir = path.resolve(import.meta.dirname, "..");
  *      写明出路的文案）。判据表这一轮真加了——A1/A2 就是这个目的。
  *   4. **判定统计读数块**（D）与 **`minify: true`**：前者是行为增量，后者把 309,394 B
  *      一次压到 86,727 B（−72%）——注释与空白此前占了产物的一半以上。
+ *   5. **权限档位分叉**（`lib/mode-policy.ts` 新模块 + 四档说明文案中英各一份 + 去重表
+ *      `AskDeduper` + 档位探针与两处接线）：这一轮加的是**判据本体**——静态档位表换成了
+ *      以权限档位为第一维的处置表，四档 × 全部规则键的矩阵现在是可复跑的测试
+ *      （`test/mode-policy.test.ts`）。实测 97,587 B。
  *  预算按同一条规矩取实测上浮 ~4%。 */
-const HOST_BUDGET_BYTES = 92_000;
+const HOST_BUDGET_BYTES = 102_000;
 /** 设置半产物体积预算（实测 2,881 B；开 minify 前 7,293 B）。与拦截半分属两个 bulkhead
  *  条目，各自记账。 */
 const SETTINGS_BUDGET_BYTES = 3050;
