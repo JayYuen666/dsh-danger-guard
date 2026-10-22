@@ -1,4 +1,4 @@
-// lib/blast-radius.ts —— **量出爆炸半径**：把"这一步会改动什么"取成事实，写进审批请求。
+// lib/blast-radius.ts —— **量出操作前状态**：把可确定的那部分取成事实，写进审批请求。
 //
 // 为什么做这件事：本包原先的 `ask` 是**盲问** —— 用户只看到"这条命令会丢弃未提交改动"，
 // 看不到**具体丢什么**。dsh 官方自带的示例 mod `Blast Radius`
@@ -8,32 +8,39 @@
 // 我们只把事实写进审批请求的文案里。
 //
 // ⚠ 这次改动**破了本包一条既有不变式**：原先「判定链没有任何 fs 写入、网络请求或子进程
-// 调用」。现在判定链里多了**只读预演**这一趟子进程。边界钉死在下面三条：
+// 调用」。现在判定链里多了**只读预演**这一趟子进程。边界钉死在下面四条：
 //   1. 只在 **`ask` 档**跑（`deny` 档不跑：那时结论已定，量它不是用户要看的东西）；
 //   2. 只在 **`ctx.shell` 在位**时跑（没装执行器的 profile 退化成盲问，不静默换命令）；
 //   3. 预演命令是**写死的常量**，**不插值任何模型输入** —— 插值模型给的路径就是拿命令
 //      原文拼 shell 串，那是注入面。所以 `gitRestoreDiscard` 量的是整个工作区
-//      （`git status --porcelain`）而不是那条命令点名的那几个文件。
-//   4. 量不出来（执行器缺席 / 非零退出 / 超时 / 取消）一律**退回盲问**，绝不因此改变
-//      审批本身的结论 —— 量证据是增强，不是判据。
+//      （`git status --porcelain`）而不是那条命令点名的那几个文件。原命令只用于两项
+//      **跳过**判据（仓库覆盖选项、策略是否可取），绝不参与命令拼接。
+//   4. 量不出来（执行器缺席 / 仓库目标不确定 / 策略解析失败 / 非零退出 / 超时 / 取消 /
+//      宿主截断输出）一律**退回盲问**，绝不因此改变审批本身的结论 —— 量证据是增强，
+//      不是判据。
 //
-// 本模块只管**常量表与渲染**（纯函数，可脱离宿主单测）；跑子进程那一趟在 host.ts
-//（它才拿得到 `ctx.shell` 与会话 cwd）。
+// 本模块只管**常量表、渲染与是否可量**（纯函数，可脱离宿主单测）；跑子进程那一趟在
+// host.ts（它才拿得到 `ctx.shell` 与会话 cwd）。
 
+import { once } from "node:events";
+
+import { resolveLocale } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 import type { BashDenialKey } from "./danger-rules.ts";
 import type { AskRequest } from "./confirm.ts";
-import { fillTemplate } from "./messages.ts";
+import { fillTemplate, MESSAGES } from "./messages.ts";
 import type { DangerGuardMessages } from "./messages.ts";
 
-/** 三枚"丢弃工作区改动"的键共用同一条预演（它们量的是同一件事：工作区现在有什么）。 */
-const GIT_STATUS = "git status --porcelain";
+/** 三枚"丢弃工作区改动"的键共用同一条预演（它们量的是同一件事：工作区现在有什么）。
+ *  `--no-optional-locks` 抑制 `git status` 的可选锁与索引刷新；这是"只读"里最容易被
+ *  忽略的一笔写，但它不能替代沙箱策略。 */
+const GIT_STATUS = "git --no-optional-locks status --porcelain";
 
 /**
  * 每枚规则键的**只读预演命令**。
  *
- * 全表都是读命令：`--porcelain` / `-n` / `list` / `-vv` 都不改任何东西
+ * 全表都是读命令：`--porcelain` / `-n` / `list` / `-vv` / `log` 都不执行原操作
  *（`git clean -nd` 是 dry-run，`git status --porcelain` 只打印）。
  * 没有对应预演命令的键（比如 `tfDestroy` 要连云、`dbMigrate` 各工具旗标不一）**不在表里** ——
  * 那就盲问，与做这件事之前的行为一致。
@@ -48,8 +55,9 @@ export const BLAST_COMMANDS: Readonly<Partial<Record<BashDenialKey, string>>> = 
   gitForcePush: "git log --oneline -n 10",
 };
 
-/** 预演的墙钟上限（与预检那 3 秒同一条理由：**工程上界**，不是产品策略，故不进设置面）。
- *  它同时是"平台不会放弃一枚挂起的 promise"那条纪律的兑现 —— 预演卡住不能把整次调用挂住。 */
+/** 预演的**终止截止时间**（与预检那 3 秒同一条理由：**工程上界**，不是产品策略，故不进设置面）。
+ *  到点由执行器杀进程；本模块同时用同一枚取消信号结束等待，所以审批不会被一枚挂起的执行器
+ *  promise 永久挂住。进程关闭本身可能还要等宿主的 grace，它不是"函数在 3 秒内返回"的硬上界。 */
 export const BLAST_TIMEOUT_MS = 3000;
 /** 预演输出的字符上限（写进模型的文案里，长了只是噪音）。 */
 export const BLAST_MAX_CHARS = 1200;
@@ -66,11 +74,17 @@ export interface BlastReading {
 
 /** 按行数与字符数两道上限收紧预演输出。
  *
- *  ⚠ `clipped` 必须按**我们真的丢没丢东西**算，不能拿原文 `trim()` 后比 —— porcelain 输出
- *  的**前导空格是有意义的**（` M a.ts` = 工作区已改），拿 trim 比会把"只是行首有空格"
- *  判成"被收紧了"，于是给用户添一句假话。 */
+ *  只去掉**尾部空行**（换行符的残余），保留内部空行：内部空行也是一行，不能借
+ *  `filter` 把它静默吃掉而不计进 `clipped`。`clipped` 只表示触发了行数或字符数上限。
+ *
+ *  ⚠ 不能拿原文 `trim()` 后比 —— porcelain 输出的**前导空格是有意义的**
+ *（` M a.ts` = 工作区已改），拿 trim 比会把"只是行首有空格"判成"被收紧了"，
+ *  于是给用户添一句假话。 */
 export function clipBlast(text: string): { text: string; clipped: boolean } {
-  const lines = text.split("\n").filter((line) => line.length > 0);
+  const lines = text.split("\n");
+  while (lines.at(-1) === "") {
+    lines.pop();
+  }
   const droppedLines = lines.length > BLAST_MAX_LINES;
   const joined = lines.slice(0, BLAST_MAX_LINES).join("\n");
   const droppedChars = joined.length > BLAST_MAX_CHARS;
@@ -83,8 +97,9 @@ export function clipBlast(text: string): { text: string; clipped: boolean } {
 /**
  * 把一次预演渲染成一段（接在 `ask` 的 `reason` 之后）。
  *
- * 空输出**不是**"什么都没查到"：它恰恰是"这一刻没有任何待丢的东西"这条**结论** ——
- * 与预检那三句零命中文案同一条纪律（空列表不是结论，那句话才是）。
+ * 空输出**不是**结论：它只说明这条探针此刻没有可打印的内容，不能证明原操作不会改动
+ * 任何东西（`git reset --hard HEAD~1` 在干净工作区上同样没有输出，却会移动分支）。
+ * 文案必须把这个区别说出来，否则审批证据本身就在骗用户。
  */
 export function renderBlast(reading: BlastReading, messages: DangerGuardMessages): string {
   const { text, clipped } = clipBlast(reading.text);
@@ -105,12 +120,16 @@ export function renderBlast(reading: BlastReading, messages: DangerGuardMessages
  *  与 `lib/sandbox-scope.ts` 里那个只探 `sandboxMode` 的面**刻意分开**：两处读的是同一个
  *  服务的两位，但关心的东西无关（缺 `sandboxMode` 不该让预演停摆，反之亦然）。 */
 interface ShellRunFace {
+  /** 执行器自报的沙箱模式；`undefined` = 这个执行器不沙箱。 */
+  readonly sandboxMode?: unknown;
   resolve: (request: Record<string, unknown>) => unknown;
-  execute: (spec: unknown) => Promise<unknown>;
+  /** 返回域写 `unknown`：守卫只验"可调用"，`await` 对非 promise 是恒等的
+   *（与 `ShellHandle.result` 同一条纪律）。 */
+  execute: (spec: unknown) => unknown;
 }
 
 /** 执行面形状守卫。**只探两位是不是函数** —— `execute` 交回的形状在读取处再验一次
- *（见 `blastTextOf`），因为"守卫比它声称的松"正是漂移的入口。 */
+ *（见 `isShellHandle` 与 `readingOf`），因为"守卫比它声称的松"正是漂移的入口。 */
 const isShellRunFace = (value: unknown): value is ShellRunFace =>
   isRecord(value) &&
   typeof value["resolve"] === "function" &&
@@ -126,21 +145,25 @@ interface ShellHandle {
 const isShellHandle = (value: unknown): value is ShellHandle =>
   isRecord(value) && typeof value["result"] === "function";
 
-/** 一次预演结果 → 渲染好的那一段。**非零退出 / 超时 / 取消 / 形状不符一律 `undefined`**。 */
-function blastTextOf(
-  result: unknown,
-  command: string,
-  messages: DangerGuardMessages,
-): string | undefined {
-  let rendered: string | undefined;
+/** 一次预演结果 → 读取结果。**非零退出 / 超时 / 取消 / 宿主截断 / 形状不符一律
+ *  `undefined`**。`stdout.truncated` 是宿主侧的收集上限：截断后的 `text` 是**尾部**，
+ *  拿它当完整清单会静默丢掉开头，所以宁可盲问。 */
+function readingOf(result: unknown, command: string): BlastReading | undefined {
+  let reading: BlastReading | undefined;
   if (isRecord(result)) {
     const { exitCode, timedOut, aborted, stdout } = result;
-    const { text } = isRecord(stdout) ? stdout : {};
-    if (exitCode === 0 && timedOut !== true && aborted !== true && typeof text === "string") {
-      rendered = renderBlast({ command, text }, messages);
+    const { text, truncated } = isRecord(stdout) ? stdout : {};
+    if (
+      exitCode === 0 &&
+      timedOut !== true &&
+      aborted !== true &&
+      truncated !== true &&
+      typeof text === "string"
+    ) {
+      reading = { command, text };
     }
   }
-  return rendered;
+  return reading;
 }
 
 /** `ctx.sandboxPolicy` 的读取面：与 `lib/sandbox-scope.ts` 同一形状。 */
@@ -153,90 +176,176 @@ const isPolicyFace = (value: unknown): value is PolicyFace =>
   value !== null &&
   typeof (value as { resolve?: unknown }).resolve === "function";
 
+/** 策略解析结果：`ok: false` = 这趟不能安全开跑（退回盲问）。 */
+type SandboxRequest =
+  | { readonly ok: true; readonly request: { readonly sandboxPolicy?: unknown } }
+  | { readonly ok: false };
+
 /**
- * 预演要带的沙箱策略（读不到就给空对象，不传这一位）。
+ * 预演要带的沙箱策略。
+ *
+ * 执行器自报**不沙箱**（`sandboxMode` 缺席）时，策略只是惰性字段，读不到也可以照跑；
+ * 执行器自报**会沙箱**时，缺策略就不能跑 —— 不传策略会落回部署默认，而部署默认可能比
+ * 会话当前档位宽松，甚至就是 `danger-full-access`。解析抛错或返回 `undefined` 同样按
+ * "读不到"处理，退回盲问。
  *
  * 形状照官方 `tool-bash` 的读法：`resolve(exec.agent === undefined ? {} : { session })`。
- *
- * @param policyRaw - `ctx.get("sandboxPolicy")` 的原始值
- * @param session - 会话（逐会话的 sandbox 覆盖按它解析）；缺席用部署默认
- * @returns 可展开进 `resolve` 入参的对象
  */
-function sandboxRequestOf(policyRaw: unknown, session: unknown): { sandboxPolicy?: unknown } {
+function sandboxRequestOf(
+  policyRaw: unknown,
+  session: unknown,
+  shellRaw: ShellRunFace,
+): SandboxRequest {
+  const sandboxed = shellRaw.sandboxMode !== undefined;
   if (!isPolicyFace(policyRaw)) {
-    return {};
+    return sandboxed ? { ok: false } : { ok: true, request: {} };
   }
   try {
-    return { sandboxPolicy: policyRaw.resolve(session === undefined ? {} : { session }) };
+    const sandboxPolicy = policyRaw.resolve(session === undefined ? {} : { session });
+    return typeof sandboxPolicy === "object" && sandboxPolicy !== null
+      ? { ok: true, request: { sandboxPolicy } }
+      : { ok: false };
   } catch {
-    // 解析失败与"读不到"同一处理：不传这一位，预演照跑（失败即盲问）。
-    return {};
+    return { ok: false };
   }
 }
 
-/** `measureBlastOf` 的入参。收成对象是因为它有七位、且后四位常一起缺席——
+/** 这些 git 全局选项会把操作指向另一个仓库/工作树；预演固定在会话 cwd，量到的就不是
+ *  原命令的目标。宁可盲问，也不拿另一份盘冒充证据。 */
+const REPO_OVERRIDE_RE = /(?:^|[\s;&|()"'`])["']?(?:-C|--git-dir|--work-tree)["']?(?=[\s=]|$)/u;
+
+/**
+ * 原命令的仓库目标是否**无法用会话 cwd 唯一确定**。
+ *
+ * 宁可误判为不确定（多一次盲问），也不要展示另一仓库的干净状态。原命令只经过这一枚
+ * 正则做跳过判断，绝不参与预演命令的拼接。
+ */
+export function blastTargetUncertainOf(command: string): boolean {
+  return REPO_OVERRIDE_RE.test(command);
+}
+
+/** 读 `aborted` 的显式函数：TypeScript 会把前面 `!signal.aborted` 的判断带进闭包，
+ *  把这里窄化成恒假；取消是异步发生的，必须在读取点重新取。 */
+const abortedOf = (signal: AbortSignal): boolean => signal.aborted;
+
+/**
+ * 等待 `pending`，但**同一枚取消信号**一响就不再等。信号由宿主与墙钟合流（见 host.ts 的
+ * `preflightSignalOf`），所以到点后审批不会被一枚挂起的执行器 promise 永久挂住。
+ *
+ * 子进程的终止仍由执行器按 `signal` / `timeoutMs` 完成；本函数只结束**等待**。
+ */
+async function boundedOf<Value>(
+  pending: Promise<Value>,
+  signal: AbortSignal,
+): Promise<Value | undefined> {
+  const stopWaiting = new AbortController();
+  const aborted = (async (): Promise<undefined> => {
+    if (abortedOf(signal)) {
+      return undefined;
+    }
+    try {
+      await once(signal, "abort", { signal: stopWaiting.signal });
+    } catch {
+      // 另一侧先结束；这是正常收尾，不是预演失败。
+    }
+    return undefined;
+  })();
+  // `Promise.race` 同时给 `pending` 挂上拒绝处理器：即使这里先被取消，
+  // 迟到的执行器拒绝也不会变成未处理拒绝。
+  try {
+    const value = await Promise.race([pending, aborted]);
+    return abortedOf(signal) ? undefined : value;
+  } finally {
+    stopWaiting.abort();
+  }
+}
+
+/** `measureBlastOf` 的入参。收成对象是因为它有多位、且后几位常一起缺席——
  *  位置参数会让 `undefined, undefined` 串位，而这里每一位都影响一次真实子进程调用。 */
 export interface MeasureBlastOptions {
   /** `ctx.get("shell")` 的**原始值**（形状由本模块判）。 */
   readonly shellRaw: unknown;
-  /** `ctx.get("sandboxPolicy")` 的原始值；读不到即不传策略。 */
+  /** `ctx.get("sandboxPolicy")` 的原始值；读不到时按执行器是否沙箱决定盲问。 */
   readonly policyRaw: unknown;
   /** 要跑的只读预演命令（缺席 ⇒ 这一族没有预演，直接盲问）。 */
   readonly command: string | undefined;
-  /** 会话工作目录（预演在那里跑）。 */
+  /** 原命令；只用于判断仓库目标是否可确定，绝不参与命令拼接。 */
+  readonly sourceCommand: string;
+  /** 会话工作目录（预演在那里跑）；缺席即盲问，不替执行器猜目录。 */
   readonly cwd: string | undefined;
   /** 会话（逐会话的 sandbox 覆盖按它解析）；缺席用部署默认。 */
   readonly session: unknown;
   /** 已与墙钟合流的取消信号。 */
   readonly signal: AbortSignal;
-  /** 当次语言的文案表。 */
-  readonly messages: DangerGuardMessages;
+}
+
+/** 执行一趟已通过前置判据的预演。入参形状照官方 `ShellExecRequest` 给：
+ *  `onExpiry: "kill"` + `timeoutMs` 让执行器到点杀进程；`sandboxPolicy` 与 `runGate`
+ *  那条路同口径，避免回落到部署级默认。 */
+async function runBlast(
+  shellRaw: ShellRunFace,
+  request: { readonly sandboxPolicy?: unknown },
+  command: string,
+  cwd: string,
+  signal: AbortSignal,
+): Promise<BlastReading | undefined> {
+  let reading: BlastReading | undefined;
+  const spec = shellRaw.resolve({
+    command,
+    timeoutMs: BLAST_TIMEOUT_MS,
+    onExpiry: "kill",
+    signal,
+    workdir: cwd,
+    ...request,
+  });
+  if (!abortedOf(signal)) {
+    const handle = await boundedOf(Promise.resolve(shellRaw.execute(spec)), signal);
+    if (isShellHandle(handle)) {
+      const result = await boundedOf(Promise.resolve(handle.result()), signal);
+      reading = readingOf(result, command);
+    }
+  }
+  return reading;
 }
 
 /**
- * 跑一趟**只读预演**并把结果渲染好（`ask` 档专属）。
+ * 跑一趟**只读预演**并交回读取结果（`ask` 档专属）。
  *
  * 这是本包唯一一处子进程调用（原先的「判定链无子进程」不变式在这里有意放宽，
- * 边界钉在本文件头上）。**任何失败都退回盲问**：执行器缺席、非零退出、超时、取消、
- * 输出读不出、交回的形状不符 —— 一律 `undefined`，审批本身的结论一个字不变。
+ * 边界钉在本文件头上）。**任何失败都退回盲问**：执行器缺席、仓库目标不确定、策略解析
+ * 失败、非零退出、超时、取消、宿主截断输出、交回的形状不符 —— 一律 `undefined`，
+ * 审批本身的结论一个字不变。
  *
  * @param shellRaw - `ctx.get("shell")` 的**原始值**（形状由本模块判）。
  * @param command  - 要跑的只读预演命令（缺席 ⇒ 这一族没有预演，直接盲问）。
- * @param cwd      - 会话工作目录（预演在那里跑）。
+ * @param sourceCommand - 原命令（只用于仓库目标判据）。
+ * @param cwd      - 会话工作目录（预演在那里跑；缺席即盲问）。
  * @param signal   - 已与墙钟合流的取消信号（由宿主给：见 host.ts 的 `preflightSignalOf`）。
- * @param messages - 当次语言的文案表。
  */
-export async function measureBlastOf(options: MeasureBlastOptions): Promise<string | undefined> {
-  const { shellRaw, policyRaw, command, cwd, session, signal, messages } = options;
-  let rendered: string | undefined;
-  if (command !== undefined && isShellRunFace(shellRaw)) {
+export async function measureBlastOf(
+  options: MeasureBlastOptions,
+): Promise<BlastReading | undefined> {
+  const { shellRaw, policyRaw, command, sourceCommand, cwd, session, signal } = options;
+  let reading: BlastReading | undefined;
+  if (
+    command !== undefined &&
+    cwd !== undefined &&
+    !abortedOf(signal) &&
+    !blastTargetUncertainOf(sourceCommand) &&
+    isShellRunFace(shellRaw)
+  ) {
     try {
-      // 入参形状照官方 `ShellExecRequest` 给：`onExpiry: "kill"` + `timeoutMs` 让执行器
-      // 到点杀进程；`workdir` 缺席时由执行器用它自己的默认值（不替它猜一个目录）。
-      //
-      // `sandboxPolicy` 必须带上，与 `runGate` 那条路同口径：`git status` 会刷 `.git/index`，
-      // 是一次**写**。不传策略就等于让这次预演回落到部署级默认（可能是 `danger-full-access`），
-      // 于是"只读预演"名不副实——它成了唯一一处能绕过沙箱写盘的地方。
-      // 策略面读不到时不传（执行器按自己的默认走）：预演失败本来就退回盲问，不额外造分支。
-      const spec = shellRaw.resolve({
-        command,
-        timeoutMs: BLAST_TIMEOUT_MS,
-        onExpiry: "kill",
-        signal,
-        ...(cwd === undefined ? {} : { workdir: cwd }),
-        ...sandboxRequestOf(policyRaw, session),
-      });
-      const handle: unknown = await shellRaw.execute(spec);
-      if (isShellHandle(handle)) {
-        rendered = blastTextOf(await handle.result(), command, messages);
+      const policy = sandboxRequestOf(policyRaw, session, shellRaw);
+      if (policy.ok) {
+        reading = await runBlast(shellRaw, policy.request, command, cwd, signal);
       }
     } catch {
       // 预演失败是**预期内**的事（不在 git 仓库里、执行器报错、超时）—— 它不是告警，
       // 只是"这次量不出来"。所以这里不出声，与预检那条"陷阱要留痕"不同。
-      rendered = undefined;
+      reading = undefined;
     }
   }
-  return rendered;
+  return reading;
 }
 
 /**
@@ -245,18 +354,23 @@ export async function measureBlastOf(options: MeasureBlastOptions): Promise<stri
  *
  * 只接 `reason` 是不够的 —— 审批弹窗优先显示 `displayReason`，那样用户看不到证据，
  * 这次改动就白做了。逐语言接也**不是**洁癖：`displayReasonOf` 是按 `Locale` 泛化的，
- * 写死 `{en, zh}` 会让宿主新增的语言静默拿不到这段。
+ * 写死 `{en, zh}` 会让宿主新增的语言静默拿不到这段。预演文案本身也按每门语言现渲染，
+ * 不能把宿主当次语言的那一份原样贴到其他语言上。
  */
-export function withBlast(ask: AskRequest, blast: string | undefined): AskRequest {
-  if (blast === undefined) {
+export function withBlast(
+  ask: AskRequest,
+  reading: BlastReading | undefined,
+  messages: DangerGuardMessages,
+): AskRequest {
+  if (reading === undefined) {
     return ask;
   }
   // 先落 `en`（官方那一位的**必填**成员），再逐语言覆盖 —— 空字面量过不了必填那一格。
   const displayReason: { en: string; [locale: string]: string } = {
-    en: ask.displayReason.en,
+    en: `${ask.displayReason.en}\n${renderBlast(reading, MESSAGES.en)}`,
   };
   for (const [locale, text] of Object.entries(ask.displayReason)) {
-    displayReason[locale] = `${text}\n${blast}`;
+    displayReason[locale] = `${text}\n${renderBlast(reading, MESSAGES[resolveLocale(locale)])}`;
   }
-  return { ...ask, reason: `${ask.reason}\n${blast}`, displayReason };
+  return { ...ask, reason: `${ask.reason}\n${renderBlast(reading, messages)}`, displayReason };
 }

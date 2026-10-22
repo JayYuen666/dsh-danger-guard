@@ -57,14 +57,17 @@
   - 编辑/写类工具上的凭据与密钥路径（`secretPathDeny`）——按**参数键形**识别，**不看工具名**，因为工具名会随 provider 漂移。
     - 编辑面还有**第二枚**拒绝键 `opaqueTarget`：目标路径长到超出可判定上限时，既没确认为凭据、也没确认不是，所以判拒绝，文案是"别原样重试、把路径贴给用户确认"。与 bash 侧 `nestedShellUnconfirmed` 同一个原则——**判不了不等于安全**。（超长的**命令**走的是 `nestedShellUnconfirmed`。）
   - 首次编辑事实门（`lib/fact-gate.ts`）：没读过目标就改，或碰了高风险面却没有层证据，会被拒，并把缺的证据一并附上。
+    - 「读过」只认**成功的**调用：证据台账按 `callId` 串联 `tool/call` 与 `tool/result`，缺 `callId` 的调用状态未知，**不算证据**（真宿主先记调用再派发，一条还没执行或已失败的调用在日志里与成功的长得一样）。
+    - 「读到的是哪一版」在 `lib/read-basis.ts`：观测基线与失效点同一条记录，且**只在拿到成功结果之后**才提交——一次失败或被拦的读不会把基线推向前而吞掉中间发生的外部改动；外部改动判出来之后一直有效，直到真的补上一次成功读取（或预检把正文当场递进结果里）。
 - **预检自己把那份证据取到手**（两个面挂两条瀑布，分工按"证据在什么时刻才真的算被看见"定）：
   - A 面挂 `tools/post-execute`：只读检视（`read` / `view` / `str_replace_editor view`）的**引用面**随这次读取的结果一起交出去（`PostToolDecision.accept{additionalContexts}`），于是模型下一次编辑之前就看得见"谁引用它"。
   - B 面挂 `tools/pre-execute`：模型**没读就改**时，当场取到的目标正文与引用面写进这一次的拒绝理由（`PreToolDecision.deny{reason}`）；原样重试即凭投递水位放行。物理停止仍在 dispatch 之前，"改之前先看清它"这条一个字没让。
   - 为什么不是 `agent.inject()`：那个 API 把上下文排在**下一个 pre-step**，而决定是按 step 做的——证据会在编辑生效**之后**才读到。
   - 扫描有硬上限（文件数、目录数、单文件字节、命中条数；超限文件**跳过**），取消信号与墙钟合流。平台不会放弃一枚挂起的 pre-execute promise，所以无界工作不是一个选项。
   - **凭证判据**："遍历未被截断" **或** "找到了引用"。门禁认可模型自己那次作用域正确的检索当凭证，而那次检索**也不是穷尽的**——要求这趟扫描穷尽比门禁自己还严。但"**零命中 + 被截断**"仍然**不给**凭证：假阴性全住在那一种里，半份"我探过了"比不给更糟。
+  - **层的零命中结论要求那棵子树真的读完**：扫描会记下因超限、凭据面规则或读取失败而**没读正文**的文件；只要目标层里还有这类文件（或遍历本身被截断），那层就不出"0 处命中"的结论——否则会在层内部被截断时宣称"这层没有引用"，而真正引用它的文件恰好排在预算之外。找到了命中则不受这条限制（实证不需要穷尽）。
 - **每个拒绝都自带出路。** `BashVerdict` 带一枚结构化的 `Fix`：git 绕过点名越界的那几枚旗标，灾难 `rm` 点名真正成灾的目标（**排除安全目标**）。模型拿到的是"改哪几个词就能过"，不是一句判断。
-- **`ask` 命中时跑一趟只读爆炸半径预演**（命令表写死、**不插值任何模型输入**），输出接进审批请求的 `reason` 与 `displayReason` 的每一门语言。空输出是**结论**（"此刻不会改动任何东西"），不是"没查到"。
+- **`ask` 命中时跑一趟只读爆炸半径预演**（命令表写死、**不插值任何模型输入**），输出按每门语言分别接进审批请求的 `reason` 与 `displayReason`。空输出只说明探针没有可打印的内容，**不能证明原操作不会改动任何东西**；原命令带 `-C`/`--git-dir`/`--work-tree`、策略解析失败、会话 cwd 缺席或宿主截断输出时直接退回盲问。
 - **重复命中不再重复上报**（`AskDeduper`）：同一会话 + 同一规则键 + 同一命令原文，第二次不再进教训总线、也不重算预演——但**判定与弹卡照旧**。这一层压掉的是"教训卡炸成碎片"，不是"用户被少问一次"；去重绝不能变成偷偷放行。
 
 ### 判定是怎么做出来的
@@ -131,12 +134,12 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 | 族 | 拦 | 放行与出路 |
 |---|---|---|
 | git 钩子绕过 | `commit` / `push` / `merge` / `cherry-pick` / `rebase` / `am` 上的 `--no-verify` 及其无歧义缩写；`commit` / `am` 的短形式 `-n`；`git -c core.hooksPath=` 与 `git config core.hooksPath <dir>`（含 `--global` 与 `=` 合写）。git 参数**按角色**走查：短簇逐字母展开、带值选项的取值不当旗标看、`--` 之后一律 pathspec、`-c` 的取值才是被查的那一段 | `git push -n`（dry-run）、`git cherry-pick -n`（不提交）、`git rebase -n`（--no-stat）、`git config --get` / `--unset` / `--list core.hooksPath`，以及提交信息里出现的该字样 |
-| 灾难性 `rm` | 门槛**按命令词轨分别**。POSIX/cmd 轨要"递归 + 强制"，唯一例外是短旗标簇里的大写 `-R`，单独即灾难级。`Remove-Item` / `ri` 轨则**任何 Recurse 形态单独**命中灾难目标即灾难级、**不要求** `-Force`——那一形不给 `-Force` 也静默删整树。计入的目标：`/`、`~` 与 `~/…`、家目录字面路径、`$HOME` 与 `${HOME…}` 各形态、`.` / `..` / `../…`、系统与用户目录前缀下的整树、以及绝对 glob 与花括号展开；路径先做词法归一。命令词面另含 `pwsh` / `cmd` 的删除形态，大小写不敏感 | 项目内相对清理（`rm -rf node_modules`、`./dist`）、POSIX 轨上只有 `-f`（`rm -f ~`）或只有小写 `-r`（`rm -r ~`）——**这一档按写法而非语义**，不对称是刻意的；`Remove-Item -Recurse ./build`；`/var` 与 `/tmp`（有意不列：误拦代价高于漏拦）；`/usrx` 这类不同段 |
-| 下载即执行 | `curl` / `wget` / `fetch` 之后接 shell 解释器，包括经 `sudo`、带路径前缀的 shell、`xargs`、`parallel`，以及反序的过程替换（`sh <(curl …)`、`source <(curl …)`、`. <(curl …)`）。**双引号内的 `$( )` 同样算执行面**，所以 `echo "$(curl x \| sh)"` 照拦。PowerShell 家族两端都认：`Invoke-WebRequest` / `Invoke-RestMethod` / `iwr` / `irm` 接 `pwsh` / `powershell` / `iex` / `Invoke-Expression`，与 `curl … \| sh` 同判 | `curl -O`、`curl … \| jq .name`、`cat x \| grep foo`、无下载来源的 `ls \| sh`、`source ./setup.sh`，以及引号内的字面 `\|` |
+| 灾难性 `rm` | 门槛**按命令词轨分别**。POSIX/cmd 轨要"递归 + 强制"，唯一例外是短旗标簇里的大写 `-R`，单独即灾难级。`Remove-Item` / `ri` 轨（以及 Windows 方言下的 `rm` / `del` / `rd` 别名）则**任何 Recurse 形态单独**命中灾难目标即灾难级、**不要求** `-Force`——那一形不给 `-Force` 也静默删整树。计入的目标：`/`、`~` 与 `~/…`、家目录字面路径、`$HOME` 与 `${HOME…}` 各形态、`.` / `..` / `../…`、系统与用户目录前缀下的整树、以及绝对 glob 与花括号展开；路径先做词法归一。命令词面另含 `pwsh` / `cmd` 的删除形态，大小写不敏感 | 项目内相对清理（`rm -rf node_modules`、`./dist`）、POSIX 轨上只有 `-f`（`rm -f ~`）或只有小写 `-r`（`rm -r ~`）——**这一档按写法而非语义**，不对称是刻意的；`Remove-Item -Recurse ./build`；`/var` 与 `/tmp`（有意不列：误拦代价高于漏拦）；`/usrx` 这类不同段 |
+| 下载即执行 | `curl` / `wget` / `fetch` 之后接 shell 或脚本解释器，包括经 `sudo`、带路径前缀的解释器、`xargs`、`parallel`，以及反序的过程替换（`sh <(curl …)`、`python <(curl …)`、`source <(curl …)`、`. <(curl …)`）。执行端覆盖 `sh` / `bash` / `zsh` / `dash` / `ksh`、`pwsh` / `powershell` / `iex` / `Invoke-Expression`，以及 Python / Node / Perl / Ruby / PHP / Lua / osascript——它们都会把 stdin 当代码执行。**双引号内的 `$( )` 同样算执行面**，所以 `echo "$(curl x \| sh)"` 照拦。PowerShell 家族两端都认：`Invoke-WebRequest` / `Invoke-RestMethod` / `iwr` / `irm` 接 `pwsh` / `powershell` / `iex` / `Invoke-Expression`，与 `curl … \| sh` 同判 | `curl -O`、`curl … \| jq .name`、`cat x \| grep foo`、无下载来源的 `ls \| sh`、`source ./setup.sh`，以及引号内的字面 `\|` |
 | 长驻 dev server | 裸 `vite` / `next` / `nuxt`、`webpack serve` / `--watch`、`cargo watch`、`npm` / `pnpm` / `yarn` / `bun run dev` / `watch` / `serve` / `start`、一切 `dev` 词根脚本名，以及经 `npx` / `bunx` / `exec` / `dlx` 起的长驻包（版本选择器不算新身份）。`vite build --watch` 仍拦。一次性豁免**只看子命令位** | `npm test`、`npm run build`、`vite build`、`next build`、`webpack --config prod.js`、`cargo run` / `check` / `test`、`vitest run`，以及确认一次性子命令（`vite optimize`、`next lint`、`nuxt prepare`） |
 | 密钥路径编辑 | `.ssh` / `.gnupg` / `.aws` / `.kube` / `.docker` 目录内任何文件，**含相对形态**；`id_rsa` / `id_ed25519` / `id_ecdsa` 主名及其拷贝后缀；`.pem` / `.key` / `.p12` / `.pfx` / `.keystore` / `.jks` 结尾；`.env` 全族；`.envrc` / `.npmrc` / `.pypirc` / `.netrc` / `.pgpass` / `.git-credentials`；`credentials.json`、`service-account*.json`、`token.json`；`secret(s).yaml` / `yml` / `json`；`.git/config`。目标先做词法归一，宿主给了会话 cwd 时相对目标按 cwd 解析；反斜杠 Windows 路径同判 | `.env.example` / `.sample` / `.template` / `.defaults`、`api.key.ts`、`main.pem.tsx`、`.gitignore`、`mysecrets.yaml`、`secrets.yaml.bak`、`myid_rsa` |
-| git 破坏族（全部 `ask`） | `reset --hard`、`checkout -- <path>` / `checkout .`、`restore <path>`（`--staged` 单用**不判**——只动索引）、`clean -f*`、`stash drop` / `clear`、`branch -D`（小写 `-d` **不判**——git 自己会拒绝未合并的分支）、`push -f` / `--force` / `--force-with-lease`。与 no-verify 那条**共用一趟走查**，按子命令查表 | 每一条都有正当用法。硬拒"危险但有时正确"的操作会**逼模型找绕路写法**——`git reset --hard` 被拒后它可能直接 `rm` 掉那些文件，一个更糟且不被拦的写法。所以这一族是问，不是拒 |
-| 基础设施破坏族（全部 `ask`） | `terraform destroy`、`terraform apply -auto-approve`、`docker … prune`、`kubectl delete`，以及迁移族（`manage.py migrate`、`prisma migrate`、`rails db:migrate`、`alembic upgrade`、`flyway migrate`、`typeorm migration:run`、`knex migrate:latest`…） | `plan -destroy`（plan 只打印）、裸 `apply`（terraform 自己会问）、`--dry-run`（官方教的预演写法）、只读动作（`prisma migrate status`、`flyway info`）与干跑旗标（`--plan`、`--sql`）。迁移族另要求命令词之前每一枚词都是启动器，所以在文档里搜这串不会假命中 |
+| git 破坏族（全部 `ask`） | `reset --hard`（含 `--har` 这类无歧义缩写）、`checkout -- <path>` / `checkout .` / `checkout -f` / `checkout <rev> <path>`、`restore <path>`（`--staged` 单用**不判**——只动索引）、`clean -f*`（含 `-xf` / `-x -f`）、`stash drop` / `clear`、`branch -D` / `--delete --force`、`push -f` / `--force` / `--force-with-lease` / `+refspec`。短旗标取值**按子命令**解析（`push -u` 与 `clean -x` 是布尔，`commit -m` 与 `clean -e` 才取值）。与 no-verify 那条**共用一趟走查** | 每一条都有正当用法。硬拒"危险但有时正确"的操作会**逼模型找绕路写法**——`git reset --hard` 被拒后它可能直接 `rm` 掉那些文件，一个更糟且不被拦的写法。所以这一族是问，不是拒 |
+| 基础设施破坏族（全部 `ask`） | `terraform destroy`、`terraform apply -auto-approve`、`docker … prune`、`kubectl delete`，以及迁移族（`manage.py migrate`、`prisma migrate`、`rails db:migrate`、`alembic upgrade`、`flyway migrate`、`typeorm migration:run`、`knex migrate:latest`…） | `plan -destroy`（plan 只打印）、裸 `apply`（terraform 自己会问）、`kubectl --dry-run=client` / `server`（只有这两个取值；`none` 会实际执行）、只读动作（`prisma migrate status`、`flyway info`）与按工具分表的干跑旗标（`manage.py --plan` / `--sql`、`alembic --sql`）。迁移族另接受 `uv run` / `poetry run` / `pnpm exec` / `python -m` 等启动器前缀，同时在文档里搜这串仍不会假命中 |
 
 ## <img src="https://api.iconify.design/lucide/sliders-horizontal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 设置项
 
@@ -200,7 +203,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 - **裸 `~user`（词尾无分隔符）不收。** `rm -rf ~root` 展开成什么取决于本机账号表，而本闸既不碰文件系统也不查用户。**带分隔符的 `~user/…` 已收**。
 - **PATH 上的解释器跑代码串一律需确认。** `python3 -c "print(1)"` 是良性的，也仍要确认——这是"看不见就不静默放行"的定价。
 - **`bash` 重定向写入不在事实门覆盖面。** 门禁挂在 `edit` / `write` 两类工具上；`printf > f`、`tee`、`cat >`、`sed -i` 绕过"先取证"这条。纳入它要解析 shell 重定向与就地编辑器。
-- **少数 `ask` 档形态是盲问。** 裸 `git checkout <path>` 与"切分支"在词法上不可分，`git push --force` 不解析目标分支。经 shell 重定向落笔的改动、以及目标在会话外被改动的残窗，同理。
+- **少数 `ask` 档形态是盲问。** 裸 `git checkout <path>` 与"切分支"在词法上不可分（显式的 `checkout <rev> <path>` 会判），`git push --force` 不解析目标分支。经 shell 重定向落笔的改动、以及目标在会话外被改动的残窗，同理。
 - **MSYS/Cygwin 挂载形态不折算。** 真实 Windows 宿主上 `rm -rf /c/Windows/System32` 要一张挂载表，那是新依赖加新设计决定。
 
 ## <img src="https://api.iconify.design/lucide/lock.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 数据与隐私
@@ -208,7 +211,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 | 口径 | 内容 |
 |---|---|
 | 不写盘、不联网 | 判定链没有任何文件系统写入与网络请求；输出面只有 `console.*` 告警与回给模型的文案。**唯一**的例外是下面那趟 `ask` 档预演 |
-| 子进程调用（只有这一处） | `ask` 档命中时，按写死的 `BLAST_COMMANDS` 跑一条**只读命令**，在会话 cwd 里、经宿主的 `ctx.shell`，因此与 bash 工具走同一套沙箱与凭据擦洗环境。输出收紧后只接进审批请求的 `reason` 与 `displayReason`。任何失败（执行器缺席、非零退出、超时、取消、形状不符）一律退回盲问，不重试、不换命令。命令表写死、**不插值任何模型输入** |
+| 子进程调用（只有这一处） | `ask` 档命中时，按写死的 `BLAST_COMMANDS` 跑一条**只读命令**，在会话 cwd 里、经宿主的 `ctx.shell`，因此与 bash 工具走同一套沙箱与凭据擦洗环境。`git status` 用 `--no-optional-locks` 抑制可选锁与索引刷新，但仍按会话解析出的 `sandboxPolicy` 执行。输出收紧后按每门语言接进审批请求的 `reason` 与 `displayReason`。任何失败（执行器缺席、仓库目标不确定、策略解析失败、非零退出、超时、取消、宿主截断输出、形状不符）一律退回盲问，不重试、不换命令。命令表写死、**不插值任何模型输入**；原命令只用于目标/策略的跳过判据 |
 | 读什么 | 会话事件历史里的工具台账（主路径：守卫里同步读的投影单元；回退是一次全量事件扫描，判定逐字相同）；目标与层目录的 `statSync`；预检写面对每枚声明目标的一次路径解析与一次正文读取；家目录取 `os.homedir()` |
 | 记什么 | 全部在进程内存里——事实门分片、判定台账、以及卡片读的那几格计数——宿主退出即消失，dsh 数据目录下不留本包的文件 |
 | 出域的只有两处且都可关 | 装了 lesson-loop 时，`report` 载荷含 cwd、session id、命中命令原文或目标路径与拒绝文案，另带 `judgeMs` 与（密钥面命中时的）目标解析形清单。此外每次判定还有一条 `judge-cost` pass，载荷只有面名、毫秒、字符数三枚数值，不含命令原文与路径。**只有 `judge-cost` 那条 pass 受 `judgeStats` 管**——拒绝上报里的 `judgeMs` / `judgeLength` / `resolvedPaths` 是无条件发送的 |

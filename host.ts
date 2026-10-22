@@ -73,14 +73,26 @@ import { BLAST_COMMANDS, measureBlastOf, withBlast } from "./lib/blast-radius.ts
 import { bashOptsOf, strArray } from "./lib/settings-read.ts";
 // 宿主沙箱的管辖面（哪些灾难目标该让给它拦）。规范化折法由本文件注入 —— lib 不 import
 // `node:fs`，而 `realpathOf` 是同步判定链唯一付得起的那种解析。
-import { sandboxCoveredFacts, sandboxModeOf, sandboxScopeOf } from "./lib/sandbox-scope.ts";
+import { sandboxModeOf } from "./lib/sandbox-scope.ts";
+import { effectiveDispositionFactory } from "./lib/effective-disposition.ts";
+import type { DispositionFactory } from "./lib/effective-disposition.ts";
 import { presenceOfAttempt } from "./lib/fs-errors.ts";
 import type { Presence } from "./lib/fs-errors.ts";
-import { asOsPath } from "./lib/path-format.ts";
-import type { OsPath } from "./lib/path-format.ts";
+// 「模型读到的是哪一版」的记账（观测/失效点同一条记录、只在成功结果后提交）。
+import {
+  attributeExternalChange,
+  clearReadBasis,
+  clearStaleness,
+  commitReadObservation,
+  discardReadObservation,
+  observeVersion,
+  readBasisLedgers,
+  settleVersion,
+  stageReadObservation,
+} from "./lib/read-basis.ts";
 // 按权限档位分叉的处置表：同一枚规则键在不同预设下的结论不同，判据本体全在这一层。
-import { decideRule, severityResolverOf } from "./lib/mode-policy.ts";
-import type { PolicyFacts } from "./lib/mode-policy.ts";
+import { decideRule } from "./lib/mode-policy.ts";
+import type { PolicyFacts, RuleVerdict } from "./lib/mode-policy.ts";
 // 档位事实的折法（宿主三个只读服务面 → PolicyFacts），纯形状守卫、可脱离宿主单测。
 import { policyFactsOf as policyFactsOfIn } from "./lib/policy-facts.ts";
 // 拒绝文案的三段拼法（纯函数）：降级来的 deny 要多一段换档出路，这条只有一处实现。
@@ -94,8 +106,18 @@ import {
   DEFAULT_MAX_DENIES,
   DEFAULT_SMALL_EDIT_CHARS,
   DEFAULT_BIG_EDIT_CHARS,
+  NO_DELIVERY,
+  undeterminable,
 } from "./lib/fact-gate.ts";
-import type { FactDenial, FactEvidenceInput, FactGap, FactNeed, NeedWhy } from "./lib/fact-gate.ts";
+import type {
+  DeliveryWatermark,
+  FactDenial,
+  FactEvidenceInput,
+  FactGap,
+  FactNeed,
+  LayerNeed,
+  NeedWhy,
+} from "./lib/fact-gate.ts";
 // 预检的取证 I/O 与证据渲染单源在 lib/preflight-scan.ts（那边不碰会话键、不碰状态机）。
 // 扫描起点与匹配词**不在**那边算：root 用本文件的 projectRootOf（与拒绝理由里的检索起点
 // 同一枚），needles 用本文件的 buildStems/MIN_STEM（与门禁记账的引用签名同一条口径）——
@@ -209,6 +231,10 @@ const FACTGATE_SIGNATURE = "edit-before-factgate";
 /** 成本样本的上报类别：每次判定一条 pass，载荷只有面名/耗时/输入长度三枚数值。
  *  开关联动 `judgeStats`（默认开），关掉就一条都不出域。 */
 const JUDGE_COST_CATEGORY = "judge-cost";
+
+/** 危险 bash 的上报类别：deny /「需确认」/ 放行三条路共用。lesson-loop 按类别折成一张卡，
+ *  三处各写字面量就会各记各的。 */
+const DANGEROUS_BASH_CATEGORY = "dangerous-bash";
 
 /** 官方 `ToolExecution.agent` 去掉可选后的 `Agent`。本包**未**声明 `@deepseek-ai/dsh-agent`
  *  依赖，故经官方成员索引访问取到它，而不 import 类名（zvec-grep 的 lib/routing.ts 同策）。 */
@@ -586,24 +612,15 @@ interface ProjectionsRegistry {
 type LedgerReader = (session: SessionLogFace) => ToolLedger | undefined;
 /** 词干过短不做匹配（防 a.ts / ab.ts 这类两字母名到处顶包）。 */
 const MIN_STEM = 4;
-/**
- * 目标 → 任一会话最近看到的 mtime（**全局兜底**：给"本会话还没评估过该文件"的
- * 场景提供基线，见 mtimeBySessionPath）。
- */
-const mtimes = new Map<string, number>();
-/**
- * `会话|目标` → **该会话**上次看到的 mtime（新鲜度的实际基线）。
- * 只按路径共享会**消费掉跳变信号**：A 先评估就把 mtime 更新为新值，B 随后评估
- * 时看不到任何变化，于是带着改动前的旧 read 盲改。按会话存基线，才每个会话都能
- * 看见"自从我上次看它之后它变过"。
- */
-const mtimeBySessionPath = new Map<string, number>();
+// 读取基线与失效点整组在 lib/read-basis.ts（观测/判据同一条记录、只在成功结果后提交、
+// 失效点写进取值）：那三条不变式两处各写一遍就会静默失效，故不与其余台账混放在本文件。
 /**
  * `会话|目标` → 该会话上次评估时的日志长度。
  * **必须按会话键**：存的是事件下标，跨会话复用会让新鲜度基准直接错位
  * （A 会话 len=50 写进台账，B 会话读到的 baseline 就是 A 的下标）。
  */
 const seenLenBySessionPath = new Map<string, number>();
+
 /** 项目根探测缓存（`会话目录|目标` → 根）。键里带 cwd 的理由见 `projectRootOf`：没有工程
  *  标记时回落值取决于"cwd 是不是目标的祖先"，只按目标缓存会让两个会话互相吃对方的根。 */
 const rootCache = new Map<string, string>();
@@ -621,23 +638,8 @@ const rootCache = new Map<string, string>();
  *  这一枚只兜"单枚 syscall 卡住"那种罕见形状。 */
 const PREFLIGHT_TIMEOUT_MS = 3000;
 
-/** 预检投递水位：两项各自的**投递位次**（-1 = 这一项从未投递）。
- *  拆成两位而不是 `{seq, read, refs}` 一枚：A 面只投 refs、B 面可能只投 read，两者先后落在
- *  同一个键上——合一位要么覆盖掉对方那一项，要么把 read 的新鲜度按 refs 的位次重算，而
- *  read 的判据要的正是**它自己那次**投递的位次（与 `staleBase` 比）。 */
-interface DeliveryWatermark {
-  readonly readSeq: number;
-  readonly refsSeq: number;
-  /** 层探查（test/e2e/docs）各自的投递位次：与 refs 同理由拆位——一次 B 面可能只覆盖其中
-   *  两层（第三层不在扫描覆盖里），合一位就会把"已投递"扩散到没覆盖的那层上。 */
-  readonly layerSeqs: Readonly<Partial<Record<FactNeed, number>>>;
-}
-
-/** 没有投递时的缺省水位：两位皆 -1——与"从未投递"在比较与短路下同形（比较恒假）。 */
-const NO_DELIVERY: DeliveryWatermark = { readSeq: -1, refsSeq: -1, layerSeqs: {} };
-
-/** 引用扫描缓存：`会话id|目标` → 结果 + 扫描时的目标 mtime。
- *  mtime 是新旧判据（与 mtimeBySessionPath 同一条自校口径）：目标被会话外改过就重扫；
+/** 引用扫描缓存：`会话id|目标` → 结果 + 扫描时的目标版本位。
+ *  version 是新旧判据（与 lib/read-basis.ts 的新鲜度同一条自校口径）：目标被会话外改过就重扫；
  *  否则紧接着的另一趟直接吃这份结果——被预算截断的那份也照用（`complete` 位随结果一起
  *  进缓存，读法侧据此决定给不给凭证）。 */
 const preflightScans = new Map<
@@ -667,23 +669,25 @@ const sessionKeyPrefix = (sessionId: unknown): string => `${stringIdOf(sessionId
  *  mtime 基线（`recordReadObservation`）、外部改动水位（`evidenceFor`）、预检的扫描缓存
  *  （`refScanOf`）与两张投递水位（A/B 面）。把拼接本身单源化，是因为"只共用前缀"仍留下
  *  五处各自 `${prefix}${target}` 的机会：少一个分隔符、多一次 normalize 都不会编译报错，
- *  只会让预检写下的水位在评估侧永远读不到。 */
+ *  只会让预检写下的水位在评估侧永远读不到。lib/read-basis.ts 的键同样来自这里。 */
 const sessionTargetKeyOf = (sessionId: unknown, targetN: string): string =>
   `${sessionKeyPrefix(sessionId)}${targetN}`;
 
 /**
- * 丢掉一个会话在四张会话键台账里的分片。键形是 `会话id|目标`（`sessionKeyPrefix` 自带 `|`
+ * 丢掉一个会话在会话键台账里的分片。键形是 `会话id|目标`（`sessionKeyPrefix` 自带 `|`
  * 收尾），故按 `会话id|` 前缀匹配就够：分隔符让 `s1` 吃不到 `s10|…`。
- * 只扫这四张——`mtimes` / `rootCache` / `layersByStart` 是路径键，与会话无关。
+ * 只扫这几张——`rootCache` / `layersByStart` 是路径键，与会话无关。
  * 预检那两张（扫描缓存、投递水位）是会话键，必须跟着走：留着的话下一个会话拿到前一个
  * 会话的投递水位就是**免检金牌**（门禁认的是 `会话id|目标`，但泄漏的是记忆本身）。
+ * 读取基线/失效点/暂存观测同理（见 lib/read-basis.ts）：那份失效点说的是"本会话还没看过
+ * 这一版"，跨会话复用等于替新会话判"这份证据还有效"。
  * 幂等：同一会话重复 dispose 是空操作。
  * @param sessionId 会话 id（与 buildEvalContext 同一个 stringIdOf 投影）。
  */
 function dropSessionLedgers(sessionId: string): void {
   const prefix = `${sessionId}|`;
   for (const map of [
-    mtimeBySessionPath,
+    ...readBasisLedgers(),
     seenLenBySessionPath,
     preflightScans,
     preflightDelivered,
@@ -764,18 +768,6 @@ const hasRootMarker = (dir: string): boolean =>
  * @param candidate 待判的绝对路径。
  * @returns 自身与所有后代为 true。
  */
-/** 把宿主服务交出的 cwd 标成 `OsPath`（`undefined` 原样透传）。
- *
- *  单列的理由：它同时承担"空值透传"与"打 brand"两件事，摊在 `sandboxCoveredFacts`
- *  那个调用点里会顶爆 cognitive-complexity，而这两件事本身没有判断逻辑可读。
- *
- *  @param cwd 宿主真实目录（`workingDirectory` 或 session header 的 cwd）。
- *  @returns 带 brand 的同一枚字符串；`undefined` 交回 `undefined`。
- */
-function cwdAsOsPath(cwd: string | undefined): OsPath | undefined {
-  return cwd === undefined ? undefined : asOsPath(cwd);
-}
-
 function isInside(root: string, candidate: string): boolean {
   // 食宿主的 `path`：`host.ts` 里这条判据只服务"检索作用域是否覆盖目标"这一件事，
   // 而入参都来自宿主服务（`workingDirectory` / `session header`），随平台走是对的。
@@ -833,7 +825,7 @@ function projectRootOf(targetN: string, cwd: string | undefined): string {
  * 层**存在**才要求探查——不存在由 fs 判定直接豁免，比让模型 grep 一次空目录便宜且
  * 零作弊面；存在的层要求至少一次**可归因**动作落在其中（符号级结论仍归文字声明）。
  */
-const LAYER_DIRS: { need: FactNeed; names: string[] }[] = [
+const LAYER_DIRS: { need: LayerNeed; names: string[] }[] = [
   { need: "test", names: ["test", "tests", "__tests__", "spec", "specs"] },
   { need: "e2e", names: ["e2e", "cypress", "playwright", "integration"] },
   { need: "docs", names: ["docs", "doc"] },
@@ -855,7 +847,7 @@ const firstExistingLayer = (dir: string, names: string[]): string | undefined =>
 
 /** 一条被探测到的层：need + 实际目录绝对路径（提示与归因都要具体路径）。 */
 interface FactLayer {
-  need: FactNeed;
+  need: LayerNeed;
   dir: string;
 }
 
@@ -866,10 +858,11 @@ const layersByStart = new Map<string, FactLayer[]>();
  *  可换代时工作树已经变了，上一代的层探查结论是错的。预检那两张（扫描缓存、投递水位）
  *  同理：它们记的是上一代看到的引用面与投递事实，换代后一并作废。官方真实路径那张也清：
  *  它喂的是**密钥面判定**，换代之间软链可能被重新指向，留着旧形等于拿上一代的盘判这一代。
- *  `mtimes` / `rootCache` 不在此列：前者按 mtime 自校、后者是纯路径→根映射（只决定扫描起点），
- *  留着无副作用，交给 lruPut 兜底即可。 */
+ *  读取基线那组同样要清（见 lib/read-basis.ts）："上一代要求的失效点"与"上一代看到、
+ *  还没确认落地的观测"都没有资格跨代生效。
+ *  `rootCache` 不在此列：它是纯路径→根映射（只决定扫描起点），留着无副作用，交给 lruPut 兜底。 */
 function clearDerivedLedgers(): void {
-  mtimeBySessionPath.clear();
+  clearReadBasis();
   seenLenBySessionPath.clear();
   layersByStart.clear();
   preflightScans.clear();
@@ -901,11 +894,14 @@ function probeLayersAt(dir: string, found: Map<FactNeed, string>, extraTestDirs:
  * 目标文件所属包链上**实际存在**的层（机械半轨的存在性判定）。
  * 从目标父目录一路向上到项目根逐级找层名——monorepo 里 `packages/foo/test/` 才是
  * 该文件的真实测试层，只在项目根找会漏。层不存在 → 直接豁免（不必让模型 grep 空目录
- * 自证"没有"）。缓存键含 extraTestDirs：词表变化时旧缓存必须失效。
+ * 自证"没有"）。缓存键含 extraTestDirs：词表变化时旧缓存必须失效；**也必须含 root**——
+ * 上溯的终点由它决定，而它对同一枚目标可以不是同一个值（`projectRootOf` 的回落分支取决于
+ * 会话 cwd）。键里少这一位时，包根里开的会话与仓库根里开的会话会互相复用对方的层集合：
+ * 窄根先评估就把宽根会话的 test 层要求整片吃掉，宽根先评估则给窄根会话要一层它够不到的目录。
  */
 function existingLayersOf(targetN: string, root: string, extraTestDirs: string[]): FactLayer[] {
   const start = path.dirname(targetN);
-  const cacheKey = `${start}|${extraTestDirs.join(",")}`;
+  const cacheKey = `${start}|${root}|${extraTestDirs.join(",")}`;
   const cached = layersByStart.get(cacheKey);
   if (cached !== undefined) {
     return cached;
@@ -1093,33 +1089,6 @@ function riskFactsOf(
   };
 }
 
-/** 无法判定证据时的保守输入：缺信息一律要**更多**，按"两项都没做过"起步。
- *  但预检的投递水位不在"没做过"之列——那是插件自己的记录（B 面当场递过正文、A 面随读取
- *  附过引用面），**不依赖会话日志**。不剔除它就会出现"预检补完 → guard 仍按不可判定缺项
- *  拒 → 再补 → 再拒"的死循环（配额放行只是把死循环换成免检，不是解）。
- *  `done` 那格照 fact-gate 的口径带上，让拒绝文案能说清"已经给过的不再要求"。 */
-function undeterminable(delivered: DeliveryWatermark): FactEvidenceInput {
-  const gaps: FactGap[] = [];
-  const done: FactNeed[] = [];
-  if (delivered.readSeq >= 0) {
-    done.push("read");
-  } else {
-    gaps.push({ need: "read", why: "never" });
-  }
-  if (delivered.refsSeq >= 0) {
-    done.push("refs");
-  } else {
-    gaps.push({ need: "refs", why: "never" });
-  }
-  return {
-    gaps,
-    done,
-    determinate: false,
-    logSeq: 0,
-    fileEditSeq: -1,
-  };
-}
-
 /**
  * 去正则转义与元字符。必须容忍转义：模型写 grep 的天性是 `host\.ts`、`a[.]ts`，
  * 按字面量 includes 判会永不相等——我自己就被这条咬过一次（误判"未取证"）。
@@ -1143,7 +1112,8 @@ function sigOf(...values: unknown[]): string {
 
 /**
  * 记账 tool/call 并返回其键：有 callId 用 callId 等结果回填；无 callId（极旧契约）
- * 以 `nc:<seq>` 为键，由第二遍后的收编循环按成功计（见 evidenceFor 尾部）。
+ * 以 `nc:<seq>` 为键**单独放着**——第二遍结算只认能配到结果的那些键（见 resolveResultLedger）。
+ * 前缀不是"成功"的标记，恰恰相反：它标记的是**等不到成败回填**、因此不算证据的那一类。
  */
 function remember(map: Map<string, number>, callId: string | undefined, seq: number): string {
   const key = callId ?? `nc:${seq}`;
@@ -1407,10 +1377,10 @@ const deliverySeqOf = (req: PreflightRequest, input: FactEvidenceInput): number 
 /** 把这次覆盖到的层盖上投递位次（其余沿用旧值）。写成函数而不是 `Array#reduce` 累积展开：
  *  后者是本仓 lint 明令避免的形状（oxc/no-accumulating-spread），而这里要的只是"逐层赋值"。 */
 function liftLayers(
-  prev: Readonly<Partial<Record<FactNeed, number>>>,
-  layers: readonly FactNeed[],
+  prev: Readonly<Partial<Record<LayerNeed, number>>>,
+  layers: readonly LayerNeed[],
   seq: number,
-): Partial<Record<FactNeed, number>> {
+): Partial<Record<LayerNeed, number>> {
   const next = { ...prev };
   for (const need of layers) {
     next[need] = seq;
@@ -1423,7 +1393,7 @@ function liftLayers(
 function noteDelivery(
   key: string,
   seq: number,
-  patch: { read?: boolean; refs?: boolean; layers?: readonly FactNeed[] },
+  patch: { read?: boolean; refs?: boolean; layers?: readonly LayerNeed[] },
 ): void {
   const prev = preflightDelivered.get(key) ?? NO_DELIVERY;
   const layers = patch.layers ?? [];
@@ -1565,9 +1535,13 @@ function callPathOf(name: string, a: Record<string, unknown>): string | undefine
  * 三条防线拒绝）——借这一步把基线前移到 read 时点：改动发生在 read 之后必被检出；
  * 常规路径（无外部改动）只多一次 statSync，判定零变化。非 read/view 的调用在此直接
  * 返回（写类与 bash 等其余工具的基线由编辑评估自己建立）。
- * 残余窗口（明记）：这里记录的是 **guard 时点**的 mtime，早于 read 真正执行——两刻之间
+ * 残余窗口（明记）：这里看到的是 **guard 时点**的 mtime，早于 read 真正执行——两刻之间
  * 的改动会被判"外部"（多要求一次重读），方向保守。门禁关闭（enabled=false）时不记账，
  * 与其余判定同口径；重开后首个 read 重建基线。
+ *
+ * **只暂存不提交**：guard 跑在执行之前，这一次读成不成此刻未知。直接把观测写进基线，
+ * 一次失败/被拦的读就会把基线推到新版本，从而让下一次编辑判定看不出中间发生过外部改动
+ * （探针实测：成功 read → 外部改 → 失败 read → 编辑放行）。提交点在 post-execute。
  */
 function recordReadObservation(
   name: string,
@@ -1587,10 +1561,30 @@ function recordReadObservation(
   // （`GuardRuntime.cwd`），不在这里再读一遍会话面——两处各自现取，中间夹一次 `cd`
   // 就会把基线写到另一个键上。
   const targetN = resolveTarget(target, cwd);
-  const { mtimeMs } = presenceOf(targetN);
-  const lenKey = sessionTargetKeyOf(session?.id, targetN);
-  lruPut(mtimes, targetN, mtimeMs);
-  lruPut(mtimeBySessionPath, lenKey, mtimeMs);
+  // 只**暂存**：这一趟还没执行，成功与否此刻未知（见 lib/read-basis.ts 的文件头第 2 条）。
+  stageReadObservation(
+    sessionTargetKeyOf(session?.id, targetN),
+    presenceOf(targetN).mtimeMs,
+    targetN,
+  );
+}
+
+/** 提交/丢弃一次读取的暂存观测（`tools/post-execute` 报回真实成败之后才走到这里）。
+ *  提交 = 基线落定并解除失效点；丢弃 = 两样都不动（没拿到的内容不能替后来者证明"看过"）。
+ *  键形与暂存那一步**逐字同源**：两处的 cwd 都来自同一枚 `GuardRuntime.cwd`。 */
+function settleReadOf(
+  session: SessionLogFace | undefined,
+  target: string,
+  cwd: string | undefined,
+  isError: boolean,
+): void {
+  const targetN = resolveTarget(target, cwd);
+  const key = sessionTargetKeyOf(session?.id, targetN);
+  if (isError) {
+    discardReadObservation(key);
+    return;
+  }
+  commitReadObservation(key, targetN, presenceOf(targetN).mtimeMs);
 }
 
 /** 写/读型调用记账：read 与 str_replace_editor 的 view 记 readCalls，其余按写登记。 */
@@ -1768,27 +1762,19 @@ function resolveResultLedger(ctx: EvalCtx, ledger: CallLedger): ResultLedger {
       settleResultEvent(state, ledger, result.callId, result.isError, result.seq);
     }
   }
-  // 无 callId 的极旧契约事件（键由 remember() 造为 `nc:<seq>`）等不到成败回填 →
-  // 按其文档承诺**保守计成功**。旧实现只登记不结算：注释说"按成功计"而实际永远
-  // 回填不上，模型真做过 read/grep 会被永久判"未取证"（静默死锁 + 契约漂移无人知）。
-  for (const [key, seq] of ledger.readCalls) {
-    if (key.startsWith("nc:")) {
-      state.readSeq = Math.max(state.readSeq, seq);
-    }
-  }
-  for (const [key, seq] of ledger.editCalls) {
-    if (key.startsWith("nc:")) {
-      state.lastEditSeq = Math.max(state.lastEditSeq, seq);
-    }
-  }
-  for (const [key, seq] of ledger.refCalls) {
-    if (key.startsWith("nc:")) {
-      state.refsSeq = Math.max(state.refsSeq, seq);
-      for (const need of ledger.layersByCall.get(key) ?? []) {
-        state.layerSeq.set(need, seq);
-      }
-    }
-  }
+  // 无 callId 的调用等不到成败回填：**状态未知**，不是成功。
+  //
+  // 这里曾经"按成功计"，方向是 fail-open：真宿主先 append tool/call 再 dispatch（见
+  // agent-loop 的 appendToolCall），所以一条**还没执行**（或执行失败、被取消、被别的插件
+  // block 掉）的调用在日志里长得和成功的一模一样。整条按成功收编，等于让"准备读"变成
+  // "读过"——证据链上最不该失守的那一格。
+  //
+  // 反方向的代价（模型真读过却被判未取证）确实存在，但它的终点是**可见的**：门禁拒一次
+  // 并把"从未 read"写进理由，模型照做一次带 callId 的读取就解开了。而 fail-open 的终点
+  // 是一条静默放行的编辑。两者不对称，取保守那一侧。
+  //
+  // 无 ID 的**编辑**同样不收编：lastEditSeq 是外部改动归因的依据，把一条来路不明的调用
+  // 算成"自己改的"，会让真正的外部改动被自证销账。
   return {
     readSeq: state.readSeq,
     refsSeq: state.refsSeq,
@@ -1962,7 +1948,7 @@ function assembleGaps(ctx: EvalCtx, input: GapInput): FactEvidenceInput {
     done,
     determinate: true,
     logSeq: ctx.logSeq,
-    fileEditSeq: input.staleBase,
+    externalChangeSeq: input.staleBase,
     newFile: input.newFile,
     // 指令里的检索工具名与实际记账用同一份映射（缺它就等于对模型撒谎"用 X 搜就行"）。
     ctx: {
@@ -2024,19 +2010,16 @@ function evidenceFor(
   // 预检写下的水位就在评估侧读不到——静默退回"仍缺项"，整趟预检白做。
   const lenKey = sessionTargetKeyOf(session?.id, ctx.targetN);
   const delivered = preflightDelivered.get(lenKey) ?? NO_DELIVERY;
-  // 基线优先取**本会话**上次看到的 mtime；本会话没见过该文件时回落到全局值兜底
-  // （例：重启前另一会话评估过）。旧实现只有全局一份 → 谁先评估谁消费掉跳变信号。
-  const seenMtime = mtimeBySessionPath.get(lenKey) ?? mtimes.get(ctx.targetN);
-  lruPut(mtimes, ctx.targetN, mtimeMs);
-  lruPut(mtimeBySessionPath, lenKey, mtimeMs);
-  const external = seenMtime !== undefined && mtimeMs > seenMtime;
-  // 外部改动基准取**真实事件下标**（不是 evs.length）：用长度会让任何 read 都显得更早，
+  // ⚠ 取观测基线会**写下本次观测**：那只表示"这次看见了这一版"，不表示"这一版下的证据
+  // 已经作废或已补上"——后者是 staleBase 的事（见 lib/read-basis.ts 的文件头第 1、3 条）。
+  const observed = observeVersion(lenKey, ctx.targetN, mtimeMs);
+  const { mtimeJump } = observed;
+  // 外部改动的水位取**真实事件下标**（不是 evs.length）：用长度会让任何 read 都显得更早，
   // 从而在 mtime 跳变后死锁。这里用"本会话上次评估时的日志长度"当作那次改动的位置。
-  // 本会话没有历史位时保守取当前末尾：本轮判"需重读"，台账随即写入，重读后下一轮凭
-  // 更大下标通过——自愈，代价最多一次重读。**旧写法 ?? -1 是 fail-open**（完全漏判）。
-  const externalEditSeq = external ? (seenLenBySessionPath.get(lenKey) ?? ctx.logSeq) : -1;
+  // 本会话没有历史位时保守取当前末尾：本轮判"需重读"，重读后下一轮凭更大下标通过——
+  // 自愈，代价最多一次重读。**旧写法 ?? -1 是 fail-open**（完全漏判）。
+  const jumpSeq = seenLenBySessionPath.get(lenKey) ?? ctx.logSeq;
   lruPut(seenLenBySessionPath, lenKey, ctx.logSeq);
-
   // 波及面层（机械半轨）：fs 探测该文件所属包链上**实际存在**的层。
   // 不存在的层直接豁免——不必让模型去 grep 空目录自证"这里没有测试"。
   const projectRoot = projectRootOf(ctx.targetN, ctx.cwd);
@@ -2044,23 +2027,24 @@ function evidenceFor(
   const ledger = scanToolCalls(ctx, layers);
   const resolved = resolveResultLedger(ctx, ledger);
 
-  // 内容自证（归因：自己改的还是外部改动）。
-  //   a) 本会话那次成功编辑的**结果位**已不早于跳变位 → 可能是自己改的；
-  //   b) 那次写进去的文本此刻仍在文件里 → 确证是自己；不在了（或读不到内容）→
-  //      说明自己那份已被覆盖 → 判外部，方向保守。
-  let selfExplains = resolved.lastEditSeq >= externalEditSeq;
-  if (selfExplains && resolved.lastEditKey !== undefined) {
-    const written = ledger.editTexts.get(resolved.lastEditKey);
-    if (
-      written !== undefined &&
-      written.length > 0 &&
-      !selfWritesStillPresent(ctx.targetN, written)
-    ) {
-      selfExplains = false;
-    }
-  }
-  const externallyChanged = external && !selfExplains;
-  const staleBase = externallyChanged ? externalEditSeq : -1;
+  // 归因（"这一版是谁改的"）整条判据在 lib/read-basis.ts：内容自证只对**本轮** mtime 跳变
+  // 有效，已落定的失效点不因"我写过"而销账（它问的是"我读过没有"）。
+  const written =
+    resolved.lastEditKey === undefined ? undefined : ledger.editTexts.get(resolved.lastEditKey);
+  const selfTextPresent =
+    written === undefined || written.length === 0
+      ? undefined
+      : selfWritesStillPresent(ctx.targetN, written);
+  const { externallyChanged, staleBase } = attributeExternalChange({
+    lastEditSeq: resolved.lastEditSeq,
+    selfTextPresent,
+    mtimeJump,
+    pendingStaleBase: observed.staleBase,
+    jumpSeq,
+  });
+  // 观测到的版本与"这一版还欠不欠一次重读"写回**同一条记录**：下一次评估读的就是它，
+  // 淘汰与会话回收也按它整条走（见 lib/read-basis.ts 的文件头第 1 条）。
+  settleVersion(lenKey, mtimeMs, staleBase);
   // 新建豁免：目标**确凿不存在**（ENOENT）**且**本次调用有能力创建它（write/create）。
   // 两个条件都不能少：① 对已存在文件执行 write 是全量覆盖，恰恰最需要先 read（否则会
   // 无声清掉没看过的内容）；② presence 为 "unknown"（EACCES/ENOTDIR/ELOOP，或会话目录
@@ -2161,7 +2145,7 @@ function bashJudgeOf(
   name: string,
   args: Record<string, unknown>,
   opts: BashDangerOptions | undefined,
-  severityOf: (key: BashDenialKey) => "allow" | "ask" | "deny",
+  severityOf: (verdict: BashVerdict) => RuleVerdict,
 ): BashJudge {
   let denial: BashDenial | undefined;
   // 非 bash/pwsh 的调用在这一面没有判定发生 ⇒ 零长度样本（采样处据此不发）。
@@ -2344,13 +2328,12 @@ function evaluateFactGate(
   const target = editTargetPath(name, args) ?? undefined;
   let outcome: FactGateOutcome | undefined;
   if (target !== undefined) {
-    // 档位与缺项由同一条认定链现算（与预检两个触发点共用），这里只管状态机的收敛与配额。
+    // 状态键与证据键同源（归一化目标）；档位与缺项由同一条认定链现算。
     const { tier, input } = factEvidenceOf(readingsOf(rt), { name, args, target, session });
-    // maxDenies 取 settings 运行时值；numOf 保证非法/0 一律回落内置默认
-    // （0 会让"首拒即配额放行"，等于关掉事实门）。
+    // maxDenies 取 settings 运行时值；numOf 保证非法/0 回落内置默认（0 等于关掉事实门）。
     const decision = factGate.check(
       name,
-      target,
+      resolveTarget(target, rt.cwd),
       session?.id,
       input,
       numOf(cfg.maxDenies, DEFAULT_MAX_DENIES),
@@ -2594,9 +2577,11 @@ async function refScanOf(
   // 那层假定的一部分——远程后端下它要么探不到、要么探到的是**另一份**同名文件的时间。
   const version = await targetVersionOf(req.fs, targetN, signal, resolved);
   const cached = preflightScans.get(key);
-  // 判"命中"必须同时确认有条目：`undefined === undefined` 在版本位上是**会成立**的
-  // （目标缺席或探不到时两边都是 undefined），只看版本就会去读一枚不存在的缓存项。
-  if (cached !== undefined && cached.version === version) {
+  // 判"命中"必须同时确认三件事：条目在、**这一趟探到了版本**、且与缓存版本相同。
+  //  `undefined === undefined` 在版本位上是**会成立**的（目标缺席、后端拒绝、探针抛错时
+  //  两侧都是 undefined）——把"都不知道是哪一版"当成"版本没变"，就是让一份无法自证新旧的
+  //  扫描结果冒充可复用。探不到就重扫：代价是一次多余扫描，方向保守。
+  if (cached !== undefined && version !== undefined && cached.version === version) {
     return cached.scan;
   }
   // root 与 needles 都在**这一侧**算（理由见文件头那条 import 注释）。
@@ -2669,7 +2654,7 @@ const preflightArgsOf = (req: PreflightRequest): Record<string, unknown> =>
 const HANDED_NEEDS = new Set<FactNeed>(["read", "refs", "test", "e2e", "docs"]);
 
 /** 层类缺项（test/e2e/docs）：它们的证据**从引用面那一次扫描里派生**，不另花 I/O。 */
-const LAYER_NEEDS: readonly FactNeed[] = ["test", "e2e", "docs"];
+const LAYER_NEEDS: readonly LayerNeed[] = ["test", "e2e", "docs"];
 
 /** 这一趟的缺项是不是"预检当场给得出"的那一种：非空，且全落在 read/refs/三层里。
  *  空清单 = 门禁自己也会放行，一个字符都不必多给。
@@ -2699,11 +2684,11 @@ interface HandoffEvidence extends PreflightEvidence {
 
 /** 这次扫描是不是也用来答层缺项（refs 与层共用同一趟走树，层不再另花一次 I/O）。 */
 function needsScan(gaps: readonly FactGap[]): boolean {
-  return gaps.some((gap) => gap.need === "refs" || LAYER_NEEDS.includes(gap.need));
+  return gaps.some((gap) => gap.need === "refs" || LAYER_NEEDS.some((need) => need === gap.need));
 }
 
 /** 还缺哪几层（保持 `LAYER_NEEDS` 的顺序，写进文案与水位都按它）。 */
-const missingLayers = (gaps: readonly FactGap[]): FactNeed[] =>
+const missingLayers = (gaps: readonly FactGap[]): LayerNeed[] =>
   LAYER_NEEDS.filter((need) => gaps.some((gap) => gap.need === need));
 
 /** 起点内的层目录 → 相对起点的 POSIX 形（结果里的 `file` 用的就是这一形，比对才不用两边各 normalize）。 */
@@ -2725,11 +2710,11 @@ function layerConclusionsOf(
   req: PreflightRequest,
   targetN: string,
   scan: RefScan,
-  needs: readonly FactNeed[],
+  needs: readonly LayerNeed[],
 ): LayerFinding[] | undefined {
   const root = projectRootOf(targetN, req.cwd);
   const relByNeed = new Map(
-    existingLayersOf(targetN, root, extraTestDirsOf(req.cfg)).map((layer): [FactNeed, string] => [
+    existingLayersOf(targetN, root, extraTestDirsOf(req.cfg)).map((layer): [LayerNeed, string] => [
       layer.need,
       toPosixRelative(root, layer.dir),
     ]),
@@ -2742,11 +2727,19 @@ function layerConclusionsOf(
     if (rel === undefined || !scan.dirs.includes(rel)) {
       break;
     }
-    conclusions.push({
-      layer: need,
-      dir: rel,
-      hits: scan.findings.filter((finding) => underLayer(rel, finding.file)).length,
-    });
+    const hits = scan.findings.filter((finding) => underLayer(rel, finding.file)).length;
+    // 「这层零命中」是全称结论，只有**那棵子树真的读完**才成立：
+    //  · 遍历被预算截断时不成立——截断可能正好发生在这一层中间（`dirs` 只说明进去过，
+    //    没说明里面走完了；实测：test/ 里 300 个文件、引用者在末尾，扫描在 test/ 内部截断，
+    //    仍会报"test 内 0 处命中"并记进投递水位，门禁从此不再要求那一层）；
+    //  · 层里还有按规则没读的文件（超大 / 凭据面 / 读不动）时同样不成立。
+    // 找到了命中则不受这两条限制：实证本身不需要穷尽（与 refsCreditable 同一条理由），
+    // 而层结论的正文本来就把命中数列出来。
+    const exhaustive = scan.complete && !scan.unread.some((file) => underLayer(rel, file));
+    if (hits === 0 && !exhaustive) {
+      break;
+    }
+    conclusions.push({ layer: need, dir: rel, hits });
   }
   return conclusions.length === needs.length ? conclusions : undefined;
 }
@@ -2815,10 +2808,7 @@ async function handoffReasonOf(
     session: req.session,
   });
   let reason: string | undefined;
-  if (
-    handedOnly(input.gaps) &&
-    !req.gate.releasedFor(req.session.id, scope.target, input.fileEditSeq)
-  ) {
+  if (handedOnly(input.gaps) && !req.gate.releasedFor(req.session.id, scope.targetN, input)) {
     const evidence = await handoffEvidenceOf(req, input, scope, resolved);
     if (evidence !== undefined) {
       noteDelivery(sessionTargetKeyOf(req.session.id, scope.targetN), deliverySeqOf(req, input), {
@@ -2827,6 +2817,11 @@ async function handoffReasonOf(
         // 只有真被覆盖到的层才记投递：记早了等于替模型宣称"这层我探过了"。
         layers: evidence.layers.map((layer) => layer.layer),
       });
+      // 正文确实随这次拒绝交出去了 ⇒ 那枚"还没看过这一版"的失效点到此为止。
+      // 不能靠投递位次判：水位与失效点取的是同一个下标（见 lib/read-basis.ts 的 clearStaleness）。
+      if (evidence.creditRead) {
+        clearStaleness(sessionTargetKeyOf(req.session.id, scope.targetN));
+      }
       reason = renderHandoff(req.messages, scope.targetN, evidence);
     }
   }
@@ -2933,7 +2928,7 @@ async function attachRefsOnRead(req: PreflightRequest): Promise<UserMessage | un
 /** 预检两面共用的一条告警：整趟被兜底 catch 吞掉时出声。预检失败必须退化成"今天的拒绝
  *  路径"，绝不能变成"这次编辑没了"；当然也不能静默——所以留一条日志（模板进
  *  test/log-templates.ts 的清单，文案漂了就红）。 */
-const PREFLIGHT_WARN = "[danger-guard] 预检失败，本轮退回拒绝路径:";
+const PREFLIGHT_WARN = "[danger-guard] 预检失败，本轮不递证据、交回下游决定:";
 
 /** 预检运行面的装配口（两个监听器共用一位入参，见下面那两枚监听器体的签名）。 */
 type PreflightRequestOf = (exec: PreExecuteParams[0]) => PreflightRequest | undefined;
@@ -3017,7 +3012,11 @@ async function preflightOnPostExecute(
   result: PostExecuteResult,
   next: PostflightNext,
   reqOf: PreflightRequestOf,
+  settleRead: SettleReadObservation,
 ): Promise<PostDecision> {
+  // 读取基线的结算**先于**一切：它是证据链的前提，而下面的附加会因为"预检没装 fs"整趟跳过
+  // （reqOf 返回 undefined）——用 req 当守卫会让基线在那些 profile 上永不提交。
+  settleRead(exec, result.isError);
   // oxlint-disable-next-line node/callback-return -- 同 pre-execute 那一处：next() 的结果要和本次附加合并，不能直接交回
   const downstream: PostDecision = await next();
   const req = result.isError ? undefined : reqOf(exec);
@@ -3038,13 +3037,37 @@ function wirePreflightListeners(
   svc: HostCtx,
   reqOf: PreflightRequestOf,
   confirmOf: ConfirmOf,
+  settleRead: SettleReadObservation,
 ): void {
   svc.on?.("tools/pre-execute", (exec, next) =>
     preflightOnPreExecute(exec, next, reqOf, confirmOf),
   );
   svc.on?.("tools/post-execute", (exec, result, next) =>
-    preflightOnPostExecute(exec, result, next, reqOf),
+    preflightOnPostExecute(exec, result, next, reqOf, settleRead),
   );
+}
+
+/** read/view 读时基线的结算口：`tools/post-execute` 拿到**真实成败**之后才调。
+ *  与预检的请求工厂分开装：后者在"没有会话 / 没有 fs"时整趟不装配，而这件结算不依赖 fs
+ *  （只用执行面自己的参数与 agent 会话），那两样缺席时照样必须做——否则在没装 fs 后端的
+ *  profile 上，读取基线永远停在暂存态，等于把"首次评估盲区"那一条又放回来。 */
+type SettleReadObservation = (exec: PreExecuteParams[0], isError: boolean) => void;
+
+/** 造一枚结算口（值面每趟现读，与其余工厂同一条纪律：`apply` 不持有状态）。 */
+function readObservationSettler(svc: HostCtx): SettleReadObservation {
+  return (exec, isError) => {
+    const agentRaw: unknown = exec.agent;
+    const session = isPreflightAgent(agentRaw) ? agentRaw.session : undefined;
+    const args = isRecord(exec.arguments) ? exec.arguments : {};
+    const target = callPathOf(exec.name, args);
+    if (target === undefined) {
+      return;
+    }
+    // cwd 与 guard 时点那次（recordReadObservation）**必须同源**：两处各自现取时，中间夹
+    // 一次 `cd` 就会把提交写到另一个键上，暂存永远配不上（见 effectiveCwdOf 的注释）。
+    const cwd = effectiveCwdOf(svc, session);
+    settleReadOf(session, target, cwd, isError);
+  };
 }
 
 /**
@@ -3092,7 +3115,7 @@ function denyFromPolicy(input: PolicyDenyInput): string {
   noteRuleHit(key, "deny");
   const deny = policyDenyText({ key, fix, facts, messages });
   reportDeny(reportContextOf(wiring, exec), {
-    category: "dangerous-bash",
+    category: DANGEROUS_BASH_CATEGORY,
     // 签名**一律**用命令原文：类别级归并在 lesson-loop 侧完成（`CATEGORY_SIGNATURES`
     // 把 `dangerous-bash` 折成一个稳定键），原文因此落进 `evidence.signature`，不再被
     // 常量吃掉——那张卡里人审时要看得见是哪条命令。
@@ -3126,27 +3149,39 @@ function confirmFactory(
   wiring: GuardWiring,
   messages: () => DangerGuardMessages,
   deduper: AskDeduper,
+  dispositionFactory: DispositionFactory,
 ): ConfirmOf {
   return async (exec) => {
     const cfg = settingsConfig(svc);
     const args = isRecord(exec.arguments) ? exec.arguments : undefined;
     const table = messages();
     // 档位事实每趟现读（用户随时能换预设）：`confirm` 只在这些档位上被问到，
-    // 而"这一档还能不能问"由 `lib/mode-policy.ts` 的 `askable` 位决定，
-    // 于是 guard 与这里天然读同一份事实、同一张表。
+    // 而"这一档还能不能问"由 `lib/mode-policy.ts` 的 `askable` 位决定。
     const facts = policyFactsOf(svc, exec.agent?.session, false);
+    const cwd = effectiveCwdOf(svc, exec.agent?.session);
+    // 覆盖后的 `rmrf` 可能从 `deny` 降成 `allow`；扫描与过滤必须吃**同一份**实际处置，
+    // 否则这里会选出一枚 `deny` 键而不问，guard 随后又把它放行，后段没人看。guard 那一侧
+    // 用同一个工厂、同一组服务面与同一条 `effectiveCwdOf` 口径，所以两处结论一致。
+    const effective = dispositionFactory(exec.agent?.session, cwd, facts);
     const ask = cfg.enabled
-      ? askRequestOf(exec.name, args, bashOptsOf(cfg), facts, table)
+      ? askRequestOf(
+          exec.name,
+          args,
+          { ...bashOptsOf(cfg), severityOf: effective.dispositionOf },
+          facts,
+          table,
+        )
       : undefined;
-    // 同一会话 + 同一规则键 + 同一命令原文只问一次：模型重试同一串是常态，
-    // 而重复弹一张一模一样的卡没有信息增量（被去重的那次只记统计，不改变判定）。
+    // 同一会话 + 同一规则键 + 同一命令原文只**上报**一次：模型重试同一串是常态，
+    // 而重复把同一份证据塞进教训总线只会把卡炸成碎片（被去重的那次只记统计，不改变判定）。
     const fresh =
-      ask !== undefined && deduper.first(exec.agent?.session.id, dedupKeyOf(ask.key, ask.command));
+      ask !== undefined &&
+      deduper.shouldReport(exec.agent?.session.id, dedupKeyOf(ask.key, ask.command));
     if (ask !== undefined) {
       if (fresh) {
         noteRuleHit(ask.key, "ask");
         reportDeny(reportContextOf(wiring, exec), {
-          category: "dangerous-bash",
+          category: DANGEROUS_BASH_CATEGORY,
           // 签名用**被判定的那条命令原文**（`lib/confirm.ts` 与规则键一起交回的同一份输入）：
           // 再从参数里读一遍就是第二处读法，"判的是这串、报的是另一串"没有任何运行期信号。
           // 与 guard 那条路同口径：类别级归并在 lesson-loop 侧完成。
@@ -3167,15 +3202,15 @@ function confirmFactory(
             shellRaw: svc.get?.("shell"),
             policyRaw: svc.get?.("sandboxPolicy"),
             command: BLAST_COMMANDS[ask.key],
-            cwd: effectiveCwdOf(svc, exec.agent?.session),
+            sourceCommand: ask.command,
+            cwd,
             session: exec.agent?.session,
             signal: preflightSignalOf(exec.signal),
-            messages: table,
           });
     // 翻成官方那一臂：`lib/confirm.ts` 交的是宿主无关形态（它不 import 官方决定类型）。
     // 去重只压掉**重复上报**（教训卡不会为同一条命令炸成碎片）；判定与证据一个字不改 ——
-    // 宿主该问的仍然问，`.first()` 换来的"少打扰"不能变成偷偷放行或偷偷撤掉证据。
-    return ask === undefined ? undefined : { kind: "ask", ...withBlast(ask, blast) };
+    // 宿主该问的仍然问，`.shouldReport()` 换来的"少上报"不能变成偷偷放行或偷偷撤掉证据。
+    return ask === undefined ? undefined : { kind: "ask", ...withBlast(ask, blast, table) };
   };
 }
 
@@ -3309,7 +3344,7 @@ function wireReadFaces(
   // 同用官方 session/disposed）。幂等：同一 session id 重复 dispose 由 delete 天然幂等。
   svc.on?.("session/disposed", (sessionRaw) => {
     factGate.dropSession(sessionRaw.id);
-    // 去重表按会话分片，键形与 `first(exec.agent?.session.id, …)` 同源。
+    // 去重表按会话分片，键形与 `shouldReport(exec.agent?.session.id, …)` 同源。
     askDeduper.drop(stringIdOf(sessionRaw.id));
     dropSessionLedgers(stringIdOf(sessionRaw.id));
   });
@@ -3404,8 +3439,16 @@ export function apply(ctx: Context): void {
   // ⚠ 它要在**预检/需确认接线之前**定义：需确认那一档也要进教训总线（见 confirmFactory）。
   const wiring: GuardWiring = { svc, gate: factGate };
 
-  const confirmOf = confirmFactory(svc, wiring, localeMessages, askDeduper);
-  wirePreflightListeners(svc, preflightReqOf, confirmOf);
+  // 逐命中实际处置的宿主面：guard 与审批通道共用同一份工厂（见 lib/effective-disposition.ts）。
+  const dispositionFactory = effectiveDispositionFactory({
+    shellRaw: () => svc.get?.("shell"),
+    policyRaw: () => svc.get?.("sandboxPolicy"),
+    canonicalize: (absolute: string) => realpathOf(absolute, undefined),
+    tempDir: os.tmpdir(),
+  });
+
+  const confirmOf = confirmFactory(svc, wiring, localeMessages, askDeduper, dispositionFactory);
+  wirePreflightListeners(svc, preflightReqOf, confirmOf, readObservationSettler(svc));
 
   // 谓词入参显式标注成本包的读取投影 `GuardExecution`（= 官方 ToolExecution 的 name/arguments
   // + SessionLogFace 会话面）：官方 `ToolGuard` 交出的是 `Readonly<ToolExecution>`，而
@@ -3452,9 +3495,11 @@ export function apply(ctx: Context): void {
       // 体在下钻时强制开 Windows 轨道，`-File`/`-EncodedCommand` 归"看不见"→ 需确认。
       // 以及 pwsh 在 POSIX 宿主上真去删一个叫 `C:\Windows` 的相对目录
       // 这种罕见写法（方言带来的过拦，代价已写在 danger-rules 的 shellDialect 注释里）。
-      // 档位事实先算：扫描层按它排序，否则串行命令里"本档已放行的前段"会吞掉"仍要拦的后段"。
+      // 档位事实与逐命中实际处置先算：扫描层按后者排序，否则串行命令里"本档已放行的前段"
+      // 会吞掉"仍要拦的后段"；沙箱覆盖的 rmrf 尤其如此（排序时 deny、处置时 allow）。
       const facts = policyFactsOf(svc, exec.agent?.session, false);
-      const judge = bashJudgeOf(name, args, bashOpts, severityResolverOf(facts));
+      const effective = dispositionFactory(exec.agent?.session, rt.cwd, facts);
+      const judge = bashJudgeOf(name, args, bashOpts, effective.dispositionOf);
       const sample = (cost: JudgeCost): void => {
         sampleJudge(
           () => reportContextOf(wiring, exec),
@@ -3473,30 +3518,23 @@ export function apply(ctx: Context): void {
         //    与取证记账（callPathOf）同一个键形；上报签名用类别级稳定键（目标路径改放 evidence）。
         deny = secret.reason ?? factGateDenyOf(wiring, exec, rt, name, args);
       } else {
-        // 处置由**档位表**给（`lib/mode-policy.ts`）：同一枚规则键在不同权限预设下结论不同，
-        // 而 `ask` 档由 `tools/pre-execute` 的审批通道收口 —— 两条路读**同一张表**，
-        // 所以一枚键只可能被一处收口（双重收口 = 用户点了允许还是被拒）。
+        // 处置由**档位表**与**逐命中实际处置**共同给（`lib/mode-policy.ts` + 沙箱覆盖）：
+        // 同一枚规则键在不同权限预设下结论不同，而 `ask` 档由 `tools/pre-execute` 的审批
+        // 通道收口 —— 两条路用同一个工厂、同一份实际处置规则，所以同一枚命中不会在两处得到
+        // 不同结论，也不会被"排序时 deny、处置时 allow"的空档吞掉。
         const { command, key, fix } = bashDenial;
-        const covered = sandboxCoveredFacts(
-          facts,
-          key,
-          fix,
-          sandboxScopeOf(
-            svc.get?.("shell"),
-            svc.get?.("sandboxPolicy"),
-            exec.agent?.session,
-            (absolute: string) => realpathOf(absolute, undefined),
-            os.tmpdir(),
-          ),
-          cwdAsOsPath(rt.cwd),
-        );
+        const covered = effective.coveredFactsOf(key, fix);
         // 三档收口：allow 只记读数（沙箱让路不算"放过"——那是交给宿主拦），
         // deny 交给下面的工厂出文案与上报，ask 什么都不做。
-        if (decideRule(covered, key) === "allow") {
+        const verdict = decideRule(covered, key);
+        if (verdict === "allow") {
+          // 沙箱让路那格交给宿主收口，不计入"本档放过了什么"，也不算规则被遵守。
           if (!(key === "rmrf" && covered.sandboxCovers)) {
             noteAllowedHit(key, facts.mode);
+            // 放行也是「规则被遵守」：这张 armed 卡唯一能拿到 suppressed 的来源。
+            reportPass(reportContextOf(wiring, exec), DANGEROUS_BASH_CATEGORY, command, judge.cost);
           }
-        } else if (decideRule(covered, key) === "deny") {
+        } else if (verdict === "deny") {
           deny = denyFromPolicy({
             wiring,
             exec,

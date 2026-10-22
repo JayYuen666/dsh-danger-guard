@@ -86,10 +86,10 @@ export interface DangerGuardMessages {
   readonly kubectlDelete: string;
   /** 数据库迁移命令。 */
   readonly dbMigrate: string;
-  // ── 爆炸半径预演（`ask` 档专属：把"这一步会改动什么"量给用户看）─────────────────
-  /** 预演块头（槽位 command/body）。 */
+  // ── 爆炸半径预演（`ask` 档专属：把操作前的可确定状态量给用户看）──────────────────
+  /** 预演块头（槽位 command/body）。文案要把探针定位成**操作前状态**，不是完整影响清单。 */
   readonly blastHead: string;
-  /** 预演零输出 —— 那是"此刻没有待丢的东西"这条结论，不是"什么都没查到"（槽位 command）。 */
+  /** 预演零输出：只说明探针没打印，**不能**证明原操作不会改动任何东西（槽位 command）。 */
   readonly blastEmpty: string;
   /** 预演输出被上限收紧（槽位 chars/lines）。 */
   readonly blastClip: string;
@@ -108,10 +108,16 @@ export interface DangerGuardMessages {
   readonly headNewFile: string;
   /** 首次拒绝的头部。 */
   readonly headFirst: string;
-  /** 已确认项清单行（槽位 done）。 */
   /** 配额被扣下时多一行（缺项里还有 `read`：配额只免上层探查，read 不在豁免内）。 */
   readonly quotaWithheld: string;
+  /** 已确认项清单行（槽位 done）。 */
   readonly confirmedLine: string;
+  /** 已确认项的可读名（`need` 内部键 → 当前语言）。 */
+  readonly needLabelRead: string;
+  readonly needLabelRefs: string;
+  readonly needLabelTest: string;
+  readonly needLabelE2e: string;
+  readonly needLabelDocs: string;
   /** 已确认项与检索工具名清单的连接号。 */
   readonly listSeparator: string;
   /** 多条探查口径子句的连接号。 */
@@ -216,8 +222,9 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "命令里其余目标是安全的，不必跟着改。",
     gitResetHard:
       "[danger-guard] `git reset --hard` 会丢弃工作区与索引里**所有未提交的改动**" +
-      "（未跟踪文件不动），且不可撤销。先 `git stash push -u` 把改动收起来（之后 " +
-      "`git stash pop` 拿回来）再重置；确实要重来时请用户确认，审批通过即执行。",
+      "（未跟踪文件不动），且不可撤销；带 `<ref>` 时还会把当前分支移到该提交、工作区随之回退。" +
+      "先 `git stash push -u` 把改动收起来（之后 `git stash pop` 拿回来）再重置；" +
+      "确实要重来时请用户确认，审批通过即执行。",
     gitCheckoutDiscard:
       "[danger-guard] 这条 `git checkout` 会**丢弃** `--` 之后那些路径的未提交改动。" +
       "先 `git diff <path>` 看清要丢的是什么，或 `git stash push <path>` 存一份再丢；" +
@@ -263,9 +270,10 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "先跑各工具自己的干跑看清将执行的语句：`manage.py migrate --plan`、" +
       "`prisma migrate diff`、`alembic upgrade --sql`、`flyway migrate` 前先 `flyway info`；" +
       "确认前先备份；或请用户确认。",
-    blastHead: "[预演] `{command}`（只读）：\n{body}",
+    blastHead: "[预演] 操作前状态参考 `{command}`（只读）：\n{body}",
     blastEmpty:
-      "[预演] `{command}` 没有任何输出 —— **这一步此刻不会改动任何东西**（工作区本来就是干净的）。",
+      "[预演] `{command}` 没有任何输出 —— 这只说明这条检查命令此刻没有可打印的内容，" +
+      "**不能证明原操作不会改动任何东西**。请结合原命令判断。",
     blastClip: "（输出已按上限收紧到 {lines} 行 / {chars} 字符）",
     noVerify:
       "[danger-guard] 检测到 git 钩子绕过（--no-verify 及其缩写 -n / core.hooksPath 重定向）。" +
@@ -312,6 +320,11 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
     quotaWithheld:
       "· 注意：配额放行只免**上层探查**（引用面与各层），read 不在豁免内——先读过目标原文再重试即可（读一次就够）。",
     confirmedLine: "✓ 已确认：{done}",
+    needLabelRead: "read",
+    needLabelRefs: "引用探查",
+    needLabelTest: "test 层",
+    needLabelE2e: "e2e 层",
+    needLabelDocs: "文档层",
     listSeparator: "、",
     clauseSeparator: "；",
     hintWrap: "（{hint}）",
@@ -409,9 +422,10 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "and need no change.",
     gitResetHard:
       "[danger-guard] `git reset --hard` discards **every uncommitted change** in the working " +
-      "tree and the index (untracked files stay), and it cannot be undone. Stash first " +
-      "(`git stash push -u`, recover with `git stash pop`) and then reset; when the reset really " +
-      "is wanted, ask the user — approval runs it.",
+      "tree and the index (untracked files stay), and it cannot be undone; with `<ref>` it also " +
+      "moves the current branch to that commit and rolls the working tree back with it. Stash " +
+      "first (`git stash push -u`, recover with `git stash pop`) and then reset; when the reset " +
+      "really is wanted, ask the user — approval runs it.",
     gitCheckoutDiscard:
       "[danger-guard] This `git checkout` **discards** the uncommitted changes of the paths after " +
       "`--`. Look first with `git diff <path>`, or keep a copy with `git stash push <path>`; " +
@@ -461,10 +475,11 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "the statements first: `manage.py migrate --plan`, `prisma migrate diff`, " +
       "`alembic upgrade --sql`, `flyway info` before `flyway migrate`. Back up before " +
       "confirming, or ask the user.",
-    blastHead: "[rehearsal] `{command}` (read-only):\n{body}",
+    blastHead: "[rehearsal] Pre-operation state reference `{command}` (read-only):\n{body}",
     blastEmpty:
-      "[rehearsal] `{command}` printed nothing — **this step changes nothing right now** (the " +
-      "working tree is already clean).",
+      "[rehearsal] `{command}` printed nothing — this only means the probe had nothing to print " +
+      "right now; **it does not prove the original action changes nothing**. Judge it against " +
+      "the original command.",
     blastClip: "(output clipped to the {lines}-line / {chars}-character cap)",
     noVerify:
       "[danger-guard] Git hook bypass detected (--no-verify, its abbreviations, or a " +
@@ -527,6 +542,11 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
     quotaWithheld:
       "· Note: the release quota only waives the **higher probes** (references and each layer); read is never waived - read the target once, then retry.",
     confirmedLine: "✓ confirmed: {done}",
+    needLabelRead: "read",
+    needLabelRefs: "references",
+    needLabelTest: "test layer",
+    needLabelE2e: "e2e layer",
+    needLabelDocs: "docs layer",
     listSeparator: ", ",
     clauseSeparator: "; ",
     hintWrap: " ({hint})",

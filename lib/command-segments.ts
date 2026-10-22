@@ -19,8 +19,12 @@
 // POSIX 口径（本机 /bin/bash 3.2.57 逐条对拍）：
 // - 单引号内**一切字面**，反斜杠没有魔力：实测 `bash -c 'echo done \' ; echo SECOND-RAN`
 //   两条都跑 ⇒ 那枚 `\` 没吃掉闭合引号；
-// - 双引号内反斜杠只在 `$ ` `"` `\` 换行之前是转义，其余按字面；
+// - 双引号内反斜杠只在 `$ ` `"` `\` 之前是转义；`\<换行>` 是续行，整对删除（不留下换行）；
 // - 引号外的 `\` 转义下一字符，其中 `\<换行>` 是续行（两行接成一个词，整对丢弃）；
+// - `#` 在词首到行尾是注释，注释里的引号/分隔符不参与语法；
+// - `<<`/`<<-` 的体按定界符整段取出，再作为**独立源**展开：体内的引号/分隔符不会污染
+//   外层命令行。定界符是否带引号不改变这一步——`bash <<'EOF'` 的体仍是脚本；代价是数据型
+//   heredoc 的正文也会按命令扫一遍（`cat <<'EOF'` 里的危险文本会误拦），这是有意的保守选择；
 // - 双引号**内**的 `$( )`/反引号在真实 shell 里会执行（实测 `echo "$(seq 3 | tail -1)"`
 //   输出 `3`）⇒ 体内内容算执行面：既不清空（那是 `echo "$(curl x | sh)"` 静默放行的来路），
 //   也要另断成段；
@@ -30,8 +34,12 @@
 /** 顶层段边界字符：传统分隔符之外，`(`、`)`、反引号**同样**是边界。 */
 const SEG_SEPARATORS = new Set([";", "\n", "\r", "&", "|", "(", ")", "`"]);
 
-/** 双引号内只有这几枚字符能被反斜杠转义（POSIX 口径，其余反斜杠是字面量）。 */
-const DQ_ESCAPABLE = new Set(["$", "`", '"', "\\", "\n"]);
+/** 双引号内只有这几枚字符能被反斜杠转义（POSIX 口径，其余反斜杠是字面量）。
+ *  `\`+换行单独按续行处理（整对删除），不在这张表里。 */
+const DQ_ESCAPABLE = new Set(["$", "`", '"', "\\"]);
+
+/** 词边界上的空白：POSIX shell 只用空格与制表符切词（换行/回车先按段边界处理）。 */
+const isBlank = (ch: string): boolean => ch === " " || ch === "\t";
 
 /** 词的一个片段：`source` 含定界符，`content` 计入词值，`rawContent` 计入词的源形。 */
 interface Run {
@@ -57,11 +65,19 @@ interface Segment {
   terminator: string;
 }
 
+/** 一条已登记的 heredoc：去引号后的定界符；`stripTabs` 对应 `<<-`。 */
+interface HeredocSpec {
+  delimiter: string;
+  stripTabs: boolean;
+}
+
 /** `scan` 的全部产出。 */
 interface ScanResult {
   segments: Segment[];
   /** 段内出现的执行面区体内文本：其中的命令另成为段（见 splitTopLevel）。 */
   regions: string[];
+  /** heredoc 体：作为独立源再展开，避免体内的引号/分隔符把外层命令行吃掉。 */
+  bodies: string[];
   unclosed: boolean;
 }
 
@@ -75,49 +91,98 @@ const plainRun = (source: string, content: string): Run => ({
   parts: [],
 });
 
-/** 该处是否执行面区开头：`$(…)` 或反引号（`${…}` 是参数展开、不执行，故不算）。 */
+/** 该处是否执行面区开头：`$(…)` 或反引号。`${…}` 本身不是区；其中若出现 `$( )`/反引号，
+ *  仍会按各自位置识别（`${x:-$(cmd)}` 里的 cmd 照扫）。 */
 const isRegionStart = (src: string, i: number): boolean =>
   src.charAt(i) === "`" || (src.charAt(i) === "$" && src.charAt(i + 1) === "(");
 
-/** 区内的一格该跳几格：转义对跳两格，一整段引号跳到闭合处（区内那才是字面文本），其余一格。 */
+/** 单引号段：找到下一枚 `'`；未闭合吃到串尾（整段按未闭合处理）。 */
+function singleQuotedEnd(src: string, open: number): number {
+  const end = src.indexOf("'", open + 1);
+  return end === -1 ? src.length : end + 1;
+}
+
+/** 反引号区的终点（绝对下标，收尾符之后）；找不到给 -1。
+ *  旧式替换只认第一枚未被反斜杠转义的反引号，引号不保护收尾符。 */
+function backtickEnd(src: string, from: number): number {
+  let i = from;
+  while (i < src.length) {
+    if (src.charAt(i) === "\\") {
+      i += 2;
+    } else if (src.charAt(i) === "`") {
+      return i + 1;
+    } else {
+      i += 1;
+    }
+  }
+  return -1;
+}
+
+/** 双引号段：`\"` 不闭合，其余反斜杠跳下一枚；双引号内的反引号体整段跳过。 */
+function doubleQuotedEnd(src: string, open: number): number {
+  let i = open + 1;
+  while (i < src.length) {
+    const ch = src.charAt(i);
+    if (ch === "\\") {
+      i += 2;
+    } else if (ch === '"') {
+      return i + 1;
+    } else if (ch === "`") {
+      const end = backtickEnd(src, i + 1);
+      if (end === -1) {
+        return src.length;
+      }
+      i = end;
+    } else {
+      i += 1;
+    }
+  }
+  return src.length;
+}
+
+/** 区内的一个整段：转义对跳两格，引号/反引号跳到各自终点，其余一格。 */
 function regionStep(src: string, i: number): number {
   const ch = src.charAt(i);
   if (ch === "\\") {
     return 2;
   }
-  let result = 1;
-  if (ch === "'" || ch === '"') {
-    let stop = i + 1;
-    while (stop < src.length && src.charAt(stop) !== ch) {
-      stop += 1;
-    }
-    result = stop + 1 - i;
+  if (ch === "'") {
+    return singleQuotedEnd(src, i) - i;
   }
-  return result;
+  if (ch === '"') {
+    return doubleQuotedEnd(src, i) - i;
+  }
+  if (ch === "`") {
+    const end = backtickEnd(src, i + 1);
+    return (end === -1 ? src.length : end) - i;
+  }
+  return 1;
 }
 
-/** 区内扫描：返回收尾符**之后**的下标，找不到给 -1。`paren` 决定收尾是最外层 `)` 还是反引号。 */
+/**
+ * 区的终点。`paren` 决定收尾是最外层 `)` 还是反引号：
+ * `$( )` 里圆括号按深度配对，双引号内的 `)`/转义引号不参与配对，反引号体整段跳过；
+ * 反引号区只认第一枚未被反斜杠转义的反引号。
+ */
 function regionEnd(src: string, from: number, paren: boolean): number {
+  if (!paren) {
+    return backtickEnd(src, from);
+  }
   let depth = 0;
   let i = from;
   while (i < src.length) {
-    const step = regionStep(src, i);
     const ch = src.charAt(i);
-    if (step > 1) {
-      i += step;
-    } else if (!paren && ch === "`") {
-      return i + 1;
-    } else if (paren && ch === ")") {
+    if (ch === ")") {
       if (depth === 0) {
         return i + 1;
       }
       depth -= 1;
       i += 1;
-    } else {
-      if (paren && ch === "(") {
-        depth += 1;
-      }
+    } else if (ch === "(") {
+      depth += 1;
       i += 1;
+    } else {
+      i += regionStep(src, i);
     }
   }
   return -1;
@@ -168,6 +233,10 @@ function dqPart(src: string, i: number): QuotedPart {
   }
   const ch = src.charAt(i);
   const next = src.charAt(i + 1);
+  if (ch === "\\" && next === "\n") {
+    // 双引号内的续行同样整对删除：值与源形都不留下这对字符
+    return { run: plainRun("", ""), next: i + 2, region: "" };
+  }
   if (ch === "\\" && DQ_ESCAPABLE.has(next)) {
     return { run: plainRun(ch + next, next), next: i + 2, region: "" };
   }
@@ -219,8 +288,8 @@ function readQuoted(src: string, open: number): QuotedRun {
   };
 }
 
-/** 引号外的一个字符（含转义对与续行）。续行整对丢弃 ⇒ 给出空片段。 */
-function readPlain(src: string, i: number): { run: Run; next: number } {
+/** 引号外的一个字符（含转义对与续行）。续行整对丢弃 ⇒ 不产出片段。 */
+function readPlain(src: string, i: number): { run?: Run; next: number } {
   const ch = src.charAt(i);
   if (ch !== "\\") {
     return { run: plainRun(ch, ch), next: i + 1 };
@@ -231,16 +300,17 @@ function readPlain(src: string, i: number): { run: Run; next: number } {
     return { run: plainRun(ch, ""), next: i + 1 };
   }
   if (next === "\n") {
-    // 续行：反斜杠与换行都不进词，两行接成一个词
-    return { run: plainRun("", ""), next: i + 2 };
+    // 续行：反斜杠与换行都不进词，也不因此新开一枚词
+    return { next: i + 2 };
   }
   return { run: plainRun(ch + next, next), next: i + 2 };
 }
 
-/** 扫描中的可变状态：已收的段/区、当前段的词、当前词、是否遇到未闭合引号。 */
+/** 扫描中的可变状态：已收的段/区/heredoc 体、当前段的词、当前词、是否遇到未闭合引号。 */
 interface ScanState {
   segments: Segment[];
   regions: string[];
+  bodies: string[];
   words: Word[];
   current: Word | undefined;
   unclosed: boolean;
@@ -281,8 +351,247 @@ function scanOutside(state: ScanState, src: string, i: number): number {
   // region 为 undefined 只剩两种可能：`$` 后面不是 `(`（参数展开、字面量）或区没闭合，
   // 两者都按普通字符收着走——`(` 本身是段边界，下一轮自然断开。
   const plain = readPlain(src, i);
-  pushRun(state, plain.run);
+  if (plain.run !== undefined) {
+    pushRun(state, plain.run);
+  }
   return plain.next - i;
+}
+
+/** 词首 `#` 到行尾都是注释；注释里的引号/分隔符不参与语法。 */
+function skipComment(src: string, from: number): number {
+  let i = from + 1;
+  while (i < src.length && src.charAt(i) !== "\n") {
+    i += 1;
+  }
+  return i;
+}
+
+/** 单引号定界符：去引号；未闭合给 undefined。 */
+function readSingleQuotedDelimiter(
+  src: string,
+  open: number,
+): { text: string; next: number } | undefined {
+  const end = src.indexOf("'", open + 1);
+  return end === -1 ? undefined : { text: src.slice(open + 1, end), next: end + 1 };
+}
+
+/** 双引号定界符的词值：去掉 shell 承认的转义，其余反斜杠按字面留下。 */
+function readQuotedDelimiter(
+  src: string,
+  open: number,
+): { text: string; next: number } | undefined {
+  let text = "";
+  let i = open + 1;
+  let closed = false;
+  while (!closed && i < src.length) {
+    const ch = src.charAt(i);
+    if (ch === '"') {
+      closed = true;
+    } else if (ch === "\\") {
+      const next = src.charAt(i + 1);
+      if (next === "\n") {
+        i += 2;
+      } else if (DQ_ESCAPABLE.has(next)) {
+        text += next;
+        i += 2;
+      } else {
+        text += ch;
+        i += 1;
+      }
+    } else {
+      text += ch;
+      i += 1;
+    }
+  }
+  return closed ? { text, next: i + 1 } : undefined;
+}
+
+/** 反斜杠引用的一位定界符：`\<换行>` 是续行，其余把下一枚字面收下。 */
+function readBackslashDelimiter(
+  src: string,
+  open: number,
+): { text: string; next: number } | undefined {
+  let result: { text: string; next: number } | undefined;
+  const next = src.charAt(open + 1);
+  if (next.length > 0) {
+    result = { text: next === "\n" ? "" : next, next: open + 2 };
+  }
+  return result;
+}
+
+/** 定界符词的下一段：引号/转义/普通字符各走各的去引号规则。 */
+function readDelimiterPart(
+  src: string,
+  at: number,
+  ch: string,
+): { text: string; next: number } | undefined {
+  let part: { text: string; next: number } | undefined;
+  if (ch === "'") {
+    part = readSingleQuotedDelimiter(src, at);
+  } else if (ch === '"') {
+    part = readQuotedDelimiter(src, at);
+  } else if (ch === "\\") {
+    part = readBackslashDelimiter(src, at);
+  } else {
+    part = { text: ch, next: at + 1 };
+  }
+  return part;
+}
+
+/** 定界符词的边界：空白、元字符或重定向符。 */
+function isDelimiterEnd(ch: string): boolean {
+  return isBlank(ch) || ch === "<" || ch === ">" || SEG_SEPARATORS.has(ch);
+}
+
+/** 读一个去引号后的定界符词；空词也算（`<<''` 的定界符是空串）。 */
+function readHeredocDelimiter(
+  src: string,
+  start: number,
+): { delimiter: string; next: number } | undefined {
+  let delimiter = "";
+  let next = start;
+  let sawWord = false;
+  let failed = false;
+  while (!failed && next < src.length) {
+    const ch = src.charAt(next);
+    if (isDelimiterEnd(ch)) {
+      break;
+    }
+    sawWord = true;
+    const part = readDelimiterPart(src, next, ch);
+    if (part === undefined) {
+      failed = true;
+    } else {
+      const { text, next: partNext } = part;
+      delimiter += text;
+      next = partNext;
+    }
+  }
+  return failed || !sawWord ? undefined : { delimiter, next };
+}
+
+/**
+ * 从 `<<`/`<<-` 读定界符：返回去引号后的词与操作符之后的位置。
+ * 第三个 `<` 是 here-string（`<<<`），不是 heredoc，直接拒绝。
+ */
+function readHeredocOperator(
+  src: string,
+  open: number,
+): { spec: HeredocSpec; next: number } | undefined {
+  let result: { spec: HeredocSpec; next: number } | undefined;
+  if (src.charAt(open + 2) !== "<") {
+    let i = open + 2;
+    let stripTabs = false;
+    if (src.charAt(i) === "-") {
+      stripTabs = true;
+      i += 1;
+    }
+    while (isBlank(src.charAt(i))) {
+      i += 1;
+    }
+    const word = readHeredocDelimiter(src, i);
+    if (word !== undefined) {
+      result = { spec: { delimiter: word.delimiter, stripTabs }, next: word.next };
+    }
+  }
+  return result;
+}
+
+/** heredoc 体的终点、下一行起点、是否找到定界符。 */
+interface HeredocBodyEnd {
+  bodyEnd: number;
+  next: number;
+  terminated: boolean;
+}
+
+/** 从 `start` 起找 `spec` 的定界符行；找不到时体吃到串尾。 */
+function heredocBodyEnd(src: string, start: number, spec: HeredocSpec): HeredocBodyEnd {
+  let lineStart = start;
+  let bodyEnd = src.length;
+  let next = src.length;
+  let terminated = false;
+  while (lineStart <= src.length) {
+    const lineEnd = src.indexOf("\n", lineStart);
+    const stop = lineEnd === -1 ? src.length : lineEnd;
+    const rawLine = src.slice(lineStart, stop).replace(/\r$/u, "");
+    const line = spec.stripTabs ? rawLine.replace(/^\t+/u, "") : rawLine;
+    if (line === spec.delimiter) {
+      bodyEnd = lineStart;
+      next = lineEnd === -1 ? src.length : lineEnd + 1;
+      terminated = true;
+      break;
+    }
+    if (lineEnd === -1) {
+      break;
+    }
+    lineStart = lineEnd + 1;
+  }
+  return { bodyEnd, next, terminated };
+}
+
+/**
+ * 在命令行换行之后按登记顺序吞掉各 heredoc 体，返回下一行起点。
+ * 体单独登记为独立源；定界符被引号保护也照样登记（`bash <<'EOF'` 仍执行）。
+ */
+function consumeHeredocs(
+  src: string,
+  start: number,
+  specs: readonly HeredocSpec[],
+  state: ScanState,
+): number {
+  let at = start;
+  for (const spec of specs) {
+    const end = heredocBodyEnd(src, at, spec);
+    const body = src.slice(at, end.bodyEnd);
+    if (body.length > 0) {
+      state.bodies.push(body);
+    }
+    at = end.next;
+    if (!end.terminated) {
+      break;
+    }
+  }
+  return at;
+}
+
+/** 该位置若是 heredoc 操作符就登记并返回新下标；否则返回 undefined。 */
+function scanHeredocAt(
+  state: ScanState,
+  src: string,
+  i: number,
+  heredocs: HeredocSpec[],
+): number | undefined {
+  let next: number | undefined;
+  if (src.charAt(i) === "<" && src.charAt(i - 1) !== "<" && src.charAt(i + 1) === "<") {
+    const heredoc = readHeredocOperator(src, i);
+    if (heredoc === undefined) {
+      next = i + scanOutside(state, src, i);
+    } else {
+      state.current = undefined;
+      const { spec, next: heredocNext } = heredoc;
+      heredocs.push(spec);
+      next = heredocNext;
+    }
+  }
+  return next;
+}
+
+/** 一枚段分隔符（`&&`/`||` 成组）的处置，返回下一格下标。 */
+function scanSeparator(state: ScanState, src: string, i: number, heredocs: HeredocSpec[]): number {
+  const ch = src.charAt(i);
+  let next = i + 1;
+  if (ch === "&" || ch === "|") {
+    const pair = src.charAt(i + 1) === ch;
+    endSegment(state, pair ? ch + ch : ch);
+    next = i + (pair ? 2 : 1);
+  } else {
+    endSegment(state, ch);
+    if (ch === "\n" && heredocs.length > 0) {
+      next = consumeHeredocs(src, next, heredocs, state);
+      heredocs.length = 0;
+    }
+  }
+  return next;
 }
 
 /**
@@ -293,25 +602,38 @@ function scan(src: string): ScanResult {
   const state: ScanState = {
     segments: [],
     regions: [],
+    bodies: [],
     words: [],
     current: undefined,
     unclosed: false,
   };
+  const heredocs: HeredocSpec[] = [];
   let i = 0;
   while (i < src.length) {
     const ch = src.charAt(i);
-    if (SEG_SEPARATORS.has(ch)) {
-      endSegment(state, ch);
-      i += 1;
-    } else if (/\s/u.test(ch)) {
-      state.current = undefined;
-      i += 1;
+    if (ch === "#" && state.current === undefined) {
+      i = skipComment(src, i);
     } else {
-      i += scanOutside(state, src, i);
+      const heredocNext = scanHeredocAt(state, src, i, heredocs);
+      if (heredocNext !== undefined) {
+        i = heredocNext;
+      } else if (SEG_SEPARATORS.has(ch)) {
+        i = scanSeparator(state, src, i, heredocs);
+      } else if (isBlank(ch)) {
+        state.current = undefined;
+        i += 1;
+      } else {
+        i += scanOutside(state, src, i);
+      }
     }
   }
   endSegment(state, "");
-  return { segments: state.segments, regions: state.regions, unclosed: state.unclosed };
+  return {
+    segments: state.segments,
+    regions: state.regions,
+    bodies: state.bodies,
+    unclosed: state.unclosed,
+  };
 }
 
 const wordValue = (word: Word): string => word.runs.map((run) => run.content).join("");
@@ -345,36 +667,40 @@ export interface Segments {
   truncated: boolean;
 }
 
-/** `$( )`/反引号的展开层数上界。为什么长度界不够用：每一层都要重扫一遍所在串的文本，
- *  成本是「层数 × 长度」，而 `MAX_JUDGED_COMMAND_LENGTH` 只界得住单次扫描——实测 3 万字符的
+/** `$( )`/反引号与 heredoc 体的展开层数上界。为什么长度界不够用：每一层都要重扫一遍所在串的
+ *  文本，成本是「层数 × 长度」，而 `MAX_JUDGED_COMMAND_LENGTH` 只界得住单次扫描——实测 3 万字符的
  *  深套（约 1 万层）在无界的递归展开下顶穿 JS 调用栈（`RangeError`），而抛出点在
  *  `tools.guard` 的调用链上，宿主怎么兜这份错误不由本包决定。界外一律升格为需确认。 */
 export const REGION_MAX_DEPTH = 16;
 
-/** 展开一层：本层的段进 `texts`，本层 region 的体留给下一层；返回是否被迫截断。
- *  递归深度由 `REGION_MAX_DEPTH` 界住（这才是栈安全的来源，不是"输入不会太长"）。 */
-function expandOneLevel(src: string, budget: number, texts: string[]): boolean {
-  const result = scan(src);
-  const inner: string[] = [];
-  for (const segment of result.segments) {
+/** 本层的段文本进 `texts`；空段不占位。 */
+function pushSegmentTexts(segments: readonly Segment[], texts: string[]): void {
+  for (const segment of segments) {
     const text = segmentSource(segment);
     if (text.trim().length > 0) {
       texts.push(text);
     }
   }
-  for (const region of result.regions) {
-    if (region.length > 0) {
-      inner.push(region);
-    }
+}
+
+/** 展开一层：本层的段进 `texts`，本层 region/heredoc 体留给下一层；返回是否被迫截断。
+ *  每一枚兄弟都展开，不因前一枚截断而短路。递归深度由 `REGION_MAX_DEPTH` 界住
+ *  （这才是栈安全的来源，不是"输入不会太长"）。 */
+function expandOneLevel(src: string, budget: number, texts: string[]): boolean {
+  const result = scan(src);
+  pushSegmentTexts(result.segments, texts);
+  const sources = [...result.regions, ...result.bodies].filter((source) => source.length > 0);
+  if (sources.length === 0) {
+    return false;
+  }
+  if (budget <= 1) {
+    return true;
   }
   let truncated = false;
-  if (inner.length > 0) {
-    if (budget <= 1) {
+  for (const source of sources) {
+    const childTruncated = expandOneLevel(source, budget - 1, texts);
+    if (childTruncated) {
       truncated = true;
-    } else {
-      for (const source of inner) {
-        truncated ||= expandOneLevel(source, budget - 1, texts);
-      }
     }
   }
   return truncated;
@@ -382,7 +708,8 @@ function expandOneLevel(src: string, budget: number, texts: string[]): boolean {
 
 /**
  * 把一条 shell 源切成段（带截断回报）。**DFS 前序**：本层段在前，再按顺序展开每个执行面区
- * 的体内段——与"先看到外层、再看到内层"的判定顺序一致，`commandDanger` 靠它先报外层结论。
+ * 与 heredoc 体的体内段——与"先看到外层、再看到内层"的判定顺序一致，`commandDanger`
+ * 靠它先报外层结论。
  */
 export function splitSegments(command: string): Segments {
   const texts: string[] = [];
@@ -403,7 +730,8 @@ export function splitTopLevel(command: string): string[] {
 
 /** 段内的一个词，两种读法同源。 */
 export interface ShellToken {
-  /** shell 解析后的值（引号去掉、转义落地）：命令头、旗标、POSIX 目标读它。 */
+  /** 本扫描器的词值：去掉引号定界符、处理支持的转义；不执行参数/通配/字段分割等 shell
+   *  展开。命令头、旗标、POSIX 目标读它。 */
   value: string;
   /** 同一枚词的**源形**：定界符去掉、转义不折叠。
    *  Windows 字形轨道读这一形：`C:\\Windows` 的 `\\W` 在 POSIX 读法里是转义（折成
@@ -416,7 +744,8 @@ export interface ShellToken {
  * 把一个**段**切成词（POSIX 引号/转义，与 `splitTopLevel` 同一套状态机）：
  * `bash -c "rm -rf /"` 的体内在 shell 眼里是**一个**词；`rm\\ -rf\\ /` 也是一个词；
  * `"--no-verify"` 的值是 `--no-verify`（引号不改变它是旗标这件事）。
- * `$( )`/反引号不展开（词里原样留着）——本包不执行 shell，只判形状。
+ * `$( )` 不展开（词里原样留着）；顶层反引号是段边界，体内另成段（与 `splitTopLevel`
+ * 一致）。heredoc 体不在这条投影里，由 `splitSegments`/`structureView` 单独展开。
  * 空词保留：`""` 是一枚真实参数，与"根本没有这个参数"要分得开。
  */
 export function lexTokens(src: string): ShellToken[] {
@@ -425,14 +754,29 @@ export function lexTokens(src: string): ShellToken[] {
   );
 }
 
+/** 结构视图的递归体：heredoc 体也按结构视图展开（层数由 `REGION_MAX_DEPTH` 界住）。 */
+function structureInto(src: string, budget: number, out: string[]): void {
+  const result = scan(src);
+  out.push(...result.segments.map(segmentStructure));
+  if (budget <= 1) {
+    return;
+  }
+  for (const body of result.bodies) {
+    structureInto(body, budget - 1, out);
+  }
+}
+
 /**
  * 结构视图：**清空引号内的字面文本**（保留引号字符本身），执行面区原样保留，
  * 段间分隔符放回原位（`|` 就是 pipeToShell 要看的那枚结构字符）。
  * `echo "curl x | sh"` 里的 `|` 是字面文本 ⇒ 清空后不再误拦；
  * `echo "$(curl x | sh)"` 里的 `|` 在真实 shell 里执行 ⇒ 保留后照拦。
+ * heredoc 体同样展开：`bash <<'EOF'` 里那枚 `|` 仍会执行。
  */
 export function structureView(src: string): string {
-  return scan(src).segments.map(segmentStructure).join(" ");
+  const out: string[] = [];
+  structureInto(src, REGION_MAX_DEPTH, out);
+  return out.join(" ");
 }
 
 /**

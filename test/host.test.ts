@@ -150,8 +150,9 @@ function makeEvents(): {
       // 官方 tool/call.arguments 是模型产出的**原始 JSON 串**（不是对象）。
       return fxCall(callId, name, JSON.stringify(args));
     },
-    // 极旧契约：tool/call 没有 callId → 记账键退化成 `nc:<seq>`，按成功计。官方
-    // `callId` 必选、类型面写不出这条，故显式声明为畸形事件。
+    // 极旧契约：tool/call 没有 callId → 记账键退化成 `nc:<seq>`，等不到成败回填，
+    // 因此**不算证据**（见 resolveResultLedger）。官方 `callId` 必选、类型面写不出这条，
+    // 故显式声明为畸形事件。
     callNoId(name, args) {
       return fxBadEvent({ type: "tool/call", data: { name, arguments: args } });
     },
@@ -1147,19 +1148,19 @@ describe("证据记账的键形与签名匹配（判定侧与取证侧同源）"
     assert.match(denied, /作用域不对/u);
   });
 
-  it("无 callId 的极旧契约事件按成功计（read/refs/写三类都收编）", () => {
+  it("无 callId 的调用一律**不算证据**（等不到成败回填：状态未知不等于成功）", () => {
     const { callNoId } = makeEvents();
     const target = fx(SRC_DIR, "legacy.ts");
     const log = [
       callNoId("read", { file_path: target }),
       callNoId("grep", { path: SRC_DIR_PATH, pattern: "legacy.ts" }),
+      // 写也不收编：lastEditSeq 是外部改动归因的依据，来路不明的调用不能冒充"自己改的"。
       callNoId("edit", { file_path: target, new_string: "const legacy = 1" }),
     ];
-    assert.equal(
-      ctx.guardInstalled!.fn(editOn(target, log, "legacy")),
-      undefined,
-      "旧契约没有 result 可回填 → 按文档承诺保守计成功",
-    );
+    const denied = ctx.guardInstalled!.fn(editOn(target, log, "legacy"));
+    assert.ok(denied !== undefined, "三条无 ID 调用都没兑现成证据 ⇒ 仍须取证");
+    assert.match(denied, /read legacy\.ts/u, "缺项照旧按 read 报出来");
+    assert.match(denied, /引用探查/u, "refs 同样不被无 ID 检索兑现");
   });
 
   it("失败的 read 给出「调用失败过」成因，而不是「没读过」", () => {
@@ -1429,14 +1430,64 @@ const readExec = (file: string, dir: string): Record<string, unknown> => ({
   agent: { session: { id: "sess-C", header: { cwd: dir }, snapshotEvents: () => [] } },
 });
 
+describe("事实门配额与外部改动水位（host 级）", () => {
+  it("放行后的第一个外部改动水位与放行水位相等时也让配额过期", async () => {
+    const ctx = createMockCtx();
+    ctx.value.maxDenies = 1;
+    applyPlugin(ctx);
+    const { dir, file, log } = await makeTarget();
+    try {
+      // 只保留 read：refs 仍缺，配额要免的正是这一半。
+      const readOnly = log.slice(0, 2);
+      const exec = editOn(file, readOnly, "s-quota-eq");
+      assert.ok(ctx.guardInstalled!.fn(exec) !== undefined, "首拒");
+      assert.equal(ctx.guardInstalled!.fn(exec), undefined, "达配额放行");
+      // 放行后、下一次评估前发生外部改动：seenLen 仍是放行那次的水位，
+      // 因此 externalChangeSeq 与 releaseSeq 相等，必须仍然失效。
+      await utimes(file, 2_000_000_000, 2_000_000_000);
+      const denied = ctx.guardInstalled!.fn(exec);
+      assert.ok(denied !== undefined, "相等水位的外部改动也必须让配额过期");
+      assert.match(denied, /本会话之外/u, "read 缺项的成因是外部改动");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/** 走完一次读取的**完整生命周期**：guard 时点暂存观测 → post-execute 报成败 → 提交或丢弃。
+ *
+ *  为什么用例必须走完这两步：读时基线只在**拿到成功结果**之后才提交（guard 跑在执行之前，
+ *  那一刻成不成还不知道）。只喂 guard 一半就等于断言"读失败也该记基线"——那正是要修掉的行为。
+ *  `isError` 让用例能显式表达"这一趟读失败了"。 */
+async function readOnce(
+  ctx: MockCtx,
+  exec: Record<string, unknown>,
+  isError = false,
+): Promise<string | undefined> {
+  const verdict = ctx.guardInstalled!.fn(exec);
+  const listeners = (ctx.listeners.get("tools/post-execute") ?? []) as unknown as ((
+    exec: Record<string, unknown>,
+    result: Record<string, unknown>,
+    next: () => Promise<{ kind: string }>,
+  ) => Promise<unknown>)[];
+  // 顺序 await（不用 Promise.all）：真实宿主按注册序**串行**跑瀑布，替身照抄那个顺序，
+  // 否则"先结算读取基线、再附加引用面"这类次序依赖在用例里根本不成立。
+  for (const listener of listeners) {
+    // oxlint-disable-next-line eslint/no-await-in-loop -- 瀑布必须串行：见上两行
+    await listener(exec, { isError, content: [], value: null }, async () => ({ kind: "accept" }));
+  }
+  return verdict;
+}
+
 describe("read 时点基线：外部改动检测的首次评估盲区闭合", () => {
   it("read 之后、首次编辑评估之前被会话外改动 → 首次评估即判外部改动（修复前是盲区放行）", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const { dir, file, log } = await makeTarget();
     try {
-      // read 的 guard 时点记账（基线 = T1）；read 本身永不被拦。
-      assert.equal(ctx.guardInstalled!.fn(readExec(file, dir)), undefined, "read 照常放行");
+      // 读取走完整生命周期：guard 时点只暂存观测，成功结果回填后才提交成基线（= T1）。
+      // read 本身永不被拦。
+      assert.equal(await readOnce(ctx, readExec(file, dir)), undefined, "read 照常放行");
       // 会话外改动
       await utimes(file, 2_000_000_000, 2_000_000_000);
       const verdict = ctx.guardInstalled!.fn(editOn(file, log, "sess-C", {}, dir));
@@ -1452,7 +1503,7 @@ describe("read 时点基线：外部改动检测的首次评估盲区闭合", ()
     applyPlugin(ctx);
     const { dir, file, log } = await makeTarget();
     try {
-      assert.equal(ctx.guardInstalled!.fn(readExec(file, dir)), undefined);
+      assert.equal(await readOnce(ctx, readExec(file, dir)), undefined);
       assert.equal(
         ctx.guardInstalled!.fn(editOn(file, log, "sess-C", {}, dir)),
         undefined,
@@ -1468,7 +1519,7 @@ describe("read 时点基线：外部改动检测的首次评估盲区闭合", ()
     applyPlugin(ctx);
     const { dir, file, log } = await makeTarget();
     try {
-      assert.equal(ctx.guardInstalled!.fn(readExec(file, dir)), undefined);
+      assert.equal(await readOnce(ctx, readExec(file, dir)), undefined);
       await utimes(file, 2_000_000_000, 2_000_000_000);
       // 会话 D 在改动后评估（空日志）→ 全局 mtimes 被刷成 T2——
       // 修复前这会把 C 的盲区检测整个抹掉；C 现在靠自己的 read 基线检出。
@@ -1491,7 +1542,7 @@ describe("read 时点基线：外部改动检测的首次评估盲区闭合", ()
         arguments: { command: "view", path: file },
         agent: { session: { id: "sess-C", header: { cwd: dir }, snapshotEvents: () => [] } },
       };
-      assert.equal(ctx.guardInstalled!.fn(viewExec), undefined, "view 照常放行");
+      assert.equal(await readOnce(ctx, viewExec), undefined, "view 照常放行");
       await utimes(file, 2_000_000_000, 2_000_000_000);
       // 取证日志里的 read 证据换成 view（host 侧 view ≡ read 证据）
       const log: SessionEvent[] = [
@@ -1526,6 +1577,33 @@ describe("read 时点基线：外部改动检测的首次评估盲区闭合", ()
         agent: { session: { id: "s" } },
       });
     });
+  });
+
+  it("读取失败不得改动基线：那趟拿不到内容，不能替后来者证明这一版看过", async () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const { dir, file, log } = await makeTarget();
+    try {
+      // 成功读一次：基线落在 T1。
+      assert.equal(await readOnce(ctx, readExec(file, dir)), undefined);
+      // 会话外改动到 T2。
+      await utimes(file, 2_000_000_000, 2_000_000_000);
+      // 一次**失败**的读：guard 会看到 T2 并暂存观测，但结果回填是 isError。
+      assert.equal(
+        await readOnce(ctx, readExec(file, dir), true),
+        undefined,
+        "失败的读照常返回 undefined",
+      );
+      const verdict = ctx.guardInstalled!.fn(editOn(file, log, "sess-C", {}, dir));
+      assert.ok(verdict !== undefined, "外部改动仍须被检出");
+      assert.match(
+        verdict,
+        /本会话之外/u,
+        "失败读把基线推到 T2 ⇒ 这次外部改动会被静默吞掉（修复前正是这样）",
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -2109,5 +2187,41 @@ describe("串行命令不漏判：前段在本档放行时，后段仍要被判�
       )?.key,
       "gitForcePush",
     );
+  });
+
+  it("工作区档：被沙箱覆盖的 rmrf 不能吞掉后段 noVerify（交换顺序也一样）", () => {
+    const ctx = bootMode(WRITABLE_MODE, "ask");
+    const coveredFirst = bashOf(ctx, "rm -rf /etc/nope; git commit --no-verify -m x");
+    assert.ok(
+      coveredFirst?.startsWith(MESSAGES.zh.noVerify) === true,
+      `覆盖后的 rmrf 之后，noVerify 仍要拦：${coveredFirst}`,
+    );
+    const coveredLast = bashOf(ctx, "git commit --no-verify -m x; rm -rf /etc/nope");
+    assert.ok(
+      coveredLast?.startsWith(MESSAGES.zh.noVerify) === true,
+      `noVerify 在前时同样要拦：${coveredLast}`,
+    );
+  });
+
+  it("工作区档：被沙箱覆盖的 rmrf 不能吞掉后段的审批命令", async () => {
+    const ctx = bootMode(WRITABLE_MODE, "ask");
+    const exec = {
+      name: "bash",
+      arguments: { command: "rm -rf /etc/nope; git push --force" },
+      signal: new AbortController().signal,
+      agent: {
+        session: {
+          id: "s-covered-ask",
+          header: { cwd: SANDBOX_WORKSPACE },
+          snapshotEvents: () => [],
+        },
+      },
+    };
+    const listeners = (ctx.listeners.get("tools/pre-execute") ?? []) as unknown as ((
+      first: unknown,
+      next: () => Promise<unknown>,
+    ) => Promise<{ kind?: string } | undefined>)[];
+    const decision = await listeners[0]?.(exec, () => Promise.resolve({ kind: "allow" }));
+    assert.equal(decision?.kind, "ask", `后段 gitForcePush 仍应进入审批：${decision?.kind}`);
   });
 });

@@ -45,8 +45,15 @@ const pkgDir = path.resolve(import.meta.dirname, "..");
  *      `AskDeduper` + 档位探针与两处接线）：这一轮加的是**判据本体**——静态档位表换成了
  *      以权限档位为第一维的处置表，四档 × 全部规则键的矩阵现在是可复跑的测试
  *      （`test/mode-policy.test.ts`）。实测 97,587 B。
- *  预算按同一条规矩取实测上浮 ~4%。 */
-const HOST_BUDGET_BYTES = 102_000;
+ *   6. **词法层补洞**（注释与 heredoc 的独立扫描、双引号续行、region 内引号/反引号配对、
+ *      续行空词、兄弟 region 展开）：新增的是词法状态机本身，不是查表；实测 104,037 B。
+ *   7. **执行端与参数语义加固**（非 shell stdin 解释器、Git 子命令取值表、kubectl dry-run
+ *      取值、secret 逐条匹配与解析形预算、路径 handoff 保护）：新增的是判据本体；实测
+ *      108,354 B。
+ *   8. **事实门状态边界**（严格配额水位、归一化状态键、缺失 input 退化、构造参数校验、
+ *      会话键类型前缀、访问型 LRU、need 标签）：新增的是判据与中英文案；实测 109,858 B。
+ *  预算按同一条规矩取实测上浮 ~0.6%。 */
+const HOST_BUDGET_BYTES = 110_500;
 /** 设置半产物体积预算（实测 2,881 B；开 minify 前 7,293 B）。与拦截半分属两个 bulkhead
  *  条目，各自记账。 */
 const SETTINGS_BUDGET_BYTES = 3050;

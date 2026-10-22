@@ -235,4 +235,33 @@ describe("项目根回落与引用取证起点必须同源（提示可照做）"
       "cwd 不是祖先 ⇒ 回落成目标父目录：根缓存不许跨会话目录串味",
     );
   });
+
+  it("同一枚目标换项目根：层集合缓存不许串味（键里必须带 root）", async () => {
+    const ctx = createMockCtx();
+    plugin.apply(ctx as never);
+    // 整条祖先链无工程标记 ⇒ 项目根由"cwd 是不是祖先"决定，root 因此随会话变；
+    // 而层探查的上溯终点正是那个 root。
+    const wide = path.join(outsideRoot, "layer-wide");
+    const narrow = path.join(wide, "pkg");
+    await mkdir(narrow, { recursive: true });
+    // test/ 只在**宽根**这一级存在：窄根会话按自己的根看不到它。
+    await mkdir(path.join(wide, "test"), { recursive: true });
+    await writeFile(path.join(wide, "test", "x.test.ts"), "export const t = 1;\n");
+    const target = path.join(narrow, "mod.mjs");
+
+    // ① 窄根会话先评估：它的层集合里没有 test。
+    const narrowDenial = fire(ctx, { target, sessionId: "layer-narrow", cwd: narrow }) ?? "";
+    assert.ok(
+      !narrowDenial.includes("test 层触达"),
+      `窄根会话不该被要求一层它自己的根里不存在的 test 层，实际：${narrowDenial.slice(0, 200)}`,
+    );
+    // ② 同一枚目标、换成宽根会话：它的根**看得见** test/，因此必须把那一层算进缺项。
+    //    缓存键少 root 这一位时，这里会吃到①写下的空层集合 ⇒ 这一层的要求被静默吃掉
+    //    （方向是**放宽**门禁，正是最不该失守的那一侧）。
+    const wideDenial = fire(ctx, { target, sessionId: "layer-wide", cwd: wide }) ?? "";
+    assert.ok(
+      wideDenial.includes("test 层触达"),
+      `宽根会话必须要求 test 层，实际：${wideDenial.slice(0, 200)}`,
+    );
+  });
 });

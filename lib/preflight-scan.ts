@@ -22,7 +22,7 @@
 // `node:path` 留在这里只做**字符串**活（取 basename 报给模型）：它不碰 fs，因此不携带
 // "本地盘就是执行世界"那层假定——远程后端给的 displayPath 是 URI 也一样能取出末段。
 import path from "node:path";
-import type { FactNeed } from "./fact-gate.ts";
+import type { LayerNeed } from "./fact-gate.ts";
 import type { PathApi } from "./path-format.ts";
 import { fillTemplate } from "./messages.ts";
 import type { DangerGuardMessages } from "./messages.ts";
@@ -105,13 +105,19 @@ export interface RefScan {
   readonly hitsCapped: boolean;
   readonly quarantined: number;
   /** **真展开过**的目录（相对扫描起点；起点自身是 ""）。层探查结论要靠它判覆盖：
-   *  预算截断时"这层没命中"与"这层根本没走到"是两件不同的事，说错就是骗模型。 */
+   *  预算截断时"这层没命中"与"这层根本没走到"是两件不同的事，说错就是骗模型。
+   *  ⚠ 它只回答"进没进去过"，**不回答"里面读完没有"**——判后者看 `complete` 与 `unread`。 */
   readonly dirs: readonly string[];
+  /** 遍历**走到了、但正文没读**的文件（相对起点）：超大文件与凭据面隔离两类。
+   *  「某层零命中」是一条全称结论，只要那一层里还有没读过的文件，它就不成立——
+   *  那几份完全可能写着引用，只是没进结果。`complete` 只能说明遍历没被预算截断，
+   *  说明不了这件事（见 layerConclusionsOf 的判据）。 */
+  readonly unread: readonly string[];
 }
 
 /** 一枚层的结论：目录（相对起点）、该目录内的命中数，以及这次扫描是否覆盖它。 */
 export interface LayerFinding {
-  readonly layer: FactNeed;
+  readonly layer: LayerNeed;
   readonly dir: string;
   readonly hits: number;
 }
@@ -155,6 +161,8 @@ interface ScanState {
   quarantined: number;
   /** 真展开过的目录（相对起点），随结果交回用于层覆盖判定。 */
   readonly walked: string[];
+  /** 走到了但没读正文的文件（相对起点）：见 RefScan.unread。 */
+  readonly unread: string[];
   readonly findings: RefFinding[];
 }
 
@@ -315,6 +323,8 @@ async function scanOneFile(ctx: ScanCtx, item: ScanItem): Promise<boolean> {
   // 正是本包存在的理由之一。跳过而不是脱敏：脱敏等于在证据里留一份"这里有内容"的形状。
   if (ctx.quarantined(item.path)) {
     ctx.state.quarantined += 1;
+    // 按规则没读：那层"零命中"因此不是全称结论（见 RefScan.unread）。
+    ctx.state.unread.push(item.rel);
     return true;
   }
   if (ctx.state.scanned >= PREFLIGHT_MAX_FILES) {
@@ -325,12 +335,17 @@ async function scanOneFile(ctx: ScanCtx, item: ScanItem): Promise<boolean> {
   // 超大文件跳过而不是读前半（与迁移前同一条取舍）：半份内容给出的命中面更不完整，
   // 而"读到一半"会多出第二种语义（这份扫描结果到底覆盖了什么）。
   if (item.size !== undefined && item.size > PREFLIGHT_MAX_BYTES) {
+    ctx.state.unread.push(item.rel);
     return true;
   }
   const text = await scannableText(ctx, item);
-  if (text !== undefined) {
-    collectFindings(item.rel, text, ctx);
+  if (text === undefined) {
+    // 读不动 / 二进制：这一份也没进结果。抛错那支已由 scannableText 置位 capped，
+    // 这里记进 unread 是为了让"这一层里还有没读的"在层结论里说得出来。
+    ctx.state.unread.push(item.rel);
+    return true;
   }
+  collectFindings(item.rel, text, ctx);
   return true;
 }
 
@@ -526,7 +541,15 @@ export async function scanReferences(request: ScanRequest): Promise<RefScan | un
     needles,
     signal,
     quarantined: isQuarantined ?? NEVER_QUARANTINED,
-    state: { scanned: 0, dirs: 0, findings: [], capped: false, quarantined: 0, walked: [] },
+    state: {
+      scanned: 0,
+      dirs: 0,
+      findings: [],
+      capped: false,
+      quarantined: 0,
+      walked: [],
+      unread: [],
+    },
   };
   await walkForRefs(ctx, rootTarget);
   return signal.aborted
@@ -539,6 +562,7 @@ export async function scanReferences(request: ScanRequest): Promise<RefScan | un
         hitsCapped: ctx.state.findings.length >= PREFLIGHT_MAX_FINDINGS,
         quarantined: ctx.state.quarantined,
         dirs: ctx.state.walked,
+        unread: ctx.state.unread,
       };
 }
 

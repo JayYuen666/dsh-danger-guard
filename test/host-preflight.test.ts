@@ -375,6 +375,13 @@ let secretTarget: string;
 const SECRET_SENTINEL = "hunter2";
 /** 主夹具里再一枚目标：专测水位的两条生命周期。 */
 let disposeTarget: string;
+/** 外部改动那一组专用的三枚目标。
+ *  为什么不能共用 `disposeTarget`：那几条用例都要 `utimes(T_LATER)` 造一次"会话外改动"，
+ *  而同一个文件被上一条推到 T_LATER 之后，下一条的 utimes 就是**空操作**——mtime 没再前进，
+ *  失效点判不出来，测试会红在与被测行为无关的地方（实测踩到）。一枚用例一个目标最省心。 */
+let staleDeliveredTarget: string;
+let staleTwiceTarget: string;
+let staleWatermarkTarget: string;
 /** 引用扫描的边界夹具：命中条数上限 + 二进制/超限/软链/黑名单目录。 */
 let rootCaps: string;
 let targetCaps: string;
@@ -399,6 +406,11 @@ let rootLinked: string;
 let targetLinked: string;
 /** 缓存新鲜度的夹具。 */
 let rootRescan: string;
+/** 层结论截断夹具：test/ 层里有 300 个文件、真正引用它的排在排序**末尾**。
+ *  用来钉住"那一层没读完就不许宣称零命中"——它与"预算是被别处吃光"那条不同源：
+ *  这里是遍历走进 test/ 之后**在层内部**被截断，`dirs` 里因此照样有 "test"。 */
+let rootTruncatedLayer: string;
+let targetTruncatedLayer: string;
 let targetRescan: string;
 /** 小而确定的夹具（3 枚文件）：零命中的全称那句要按**填好的整句**比对，文件数必须是定值。 */
 let rootClean: string;
@@ -495,6 +507,16 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
     disposeTarget = path.join(rootMain, "src", "dispose-mod.ts");
     await writeFile(disposeTarget, "// dispose-mod.ts\n");
     await utimes(disposeTarget, T_EARLIER, T_EARLIER);
+    // 外部改动那组各用一枚：见 staleDeliveredTarget 等三枚的声明处理由。
+    staleDeliveredTarget = path.join(rootMain, "src", "stale-delivered.ts");
+    staleTwiceTarget = path.join(rootMain, "src", "stale-twice.ts");
+    staleWatermarkTarget = path.join(rootMain, "src", "stale-watermark.ts");
+    await Promise.all(
+      [staleDeliveredTarget, staleTwiceTarget, staleWatermarkTarget].map(async (each) => {
+        await writeFile(each, "// stale target\n");
+        await utimes(each, T_EARLIER, T_EARLIER);
+      }),
+    );
 
     // ② 边界夹具：目标名带短尾词干（`pf.c.ts` 的词干是 `pf.c` 与 `pf`，后者 < MIN_STEM），
     //    命中条数上限靠 `hits.ts` 的 50 行；目标自身也提到自己（不许进结果）。
@@ -563,6 +585,21 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
     await writeFile(path.join(rootRescan, PROJECT_MARKER), "{}\n");
     targetRescan = path.join(rootRescan, "src", "rescan-mod.ts");
     await writeFile(targetRescan, "export const b = 1;\n");
+
+    // ⑨ 层结论截断夹具：test/ 层内有 300 个文件、真正引用目标的排在排序末尾。
+    //    遍历会走进 test/（所以 `dirs` 里有它）但在层内部被文件预算截断。
+    rootTruncatedLayer = await mkdtemp(path.join(tmpdir(), "dg-pf-layer-cut-"));
+    await writeFile(path.join(rootTruncatedLayer, PROJECT_MARKER), "{}\n");
+    targetTruncatedLayer = path.join(rootTruncatedLayer, "cut-mod.ts");
+    await writeFile(targetTruncatedLayer, "export const g = 1;\n");
+    // 树根处再放一个引用者：保证 refs 有命中 ⇒ 预检愿意递证据，层结论才会被算出来。
+    await writeFile(path.join(rootTruncatedLayer, "user.ts"), 'import "./cut-mod";\n');
+    await mkdir(path.join(rootTruncatedLayer, "test"), { recursive: true });
+    await bulkFiles(path.join(rootTruncatedLayer, "test"));
+    await writeFile(
+      path.join(rootTruncatedLayer, "test", "zzz-cut-ref.ts"),
+      'import "../cut-mod";\n',
+    );
 
     // ⑦ 小而确定的夹具：目标 + 一枚无关文件 + package.json ⇒ 扫过 2 个文件、零命中、扫得完。
     rootClean = await mkdtemp(path.join(tmpdir(), "dg-pf-clean-"));
@@ -1072,6 +1109,28 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       );
     });
 
+    it("层内部被预算截断时**不许**宣称「这层零命中」：整趟让路，交回行动清单", async () => {
+      const ctx = createMockCtx();
+      ctx.value.strictMode = true;
+      apply(ctx);
+      const session = fakeSession("s-layer-truncated", []);
+      const args = editArgs(targetTruncatedLayer);
+      const decision = await preflightOf(ctx, {
+        name: "edit",
+        arguments: args,
+        agent: fakeAgent(session),
+      });
+      // 树根那枚引用者让扫描**有命中**（于是 refs 有凭证、层结论会被算），但 test/ 层里
+      // 真正引用目标的文件排在排序末尾、被文件预算截断——那一层的"零命中"不是结论。
+      assert.deepEqual(decision, ALLOW, "层没读完就不投递：半份「这层我探过了」比不给更糟");
+      const denied = guardOf(ctx, { name: "edit", args, session });
+      assert.ok(denied !== undefined, "guard 照旧要求层证据");
+      assert.ok(denied.includes("test"), `拒绝理由里点名那层，实际：${denied.slice(0, 200)}`);
+      // 反向判据：这一趟确实走了 test/（`dirs` 有它），所以上面那条不是因为"没走进去"
+      // 而通过的——那正是旧实现给凭证的理由（拿 `dirs` 当"扫完了"）。
+      assert.ok(!denied.includes("0 处命中"), "被截断的层上不许出现零命中结论");
+    });
+
     it("有一层不在扫描覆盖里（遍历被预算截断）⇒ 整趟让路，不拿半份证据拦人", async () => {
       const ctx = createMockCtx();
       ctx.value.strictMode = true;
@@ -1462,18 +1521,75 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       );
     });
 
+    it("外部改动之后预检当场递正文 ⇒ 重试即放行（失效点随交付解除，不靠事件位次）", async () => {
+      const ctx = createMockCtx();
+      ctx.value.smallEditChars = 10;
+      apply(ctx);
+      const session = fakeSession("s-stale-delivered", []);
+      const agent = fakeAgent(session);
+      const args = editArgs(staleDeliveredTarget);
+      await preflightOf(ctx, { name: "edit", arguments: args, agent });
+      assert.equal(guardOf(ctx, { name: "edit", args, session }), undefined, "首轮凭水位放行");
+      // 会话外改动 + 预检关掉：这一轮 guard 自己判出 external 并把失效点落定。
+      ctx.value.preflightEnabled = false;
+      await utimes(staleDeliveredTarget, T_LATER, T_LATER);
+      const denied = guardOf(ctx, { name: "edit", args, session });
+      assert.ok(denied !== undefined);
+      assert.ok(denied.includes("本会话之外"), "对照组：失效点确实落定了");
+      // 重开预检：B 面把正文**当场递进这次拒绝理由**，模型这次调用里就看见新内容了。
+      ctx.value.preflightEnabled = true;
+      const handoff = mustDeny(
+        await editDenyOf(ctx, staleDeliveredTarget, session),
+        "外部改动后的递证据",
+      );
+      assert.ok(
+        handoff.includes(HANDOFF_HEAD),
+        `应当走带证据的拒绝，实际：${handoff.slice(0, 160)}`,
+      );
+      assert.ok(handoff.includes(READ_MARK), "正文随行（这是解除失效点的依据）");
+      // 原样重试 ⇒ 放行。若失效点只按事件位次解除，这里会一直卡在缺 read 上：
+      // 外部改动发生在日志之外，投递位次与失效点取到的是**同一个下标**。
+      assert.equal(
+        guardOf(ctx, { name: "edit", args, session }),
+        undefined,
+        "正文已交付 ⇒ 重试放行",
+      );
+    });
+
+    it("外部改动之后预检关着 ⇒ 同一目标连续两次判定都拒（信号不被第一次评估吃掉）", async () => {
+      const ctx = createMockCtx();
+      ctx.value.smallEditChars = 10;
+      ctx.value.preflightEnabled = false;
+      apply(ctx);
+      const session = fakeSession("s-stale-twice", []);
+      const args = editArgs(staleTwiceTarget);
+      assert.ok(guardOf(ctx, { name: "edit", args, session }) !== undefined, "空日志 ⇒ 首拒");
+      await utimes(staleTwiceTarget, T_LATER, T_LATER);
+      const first = guardOf(ctx, { name: "edit", args, session });
+      assert.ok(first !== undefined);
+      assert.ok(first.includes("本会话之外"), "第一次判外部改动");
+      // 中间**不做任何读取**，原样再判一次：观测基线已被上一轮刷成新 mtime，
+      // 单看 mtime 差分这里就再也没有信号了——失效点必须还在。
+      const second = guardOf(ctx, { name: "edit", args, session });
+      assert.ok(second !== undefined, "第二次仍然拒绝");
+      assert.ok(
+        second.includes("本会话之外"),
+        `第二次仍须按 external 报，实际：${second.slice(0, 160)}`,
+      );
+    });
+
     it("旧水位不顶外部改动：预检关掉后目标被改，按 external 成因要求重读", async () => {
       const ctx = createMockCtx();
       ctx.value.smallEditChars = 10;
       apply(ctx);
       const session = fakeSession("s-stale-watermark", []);
       const agent = fakeAgent(session);
-      const args = editArgs(disposeTarget);
+      const args = editArgs(staleWatermarkTarget);
       await preflightOf(ctx, { name: "edit", arguments: args, agent });
       assert.equal(guardOf(ctx, { name: "edit", args, session }), undefined, "首轮凭水位放行");
       // 预检关掉（水位不再刷新），目标被会话外改动。
       ctx.value.preflightEnabled = false;
-      await utimes(disposeTarget, T_LATER, T_LATER);
+      await utimes(staleWatermarkTarget, T_LATER, T_LATER);
       const denied = guardOf(ctx, { name: "edit", args, session });
       assert.ok(denied !== undefined, "外部改动后旧水位作废");
       assert.ok(

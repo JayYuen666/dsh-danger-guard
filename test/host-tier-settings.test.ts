@@ -23,8 +23,7 @@ import { SETTINGS_READER } from "../lib/settings-schema.ts";
 import { DEFAULT_BIG_EDIT_CHARS, DEFAULT_SMALL_EDIT_CHARS } from "../lib/fact-gate.ts";
 // 会话日志一律出自官方 SessionEvent 夹具构造器（信封必填位与 ToolCallId/MessageId/
 // SessionSeq 品牌都在夹具里补一次）；fx 前缀避开与 makeEvents() 交出的局部 `call` 遮蔽。
-// 官方形状里写不出的坏契约（无 callId 的极旧事件）显式走 fxBadEvent()。
-import { badEvent as fxBadEvent, call as fxCall, result as fxResult } from "./fixtures/events.ts";
+import { call as fxCall, result as fxResult } from "./fixtures/events.ts";
 // 事件类型与生产面（host.ts）同源：官方判别联合由 shared 具名 re-export。
 import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 
@@ -193,11 +192,6 @@ const fireWith = (
     arguments: args,
     agent: { session: { id, snapshotEvents: () => log } },
   } as never);
-
-/** 极旧契约的 tool/call：**没有 callId**（官方 `tool/call.data.callId` 必选，类型面写不出
- *  缺位）→ 显式 badEvent。这类事件的记账键退化成 `nc:<下标>`，按文档承诺保守计成功。 */
-const callNoId = (name: string, args: Record<string, unknown>): SessionEvent =>
-  fxBadEvent({ type: "tool/call", data: { name, arguments: args } });
 
 /** 建一个临时夹具根，并**从 `realpath` 结果派生**路径串。
  *
@@ -578,30 +572,45 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
       );
       assert.ok(deniedB !== undefined, "B 会话带的是改动前的 read 证据 → 必须重读");
       assert.match(deniedB, /本会话之外/u);
-      // B 重读之后（日志多了一条更晚的 read）→ 放行
-      const logB = [...evidenceFor(file), ...ownEdit(file, "const value = 3")];
+      // B 真的补了一次 read → 放行。
+      // ⚠ 两件事都不能省：
+      //  ① 必须是**真的 read**，不能靠自己那条 edit 顶替——外部改动判的是"模型读过的是
+      //    不是这一版"，自己写过什么不改变"没读过新内容"（见 basisBySessionPath）；
+      //  ② 日志里要有**那次被拒编辑自身的 call/result**：失效点按"判定时的日志长度"记，
+      //    真实宿主里被门禁拒掉的编辑同样以 isError 结果入日志，重读因此严格落在它之后。
+      //    省掉它，重读的调用下标正好等于失效点，判据（严格大于）不成立。
+      const logB = [
+        ...evidenceFor(file),
+        fxCall("e2", "edit", JSON.stringify({ file_path: file, ...SMALL })),
+        fxResult("e2", true),
+        fxCall("r2", "read", JSON.stringify({ file_path: file })),
+        fxResult("r2"),
+      ];
       assert.equal(
         fireWith(ctx, "edit", { file_path: file, ...SMALL }, logB, "sess-b"),
         undefined,
-        "重读后凭更大下标通过",
+        "重读之后失效点解除",
       );
     });
   });
 
-  describe("层台账与容量：无 callId 的检索也能覆盖层；extraTestDirs 变更使缓存失效", () => {
-    it("nc: 键的检索覆盖到层目录 → 层证据同样记上", () => {
+  describe("层台账与容量：可归因检索覆盖层；extraTestDirs 变更使缓存失效", () => {
+    it("落在层目录内的检索 → 层证据同样记上（读与检索都得有成败回填才兑现）", () => {
       const ctx = createMockCtx();
       apply(ctx);
       ctx.value.extraTestDirs = [EXTRA_TEST_DIR_NAME];
       ctx.value.strictMode = true;
+      const { call, ok } = makeEvents();
       const log = [
-        callNoId("read", { file_path: targetB }),
-        callNoId("grep", { path: root2, pattern: OTHER_MOD_BASENAME }),
+        call("read", { file_path: targetB }),
+        ok(),
+        call("grep", { path: root2, pattern: OTHER_MOD_BASENAME }),
+        ok(),
       ];
       assert.equal(
-        fire(ctx, targetB, "nc-layer", log, SMALL),
+        fire(ctx, targetB, "layer-hit", log, SMALL),
         undefined,
-        "旧契约事件按成功计，且顺带覆盖 test 层",
+        "成功检索的作用域覆盖 extra-tests 层 ⇒ 该层证据一并记上",
       );
     });
 
@@ -610,10 +619,13 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
       apply(ctx);
       // strictMode 强制 high 档：层要求只由"该层是否被词表声明"决定
       ctx.value.strictMode = true;
+      const { call, ok } = makeEvents();
       // grep 落在 src（是目标祖先 → refs 成立；但不覆盖 extra-tests 层）
       const log = [
-        callNoId("read", { file_path: targetB }),
-        callNoId("grep", { path: path.join(root2, "src"), pattern: OTHER_MOD_BASENAME }),
+        call("read", { file_path: targetB }),
+        ok(),
+        call("grep", { path: path.join(root2, "src"), pattern: OTHER_MOD_BASENAME }),
+        ok(),
       ];
       ctx.value.extraTestDirs = [EXTRA_TEST_DIR_NAME];
       assert.ok(

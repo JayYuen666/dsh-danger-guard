@@ -15,8 +15,14 @@ import assert from "node:assert/strict";
 import path from "node:path";
 
 import { asOsPath } from "../lib/path-format.ts";
-import { sandboxDropsOf, sandboxModeOf, sandboxScopeOf } from "../lib/sandbox-scope.ts";
+import {
+  sandboxCoveredFacts,
+  sandboxDropsOf,
+  sandboxModeOf,
+  sandboxScopeOf,
+} from "../lib/sandbox-scope.ts";
 import type { SandboxScope } from "../lib/sandbox-scope.ts";
+import type { PolicyFacts } from "../lib/mode-policy.ts";
 import { disasterTargetPathOf } from "../lib/danger-rules.ts";
 
 /** 「工作区内修改」档的沙箱模式名（多处复用）。 */
@@ -33,6 +39,8 @@ const WRITABLE_MODE = `workspace-write`;
 /** 常驻夹具：工作区根与临时区（这两枚字面量在本文件里各出现多次）。 */
 const WORKSPACE = path.resolve(path.parse(process.cwd()).root, "w", "proj");
 const TEMP_ROOT = "/tmp";
+/** 含根与工作区的 brace 目标（多处复用的 opaque 夹具）。 */
+const BRACE_ROOT_TARGET = "{/workspace,/etc}";
 
 /** 折成 `/private` 前缀的折法：模拟 darwin 上 `/tmp` → `/private/tmp`。 */
 const privatePrefixed = (absolute: string): string =>
@@ -340,6 +348,10 @@ describe("disasterTargetPathOf：灾难目标词面 → 绝对路径", () => {
     for (const word of [
       "/*",
       "/usr/**",
+      BRACE_ROOT_TARGET,
+      "/e?c",
+      "/et[c]",
+      "/tmp/$VAR",
       String.raw`C:\Windows`,
       String.raw`~\notes`,
       "~root/.ssh",
@@ -347,6 +359,12 @@ describe("disasterTargetPathOf：灾难目标词面 → 绝对路径", () => {
     ]) {
       assert.equal(disasterTargetPathOf(word, asOsPath("/w")), undefined, word);
     }
+  });
+
+  it("含根的 brace 展开式不让路：不会把 /workspace/{...} 当成 workspace 内路径", () => {
+    const target = disasterTargetPathOf(BRACE_ROOT_TARGET, asOsPath(WORKSPACE));
+    assert.equal(target, undefined);
+    assert.equal(sandboxDropsOf(scopeWith(WORKSPACE), [target]), false);
   });
 });
 
@@ -405,5 +423,25 @@ describe("sandboxModeOf：原始模式读法（按档位分叉用的那一份）
       undefined,
     );
     assert.deepEqual(seen, [{}]);
+  });
+});
+
+describe("sandboxCoveredFacts：只给 rmrf 的灾难目标补覆盖位", () => {
+  const facts: PolicyFacts = {
+    mode: WS_MODE,
+    askable: true,
+    autoReview: false,
+    sandboxCovers: false,
+  };
+  const scope = scopeWith(WORKSPACE);
+
+  it("无 fix / fix 不是 disasterTarget ⇒ 原样交回同一份 facts", () => {
+    assert.equal(sandboxCoveredFacts(facts, "rmrf", undefined, scope, undefined), facts);
+    const bypass = { role: "bypassFlag", offending: ["--no-verify"] } as const;
+    assert.equal(sandboxCoveredFacts(facts, "rmrf", bypass, scope, undefined), facts);
+  });
+
+  it("非 rmrf 键 ⇒ 即使 scope 在场也不补覆盖位", () => {
+    assert.equal(sandboxCoveredFacts(facts, "gitForcePush", undefined, scope, undefined), facts);
   });
 });

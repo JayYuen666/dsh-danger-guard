@@ -18,7 +18,7 @@
 // 那条路），而「无文件效应」的危险（下载即执行、git 破坏、外部基础设施破坏）四种预设
 // 一个都盖不到，那才是我们要补的面。
 
-import type { BashDenialKey } from "./danger-rules.ts";
+import type { BashDenialKey, BashVerdict } from "./danger-rules.ts";
 
 /** 完全权限的沙箱模式名（判据、档位说明与类型收窄共用这一份字面量）。 */
 const FULL_ACCESS_MODE = "danger-full-access";
@@ -225,26 +225,29 @@ export function modeNoteKeyOf(facts: PolicyFacts): ModeNoteKey {
 }
 
 /**
- * 给**命令扫描层**用的严重度求值器：把一次判定的档位事实固定下来，回一枚按档位求值的函数。
+ * 给**命令扫描层**用的缺省严重度求值器：把一次判定的档位事实固定下来，回一枚按档位求值的函数。
  *
  * 为什么扫描层需要它（不是可选优化）：串行合成的命令里"哪一段最严重"决定最终交回哪枚键，
  * 而静态表把 `pipeShell` 记成 `deny`、`gitForcePush` 记成 `ask`。按静态表排序时，
  * `curl x | sh; git push -f` 会停在 `pipeShell` 上收工——可前者在某些档位是 `allow`，
  * 后者仍要 `ask`，于是真正该拦的那一段被整个吞掉。接了这一个，排序与"已收工"都按真实档位判。
  *
+ * 它只吃规则键：调用点若掌握**逐命中**的事实（例如沙箱是否覆盖这枚 `rmrf`），必须自己给
+ * `severityOf`，用实际处置排序；这个缺省求值器不认识那些事实。
+ *
  * @param facts 档位事实（一次调用内不变）。
- * @returns 规则键 → 该档位下的处置结论。
+ * @returns 命中 → 仅按规则键与档位求出的处置结论。
  */
-export function severityResolverOf(facts: PolicyFacts): (key: BashDenialKey) => RuleVerdict {
+export function severityResolverOf(facts: PolicyFacts): (verdict: BashVerdict) => RuleVerdict {
   // 一次调用里 `.map` 级复用：每条候选键只算一次档位结论，不重复走表。
   const memo = new Map<BashDenialKey, RuleVerdict>();
-  return (key) => {
-    let verdict = memo.get(key);
-    if (verdict === undefined) {
-      verdict = decideRule(facts, key);
-      memo.set(key, verdict);
+  return (verdict) => {
+    let decision = memo.get(verdict.key);
+    if (decision === undefined) {
+      decision = decideRule(facts, verdict.key);
+      memo.set(verdict.key, decision);
     }
-    return verdict;
+    return decision;
   };
 }
 

@@ -2,6 +2,179 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.8
+
+事实门的证据链收紧了五处口径。它们有同一个根因的两个侧面：**"观察过文件状态"与"已经取得
+该状态下的有效证据"被混在了同一套基线里**。
+
+同一轮还修了审批通道与命令扫描之间的跨通道缺口：被沙箱覆盖的 `rmrf` 此前会被扫描层当成
+`deny` 并提前收工，随后 guard 又把它降成 `allow`，同一串命令里后面的 `deny` / `ask` 段
+因此从未被判定。
+
+命令扫描的稳定性与参数语义也在这一轮收紧：动态规则表只认自有属性，brace 展开不再可能
+死循环，Git/wrapper/`kubectl --dry-run` 的取值按真实 CLI 语义处理，密钥模式逐条独立匹配，
+含根的 brace/glob 目标不再被误让给沙箱。
+
+同一版还修了事实门状态机与主机接线的边界：配额失效的水位比较、状态键的身份、缺失证据
+输入的语义，以及一批此前只在注释里成立的不变式。
+
+### Fixed
+
+- **`dedupKeyOf` 丢掉代理对的低代理项。** `for...of` 按码点迭代，而 `charCodeAt(0)` 只读高位
+  代理项，于是 `echo 😀` 与 `echo 😁` 会得到同一个去重键（同一高位代理项下的码点整片互撞）。
+  现在按 UTF-16 代码单元滚动，代理对的两个单元都参与摘要；影响仅限上报去重，审批判定不变。
+- **爆炸半径预演不再把"探针没输出"说成"不会改动任何东西"。** `git reset --hard HEAD~1`
+  在干净工作区上同样没有输出，却会移动分支；`git clean -fdx` 在只有 ignored 文件时
+  `git clean -nd` 也为空。现在空输出只说明检查命令没有可打印内容，并明确写出"不能证明
+  原操作无影响"；`gitResetHard` 的理由补上"带 `<ref>` 会移动分支"。
+- **预演在证据目标不确定时退回盲问。** 原命令带 `-C` / `--git-dir` / `--work-tree`、
+  会话 cwd 缺席、策略解析抛错或返回 `undefined` / `null`、宿主 `stdout.truncated`、
+  信号已取消时都不再起子进程；执行器自报会沙箱而取不到会话策略时也不再回落到部署默认。
+- **预演等待有了与取消信号同源的本地边界。** `execute()` / `result()` 不再可能把审批
+  无限挂住；子进程仍由执行器按 `timeoutMs` / `signal` 终止，进程关闭本身的 grace 不在
+  本函数等待范围内。
+- **`clipBlast` 只裁尾部空行。** 内部空行保留并计入行数上限，`clipped` 只表示触发了
+  行数或字符数上限，不再出现"删了空行却报未收紧"的假话。
+- **预演文案按每种语言分别渲染。** 不再把宿主当次语言的那一份原样贴到其他 locale；
+  `git status` 探针同时改用 `git --no-optional-locks status --porcelain`，避免可选锁与
+  索引刷新。
+- **外部改动信号被第一次评估吃掉。** 判定外部改动的同时就刷新了观测基线，而失效点只存在于
+  局部变量里：同一目标连判两次（中间不读取），第二次便看不到任何变化，模型还没读过的新内容
+  上的旧 read 证据重新成立。失效点现在随观测写进同一条台账记录，一直有效到真的补上一次成功
+  读取。
+- **失败或被拦的读取会把基线推向前。** guard 跑在工具执行之前，原实现在那一刻无条件写基线；
+  于是"成功读 → 外部改 → 失败读 → 编辑放行"这条路上，中间那次外部改动再也检不出来。读取观测
+  现在只暂存，等 `tools/post-execute` 报回成功才提交，失败即丢弃。
+- **读取基线整组移到 `lib/read-basis.ts`。** 观测与失效点必须是同一条记录：拆两张表时容量淘汰
+  只作用于前者，一枚已被挤出基线的目标仍会背着一条失效点。归因判据（内容自证只对本轮 mtime
+  跳变有效、已落定的失效点不因"我写过"而销账）也收进这一模块，成为单点。
+- **无 `callId` 的调用被当成成功证据。** 真宿主先 append `tool/call` 再 dispatch，所以一条还没
+  执行、已失败或被别的策略 block 掉的调用在日志里与成功的长得一样。这类调用现在一律按**状态
+  未知**处理，不再计入 read/refs/层证据，也不再冒充"自己改的编辑"参与外部改动归因。
+- **层结论在遍历被截断时仍宣称零命中。** 扫描走进某一层之后在层内部撞上文件预算时，`dirs` 里
+  照样有那一层，于是"0 处命中"被算成结论并记进投递水位，门禁此后不再要求那一层。扫描现在记录
+  走过但**没读正文**的文件（超限、凭据面、读不动），零命中结论要求那棵子树真的读完；找到命中
+  则不受此限（实证不需要穷尽）。
+- **层集合缓存的键缺 `projectRoot`。** 上溯终点由项目根决定，而它对同一枚目标可以随会话 cwd
+  变化；键里少这一位时，窄根会话先评估会把宽根会话对该层的需求整片吃掉，反过来则给窄根会话
+  要一层它够不到的目录。
+- **引用扫描缓存在"版本未知"时也算命中。** 版本探针失败时两侧都是 `undefined`，`undefined ===
+  undefined` 被当成"版本没变"，一份无法自证新旧的扫描结果因此被复用。现在要求这一趟真的探到
+  版本才吃缓存。
+- **预检失败的日志文案与实际行为不符。** 那条路径把决定原样交回下游（随后由同步 guard 判定），
+  而不是"退回拒绝路径"；文案改为"本轮不递证据、交回下游决定"。
+- **配额放行漏掉放行后的第一个外部改动。** `tryRelease` / `releasedFor` 原用 `<=`，
+  而外部改动水位恰好等于放行水位时（放行后中间没有别的评估推进 `seenLen`，这正是
+  常见形态）仍被当成有效配额。现在只有严格早于放行水位才保留配额；等于或晚于都失效
+  并重新过门。当前**可判定地**仍缺 `read` 时同样不复用旧配额，预检的 `releasedFor`
+  与 `check` 共用这条判据；不可判定态沿用旧配额，由交互确认兜底。
+- **状态键没有跟随目标归一化。** host 把原始 `file_path` 交给状态机，证据与投递却用
+  `resolveTarget` 后的绝对目标；相对/绝对写法会分裂计数，`cd` 到另一个项目后同一
+  相对路径还会复用上一项目的配额。现在 `check` / `releasedFor` 统一使用归一化目标。
+- **缺 `input` 与 `determinate:false` 走成两条路。** 缺省输入原先按 `[read, refs]`
+  持续拒绝、永不进入交互确认；现在归一为 `undeterminable(NO_DELIVERY)`：首拒给行动
+  清单，重试转 `indeterminate`。
+- **`.txt` 不再按文档扩展名免取证。** `CMakeLists.txt` / `requirements.txt` 是构建与
+  依赖逻辑，不是无执行影响的文档；豁免面收回到 `md` / `markdown` / `rst` / `adoc`。
+- **已确认行不再直接拼接内部 need 键。** 中英两语各自提供可读名，`read/refs/test/e2e/docs`
+  不再以英文内部键混进中文消息。
+- **构造参数与运行时 `maxDenies` 的非法值有了确定行为。** 构造参数必须是正安全整数
+  （`maxSessions` / `maxFiles` / `maxDenies`），非法值抛 `RangeError`；运行时覆盖值
+  非法时回落构造值，避免 `NaN/Infinity` 让配额永不兑现或让 `0` 首拒即放行。
+- **会话键不再因 `String()` 碰撞。** 字符串、数字、bigint、boolean 各带类型前缀；
+  无/非法 sessionId 用 symbol 作默认分片，`1` / `"1"` / `1n` 不再共享状态。
+
+### Changed
+
+- 外部改动之后，预检把目标正文当场递进拒绝理由时**同时解除失效点**。"模型在这一条结果里读到
+  了新内容"是那条判据的解除条件，不能靠投递位次判——水位记的是日志长度，而外部改动发生在日志
+  之外，两者会取到同一个下标，照旧判"缺 read"而把模型卡在重试循环里。
+- **去重表改成明确的上报语义。** `AskDeduper.first` 改名为 `shouldReport`，注释与测试统一为
+  "首次上报 / 不再上报"；`perSession` 只接受正安全整数，非法容量直接拒绝，避免 `NaN` /
+  `Infinity` 让分片永不清空。
+- **`BashDangerOptions.severityOf` 改吃完整 `BashVerdict`。** 入参不再是规则键，调用点因此
+  可以按逐命中事实（例如沙箱是否覆盖这枚 `rmrf`）求值；缺省仍回落静态 `RULE_TIER`。
+- **`FactEvidenceInput.fileEditSeq` 更名为 `externalChangeSeq`。** 该字段一直只承载
+  "未了结的外部改动水位"（-1 = 没有），旧名字与接口注释却写成"最近一次成功编辑"。
+- **`pending` / `released` 改为真正的访问型 LRU。** `check` 命中两份台账都会刷新位次；
+  `releasedFor` 仍是纯只读。单会话上限按两张台账各自 `maxFiles` 计算（约 2×），注释同步。
+- **不可判定退化面的契约写清。** `undeterminable` 只消费 read/refs 投递水位，不把
+  `layerSeqs` 混进这一面；两项都已投递时直接放行；"缺信息一律要更多"的旧表述收敛为
+  实际行为。
+- **类型收窄与常量冻结。** `NO_DELIVERY` 及其 `layerSeqs` 在运行时冻结；`FactDenial`
+  的数组改为只读并复制；`layerSeqs` 收窄为 `LayerNeed`（read/refs 不参与）。
+- **注释与实现对齐。** 删除"补上 read 后下一个回合就会放行"的过强表述、把 `attempt`
+  说明为连续未收敛计数、把类级并发承诺收窄为"单次调用内同步、不宣称执行原子性"。
+
+### Security
+
+词法层的几种写法此前会把真实会执行的命令漏成放行；现在统一由同一台状态机读取：
+
+- **双引号内的 `\`+换行按续行删除。** `bash -c "rm -rf \<换行>/"` 此前把换行留进命令体，
+  目标被拆到另一段；`bash -lc` / `eval` / `ssh` 同形一并修复。
+- **`$( )` 内的双引号转义与反引号体不再提前结束区。**
+  ``echo $(printf %s "a\" ) b" ; rm -rf /)`` 与
+  ``echo $(echo `case x in x) rm -rf / ;; esac`)`` 现在完整取出体内命令。
+- **词首 `#` 到行尾按注释丢弃。** 注释里的引号/分隔符不再参与语法：
+  `git commit -m msg # --no-verify` 不再误拦，`echo hi # "` 后下一行的真命令也不再被吞掉；
+  词中 `foo#bar` 仍是普通词。
+- **heredoc 体按定界符整段隔离。** 支持 `<<` / `<<-`、引号 / 反斜杠 / 混合引号定界符、
+  空定界符与多定界符；体内落单引号不再污染外层命令行。定界符带引号**不**改变正文仍按命令源
+  扫描——`bash <<'EOF'` 的体仍是脚本；代价是 `cat <<'EOF'` 的数据正文也可能被误拦，
+  这是有意的保守口径。
+- **只把空格与制表符当词边界。** NBSP 不再把 `rm\u00A0-rf /` 拆成 `rm`；
+  引号外续行不再产生位置空词。
+- **截断不再短路兄弟 region。** 深套在前时，后面的浅层 region 仍会展开；
+  `truncated` 仍升格为需确认。
+- **结构视图把 `&&`、`||` 作为完整操作符保留**（`a&&b` 不再变成 `a& & b`）。
+
+审批通道另有一条同类缺口：
+
+- **沙箱覆盖的 `rmrf` 不再吞掉同一串里的后续判据。** 扫描层此前按未覆盖的 facts 排序，
+  选中的 `rmrf` 先以 `deny` 让扫描收工，guard 随后才把它降成 `allow`：
+  `rm -rf /etc/nope; git commit --no-verify -m x` 整串放行，
+  `rm -rf /etc/nope; git push --force` 也不再询问。现在沙箱覆盖折进扫描排序，guard 与
+  审批通道共用 `lib/effective-disposition.ts` 的同一份实际处置；覆盖后的 `rmrf` 按 `allow`
+  参与排序，后段仍会被判到。回归用例覆盖两种顺序与 `ask` 段。
+
+本轮继续收紧命令扫描：
+
+- **动态规则表只认自有属性。** `GIT_DESTRUCTIVE` / `INFRA_DESTRUCTIVE` / `CODE_EVAL_FLAGS` /
+  `PREFIX_VALUE_FLAGS` 改用自有属性查找，并对动态返回的规则键做运行时校验。
+  `git hasOwnProperty; rm -rf ~` 此前会得到 `key:false` 的非法 verdict，让后段灾难删除
+  被当成 `allow`；`git __proto__` 会抛 TypeError。两类输入现在都稳定回落到无命中/后续命中。
+- **大整数 brace range 不再死循环。** `{9007199254740992..9007199254740992}` 超过安全整数后
+  `current += 1` 不前进；现在要求两端与步长为安全整数、用预算算出的固定次数迭代，并补上
+  bash 的步长/补零语义。形状不可判时仍按绝对路径 fail-closed。
+- **后台 `devServer` 与逐候选聚合。** 后台调用不再在拿到唯一 verdict 后丢弃它，而是让
+  `devServer` 以 `allow` 参与扫描，后段 `git reset --hard` / `rmrf` 继续被判定；同一候选头
+  命中的多条规则也全部参与严重度比较，前一条在本档是 `allow` 时不再挡住后一条。
+- **Git 短旗标取值按子命令区分。** `push -u` / `clean -x` 是布尔，`commit -m` / `clean -e`
+  才取值。修掉 `git clean -xf`、`git clean -x -f`、`git push -u --force`、`git push -uf` 的
+  漏拦；补上 `branch --delete --force`、`checkout -f` / `checkout HEAD <path>`、
+  `reset --har`、`push +refspec` 与 `--config-env=core.hooksPath` 的判定。
+- **wrapper 不再误吞命令。** `nice rm -rf ~` / `nice git reset --hard` 此前把命令词当
+  niceness 值吃掉；`watch -t`、`nsenter -F` 被误当带值旗标。`ssh -c` 是 cipher_spec，不再
+  被当成远端命令体；`printf`/`echo` 等数据命令的参数不再被当成命令头。
+- **pwsh 别名按 cmdlet 语义判。** Windows 方言下的 `rm`/`del`/`rd` 等 `Remove-Item` 别名
+  在“递归单独命中灾难目标”时即拦，不再要求 `-Force`；POSIX 轨的 `rm -r ~` 结论不变。
+- **`kubectl delete --dry-run=none` 不再算预演。** 只有 `client`/`server` 的最后一个取值
+  才豁免；缺失或未知取值按实际执行处理。迁移干跑旗标改为按工具分表，并补上
+  `uv run` / `poetry run` / `pipenv run` / `python -m` 等启动器；`alembic upgrade history`
+  不再因 `history` 尾巴被误放行。
+- **密钥模式逐条独立编译匹配。** 不再把所有用户模式拼成一个大正则，避免捕获组编号与
+  数字反向引用被前面的模式改写；`resolvedPaths` 增加数量与长度预算，超限判 `opaqueTarget`。
+  下载即执行扩展到 Python / Node / Perl / Ruby / PHP / Lua / osascript 等 stdin 解释器。
+- **含根的 brace/glob 不再被让给沙箱。** `disasterTargetPathOf` 对 `{}`、`?`、`[]`、变量与
+  Windows 字形交回 `undefined`，不再把 `{/workspace,/etc}` 拼成 workspace 内路径；
+  无盘符 Windows 的 `\..\..\Windows` 按当前盘根归一后仍判灾难删除。
+- **docker / kubectl 子命令按首位置词判。** 先跳过 `--context prod` 这类全局旗标取值，
+  再取第一个位置词；`docker inspect prune` 与 `kubectl get pod delete` 不再被误认成
+  `dockerPrune` / `kubectlDelete`。
+- **编辑目标增加批量数组与写载荷优先。** `paths` / `file_paths` 等数组逐枚检查；
+  参数里出现 `content` / `file_text` / `old_string` / `new_string` 时，多带的
+  `action:"read"` 不再跳过密钥闸。
+
 ## 0.1.7
 
 拦截强度改为**按用户选的权限预设分叉**：同一枚规则键在「仅可查看 / 工作区内修改 / 完全权限 / 自动审查」
@@ -145,8 +318,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   改动"，看不到**具体丢什么**。现在 `ask` 档命中时会跑一趟**只读预演**（`BLAST_COMMANDS` 表：
   `git status --porcelain` / `git clean -nd` / `git stash list` / `git branch -vv` / `git log`），
   把清单接进审批请求的 `reason` 与 **`displayReason` 的每一门语言**（只接 `reason` 的话弹窗
-  看不到证据，这次改动就白做了）。**空输出是结论**（"此刻不会改动任何东西"），不是"没查到"。
-  四条边界见 `lib/blast-radius.ts` 的文件头。
+  看不到证据，这次改动就白做了）。**空输出当时被写成结论**（"此刻不会改动任何东西"）；
+  这一说法后来被真实 git 行为证伪，现行口径见本版 Fixed 的「爆炸半径预演不再把"探针没输出"
+  说成"不会改动任何东西"」一条。
+  其余边界见 `lib/blast-radius.ts` 的文件头。
 
 - **判定统计读数进设置卡（官方 Typert Remote）。** 卡片此前只有输入控件，看不到"拦了什么、慢在哪"。
   现在宿主侧挂一枚读数服务（`lib/stats-remote.ts`，`@Remote("stats")`），卡片打开时（另有「刷新」）

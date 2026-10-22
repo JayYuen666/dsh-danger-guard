@@ -15,6 +15,7 @@
     "outDir": "types",
     "declaration": true,
     "emitDeclarationOnly": true,
+    "removeComments": true,
     "noEmit": false
   },
   "include": ["host.ts", "settings-host.ts", "lib/**/*.ts"]

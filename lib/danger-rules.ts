@@ -32,10 +32,14 @@ import path from "node:path";
 // 段边界这一层单列在 lib/command-segments.ts：四类规则都只在"段"上判定，断在哪里与判成什么无关。
 // 同一个模块也负责切词与结构视图——三处读法必须同源，否则"这一段里有哪些词"会随判据而变。
 import { hasUnclosedQuote, lexTokens, splitSegments, structureView } from "./command-segments.ts";
-import { asOsPath } from "./path-format.ts";
-import type { OsPath } from "./path-format.ts";
+import { dockerDanger, kubectlDanger } from "./container-rules.ts";
+import { declaredTargets } from "./edit-targets.ts";
 import type { ShellToken } from "./command-segments.ts";
 import type { Fix } from "./fix.ts";
+
+// 灾难目标归一与目标键提取各自单独成模块：判定层只保留规则。
+export { disasterTargetPathOf } from "./disaster-target.ts";
+export { declaredTargets } from "./edit-targets.ts";
 // 出路形状住在零依赖的 ./fix.ts（为什么不在本文件：见那枚模块的头部注释）。
 export type { Fix, FixRole } from "./fix.ts";
 
@@ -157,6 +161,13 @@ export type RuleTier = "deny" | "ask";
  */
 export const SANDBOX_COVERED: ReadonlySet<BashDenialKey> = new Set(["rmrf"]);
 
+/** 只读**自有**属性查找。对象字面量会继承 `Object.prototype`，而这里的 key 来自命令输入；
+ *  `table["hasOwnProperty"]` 和 `table["__proto__"]` 不是规则，不能当函数或规则键使用。 */
+const ownLookup = <Value>(
+  table: Readonly<Record<string, Value>>,
+  key: string,
+): Value | undefined => (Object.hasOwn(table, key) ? table[key] : undefined);
+
 export const RULE_TIER: Readonly<Record<BashDenialKey, RuleTier>> = {
   // 已确认危险：命令形态本身就是错的，出路是改写命令（各有 `Fix` 或文案里的静态指示）。
   noVerify: "deny",
@@ -189,6 +200,10 @@ export const RULE_TIER: Readonly<Record<BashDenialKey, RuleTier>> = {
   kubectlDelete: "ask",
   dbMigrate: "ask",
 };
+
+/** 运行时规则键校验：动态分支回传的值在进入宿主前必须真的是本表的一枚键。 */
+const isBashDenialKey = (key: unknown): key is BashDenialKey =>
+  typeof key === "string" && Object.hasOwn(RULE_TIER, key);
 
 /** git 的命令词（大小写敏感：POSIX 宿主上 `GIT` 是另一个名字；`git.exe` 不判成 git，
  *  与本仓既定的保守口径一致——见测试「nO_VERIFY 前有 git 别名前缀组合」）。 */
@@ -321,20 +336,8 @@ const PREFIX_VALUE_FLAGS: Readonly<Record<string, readonly string[]>> = {
   ionice: ["-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid", "-u", "--uid"],
   flock: ["-w", "--timeout", "-E", "--conflict-exit-code", "-c", "--command"],
   chroot: ["--userspec", "--groups"],
-  nsenter: [
-    "-t",
-    "--target",
-    "-S",
-    "--setuid",
-    "-G",
-    "--setgid",
-    "-w",
-    "--wd",
-    "-r",
-    "--root",
-    "-F",
-    "--no-fork",
-  ],
+  // `-F/--no-fork` 与 `-r/--root`（可选值）都不吃下一词：吃掉命令词就是一条现成的逃逸口。
+  nsenter: ["-t", "--target", "-S", "--setuid", "-G", "--setgid", "-w", "--wd"],
   "systemd-run": [
     "-u",
     "--unit",
@@ -382,7 +385,8 @@ const PREFIX_VALUE_FLAGS: Readonly<Record<string, readonly string[]>> = {
   ],
   taskset: ["-c", "--cpu-list"],
   timeout: ["-k", "-s", "--kill-after", "--signal"],
-  watch: ["-n", "-t", "--interval", "--title"],
+  // `-t/--no-title` 是布尔；把 `-t` 当取值会吞掉后面的命令词。
+  watch: ["-n", "--interval", "-q", "--equexit", "-s", "--signal"],
   xargs: ["-a", "-d", "-e", "-I", "-i", "-J", "-L", "-l", "-n", "-P", "-s", "-S"],
   parallel: ["-a", "-j", "-n", "-s", "--jobs", "--arg-file", "--max-args", "--sshlogin"],
 };
@@ -403,8 +407,6 @@ const PREFIX_POSITIONAL_VALUE = new Set([
   "chroot",
   // `flock <file> <命令>`：锁文件是位置取值。
   "flock",
-  // `nsenter` 的目标 pid 可用位置形态给。
-  "nsenter",
 ]);
 
 /** 时长词：`5` / `10s` / `5m` / `1h` / `2d`，以及 GNU timeout 承认的**小数与 MM:SS**
@@ -479,6 +481,11 @@ function consumeToolFlags(
     if (flag === undefined || !flag.startsWith("-")) {
       break;
     }
+    // `--` 之后是位置参数，不再按旗标消费；保留它本身后交给命令头定位。
+    if (flag === "--") {
+      consumed += 1;
+      break;
+    }
     const step = valueFlags.includes(flag) ? 2 : 1;
     i += step;
     consumed += step;
@@ -502,6 +509,10 @@ function chrtSkip(words: readonly string[], i: number): number {
  *  `nice -n 10 npm …` 的 npm 不是取值不能吃，而 `timeout -k 5 10 rm …` 的 10 是时长必须吃，
  *  否则 rm 整个落到头外（实测逃逸口）。 */
 function isPositionalValue(bin: string, flags: number, positional: string | undefined): boolean {
+  // `nice` 的裸位置取值是 niceness；`nice rm -rf ~` 里的 rm 是命令，不是取值。
+  if (bin === "nice") {
+    return flags === 0 && positional !== undefined && /^[+-]?\d+$/u.test(positional);
+  }
   return (
     PREFIX_POSITIONAL_VALUE.has(bin) &&
     positional !== undefined &&
@@ -535,7 +546,7 @@ function runPrefixEnd(tokens: readonly ShellToken[]): number {
       break;
     }
     const bins = wrapperBins(token);
-    const valueFlags = bins.flatMap((bin) => PREFIX_VALUE_FLAGS[bin] ?? []);
+    const valueFlags = bins.flatMap((bin) => ownLookup(PREFIX_VALUE_FLAGS, bin) ?? []);
     if (bins.includes("chrt")) {
       i = chrtSkip(words, i);
     } else if (valueFlags.length > 0) {
@@ -560,10 +571,29 @@ function runPrefixEnd(tokens: readonly ShellToken[]): number {
  * 候选面收在"非旗标、非空"的词上，因此 `xargs cat rm` 这类"参数恰好像命令词"的串
  * 至多多看一次头，仍需自己配齐旗标与灾难目标才成立——误拦面按构造是小的。
  */
+/** 只消费参数、不执行参数的常见命令：包装词后面第一枚是它们时，后续词只是数据。
+ *  没有这一层，`env printf '%s' git reset --hard` 会把打印参数里的 git 当成命令头。 */
+const DATA_ONLY_HEADS: ReadonlySet<string> = new Set([
+  "printf",
+  "echo",
+  "cat",
+  "grep",
+  "rg",
+  "sed",
+  "awk",
+  "jq",
+  "tee",
+  "ls",
+]);
+
 function headStarts(tokens: readonly ShellToken[]): number[] {
   const start = runPrefixEnd(tokens);
   if (start === 0) {
     return [0];
+  }
+  const first = tokens[start];
+  if (first !== undefined && DATA_ONLY_HEADS.has(binNameOf(first.value))) {
+    return [start];
   }
   const starts: number[] = [];
   for (let i = start; i < tokens.length; i += 1) {
@@ -609,6 +639,8 @@ function rmBinOf(token: ShellToken): string {
  *  `/s` 与 POSIX 绝对路径字面同形：把 `rm -rf /etc` 的 `/etc` 当旗标丢掉，
  *  会从"漏拦"翻成"判定失效"，所以方言必须由命令词决定，不能靠字面。 */
 const CMD_BUILTINS: ReadonlySet<string> = new Set(["rd", "rmdir", "del", "erase"]);
+/** pwsh 里这些词也是 `Remove-Item` 的别名；只有 Windows 方言调用点才按 cmdlet 判定。 */
+const CMDLET_ALIASES: ReadonlySet<string> = new Set([...CMD_BUILTINS, "rm"]);
 
 /** cmd 旗标的**字形**：`/` + 单个字母。长度钉死在一个字母上，`/etc`、`/usr/local`
  *  这类 POSIX 绝对路径才不会因为「它也是斜杠打头」被当成旗标丢掉。
@@ -852,20 +884,24 @@ function hasForceRecursive(
  *  `xargs cat sh` 里的 sh 是文件名不是命令，一律当二次执行就是误伤。 */
 const EXEC_WRAPPERS = "(?:sudo|env|nohup|exec|doas|pkexec|xargs|parallel)";
 const WRAPPER_SKIP = String.raw`(?:-\S+|\d+|\{\}|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+`;
-/** 接收端名单含 **PowerShell 家族**（`pwsh`/`powershell`）与 `iex`/`Invoke-Expression`：
- *  Windows 上的"下载即执行"就是 `curl x | iex`，与 `curl x | sh` 同危（本轮定的口径：
- *  PowerShell 家族按执行器对待，`.exe` 与大小写都不成为豁免理由）。 */
+/** 执行端名单含 **PowerShell 家族**（`pwsh`/`powershell`）与 `iex`/`Invoke-Expression`，
+ *  以及会把 stdin 当代码执行的 Python / Node / Perl / Ruby / PHP / Lua / osascript：
+ *  `curl x | iex`、`curl x | python3` 与 `curl x | sh` 同危。`.exe` 与大小写不构成豁免。 */
+const PIPE_EXECUTOR_NAMES = String.raw`sh|bash|zsh|dash|ksh|pwsh|powershell|invoke-expression|iex|python(?:2|3)?|pypy(?:3)?|node(?:js)?|perl5?|ruby|php|lua(?:jit|[0-9.]*)?|osascript`;
 const SHELL_EXEC = new RegExp(
   `(?:^|\\||<\\(|\\$\\()\\s*` +
     `(?:(?:[^|\\s]*/)?${EXEC_WRAPPERS}\\s+(?:${WRAPPER_SKIP})*)*` +
-    `(?:[^|\\s]*/)?(?:sh|bash|zsh|dash|ksh|pwsh|powershell|invoke-expression|iex)\\b`,
+    `(?:[^|\\s]*/)?(?:${PIPE_EXECUTOR_NAMES})\\b`,
   "iu",
 );
 
 /** 进程替换的执行端命令头（`sh <(curl …)`、`source <(curl …)`、`. <(curl …)`）。
  *  `source`/`.` 与解释器同义——它们是"取回即执行"的常见写法，不是逃逸口。 */
-const SHELL_HEAD_RE =
-  /^(?:(?:sudo|env|nohup|exec|doas|pkexec)\s+)*(?:[^\s]*\/)?(?:sh|bash|zsh|dash|ksh|source)\b|^(?:(?:sudo|env)\s+)*\.(?=\s)/u;
+const SHELL_HEAD_RE = new RegExp(
+  `^(?:(?:sudo|env|nohup|exec|doas|pkexec)\\s+)*(?:[^\\s]*/)?(?:${PIPE_EXECUTOR_NAMES}|source)\\b` +
+    `|^(?:(?:sudo|env)\\s+)*\\.(?=\\s)`,
+  "u",
+);
 
 /** 长驻开发服务器命令头（首 token 或 npm/pnpm/yarn/bun 的 run 参数）。 */
 const DEV_SERVER_WORDS = new Set(["vite", "webpack", "next", "nuxt", "cargo-watch", "watchexec"]);
@@ -1002,15 +1038,13 @@ export interface BashDangerOptions {
    *  跑 PowerShell Core 时平台不是 win32，但 pwsh 读 `C:\Windows` 读的就是那个树）。
    *  缺省 = POSIX 读法：「非 Windows 宿主上轨道退出」的结论一字不动。 */
   shellDialect?: ShellDialect;
-  /** **调用点上下文，不是用户配置**：这条规则键在**本次权限档位**下的处置结论。
+  /** **调用点上下文，不是用户配置**：这次命中在**本次权限档位**下的实际处置结论。
    *
-   *  为什么扫描层需要它：串行合成的命令（`a && b`、`a; b`、管道）里，"哪一段最严重"决定
-   *  最终交回哪枚键。静态表把 `pipeShell` 记成 `deny`、`gitForcePush` 记成 `ask`，于是
-   *  `curl x | sh; git push -f` 会停在 `pipeShell` 上收工；可按档位分叉之后，前者在某些档位
-   *  是 `allow`、后者仍要 `ask` —— 用静态表排序就会把真正要拦的那一段整个吞掉。
-   *  给了这一位，排序与"已收工"的判据都按**真实档位**求值；不给则回落静态 `RULE_TIER`
-   *  （所有既有调用点与单测的行为一字不变）。 */
-  severityOf?: (key: BashDenialKey) => RuleTier | "allow";
+   *  入参是完整的 `BashVerdict` 而不是规则键：调用点可能掌握**逐命中**的事实（例如 `rmrf`
+   *  的目标是否完全落在沙箱管辖内），只看键会把"本档实际放行的那一枚"排成 `deny`，
+   *  于是扫描提前收工、吞掉后面的段。给了这一位，排序与"已收工"都按**实际处置**求值；
+   *  不给则回落静态 `RULE_TIER`（所有既有调用点与单测的行为一字不变）。 */
+  severityOf?: (verdict: BashVerdict) => RuleTier | "allow";
 }
 
 /** git 里确实"旗标 + 空格 + 取值"分写的选项（全局 + 清单子命令的常见面，等值匹配）。
@@ -1041,9 +1075,45 @@ const GIT_VALUE_FLAGS = new Set([
   "--receive-pack",
 ]);
 
-/** 短旗标簇里**恒带取值**的字母：`-m`/`-F`/`-C`/`-x`/`-u`。簇尾字母的取值是**下一词**
- *  （`-am "msg"` 的 msg），簇中非尾字母的取值是**同词余部**（`-mmassage`）。 */
-const GIT_SHORT_VALUE_CHARS = "mFCxu";
+/** 子命令之后各短旗标字母是否取值。**不能按全局字母表判**：`push -u` / `clean -x` 是布尔，
+ *  而 `commit -m` / `clean -e` 才取值。错把布尔当取值会吞掉紧跟的 `-f`/`--force`。
+ *  未列出的子命令按“都不取值”处理：把取值当布尔最多多看一眼，反向才会漏拦。 */
+const GIT_SHORT_VALUE_CHARS_BY_SUB: Readonly<Record<string, ReadonlySet<string>>> = {
+  commit: new Set(["m", "F", "C", "c", "t"]),
+  merge: new Set(["m"]),
+  "cherry-pick": new Set(["m"]),
+  revert: new Set(["m"]),
+  push: new Set(["o"]),
+  clean: new Set(["e"]),
+  restore: new Set(["s"]),
+  stash: new Set(["m"]),
+  branch: new Set(["u"]),
+  checkout: new Set(["b", "B", "t"]),
+};
+
+/** 子命令之前只有 `-C <path>` 这一枚短取值旗标；`-c` 由 `takeGitConfigPair` 单独处理。 */
+const GIT_GLOBAL_SHORT_VALUE_CHARS: ReadonlySet<string> = new Set(["C"]);
+const NO_SHORT_VALUE_CHARS: ReadonlySet<string> = new Set();
+
+/** 子命令专属的长取值旗标（只收确定取值的；布尔旗标收进来会吞掉后面的危险旗标）。 */
+const GIT_LONG_VALUE_FLAGS_BY_SUB: Readonly<Record<string, ReadonlySet<string>>> = {
+  commit: new Set(["--trailer", "--fixup", "--squash"]),
+  push: new Set(["--repo"]),
+  clean: new Set(["--exclude"]),
+  restore: new Set(["--source", "--conflict"]),
+  checkout: new Set(["--conflict", "--orphan"]),
+  branch: new Set(["--set-upstream-to"]),
+  "cherry-pick": new Set(["--mainline"]),
+  revert: new Set(["--mainline"]),
+};
+
+const gitShortValueChars = (sub: string | undefined): ReadonlySet<string> =>
+  sub === undefined
+    ? GIT_GLOBAL_SHORT_VALUE_CHARS
+    : (ownLookup(GIT_SHORT_VALUE_CHARS_BY_SUB, sub) ?? NO_SHORT_VALUE_CHARS);
+
+/** `--config-env=<name>=<envvar>` 也能把钩子目录改走；它不是 `-c` 的取值形态。 */
+const CONFIG_ENV_HOOKS_PATH_RE = /^--config-env=core\.hooksPath=/iu;
 
 /** `git config core.hooksPath <dir>`：钩子目录被永久改走，等价于永久关掉所有钩子。
  *  `--get/--unset/--list` 是读取或恢复默认，不构成绕过。 */
@@ -1101,6 +1171,7 @@ const takeGitSub = (walk: GitWalk, word: string): void => {
 /** 长旗标：`--no-verify` 及其缩写是绕过；带独立取值的旗标吃掉下一词（那枚取值不是旗标）。 */
 const takeGitLong = (walk: GitWalk, word: string): void => {
   walk.hooksReadForm ||= HOOKS_PATH_READ_FORMS.test(word);
+  walk.hooksPathKey ||= CONFIG_ENV_HOOKS_PATH_RE.test(word);
   if (isNoVerifyAbbrev(word) && !walk.bypassWords.includes(word)) {
     walk.bypassWords.push(word);
     walk.hooksSkipped = true;
@@ -1111,7 +1182,8 @@ const takeGitLong = (walk: GitWalk, word: string): void => {
   //（`split` 必返回至少一个元素），只为过 `noUncheckedIndexedAccess` 而存在。
   const equals = word.indexOf("=");
   walk.longFlags.push(equals === -1 ? word : word.slice(0, equals));
-  walk.pos += GIT_VALUE_FLAGS.has(word) ? 2 : 1;
+  const subValueFlags = ownLookup(GIT_LONG_VALUE_FLAGS_BY_SUB, walk.sub ?? "");
+  walk.pos += GIT_VALUE_FLAGS.has(word) || subValueFlags?.has(word) === true ? 2 : 1;
 };
 
 /** 位置参数：`git config core.hooksPath <dir>` 的钩子目录键就长在这个位置上。 */
@@ -1136,6 +1208,7 @@ const takeGitConfigPair = (walk: GitWalk): void => {
  */
 function takeGitCluster(walk: GitWalk, word: string): void {
   const cluster = word.slice(1);
+  const valueChars = gitShortValueChars(walk.sub);
   let tailValue = false;
   for (let cursor = 0; cursor < cluster.length; cursor += 1) {
     const flag = cluster.charAt(cursor);
@@ -1153,7 +1226,7 @@ function takeGitCluster(walk: GitWalk, word: string): void {
       }
       walk.hooksSkipped = true;
     }
-    if (GIT_SHORT_VALUE_CHARS.includes(flag)) {
+    if (valueChars.has(flag)) {
       tailValue = cursor === cluster.length - 1;
       break;
     }
@@ -1274,18 +1347,40 @@ const cleanForces = (facts: GitFacts): boolean =>
   !hasLong(facts, "--dry-run");
 
 /** `git push` 的**重写远端**形：`--force-with-lease` 一并算 —— 它比 `--force` 温和，
- *  但仍然是重写历史（"租约"保的是"别人没推过"，不是"历史不会变"）。 */
+ *  但仍然是重写历史（"租约"保的是"别人没推过"，不是"历史不会变"）。
+ *  `+refspec` 同样是强制更新（`git push origin +main` 实测会改写远端）。 */
 const pushForces = (facts: GitFacts): boolean =>
-  hasShort(facts, "f") || hasLong(facts, "--force") || hasLong(facts, "--force-with-lease");
+  hasShort(facts, "f") ||
+  hasLong(facts, "--force") ||
+  hasLong(facts, "--force-with-lease") ||
+  facts.positionals.some((word) => word.startsWith("+"));
 
-/** `git checkout` 的**丢弃**形：只认 `-- <path>` 与 `.`/`..` 两形。
- *  ⚠ 裸 `git checkout <path>` **刻意不判** —— 要与"那个名字是分支还是文件"才能分，
- *  而本包不碰 fs。见 README 已知边界。 */
+/** `git branch` 的强删：`-D`，以及 `--delete`/`-d` 与 `--force`/`-f` 的组合
+ *  （`git branch --delete --force side` 实测会删掉未合并且未提示的分支）。 */
+const branchForceDelete = (facts: GitFacts): boolean =>
+  hasShort(facts, "D") ||
+  ((hasShort(facts, "d") || hasLong(facts, "--delete")) &&
+    (hasShort(facts, "f") || hasLong(facts, "--force")));
+
+/** `git checkout` 的**丢弃**形：`-- <path>`、`.`/`..`、`-f`/`--force`，以及
+ *  “一个 rev/路径 + 至少一个路径”的形态（`git checkout HEAD f` 实测覆盖工作区文件）。
+ *  `-b`/`-B` 建分支时后面的位置词是起点，不是被覆盖的路径，故排除。 */
 const checkoutDiscards = (facts: GitFacts): boolean =>
-  facts.sawSeparator || facts.positionals.some((word) => /^\.{1,2}$/u.test(word));
+  facts.sawSeparator ||
+  hasShort(facts, "f") ||
+  hasLong(facts, "--force") ||
+  facts.positionals.some((word) => /^\.{1,2}$/u.test(word)) ||
+  (facts.positionals.length >= 2 && !hasShort(facts, "b") && !hasShort(facts, "B"));
+
+/** git 接受无歧义的长旗标缩写（`git reset --har` 实测会丢工作区改动）；只在
+ *  `--hard` 这类**没有同前缀危险旗标**的名字上启用，长度下限避免 `--h` 这类歧义写法。 */
+const hasLongAbbrev = (facts: GitFacts, name: string, minLength: number): boolean =>
+  facts.longFlags.some(
+    (word) => word === name || (word.length >= minLength && name.startsWith(word)),
+  );
 
 const GIT_DESTRUCTIVE: Readonly<Record<string, (facts: GitFacts) => BashDenialKey | undefined>> = {
-  reset: (facts) => (hasLong(facts, "--hard") ? "gitResetHard" : undefined),
+  reset: (facts) => (hasLongAbbrev(facts, "--hard", 4) ? "gitResetHard" : undefined),
   restore: (facts) => (restoreStagedOnly(facts) ? undefined : "gitRestoreDiscard"),
   clean: (facts) => (cleanForces(facts) ? "gitCleanForce" : undefined),
   push: (facts) => (pushForces(facts) ? "gitForcePush" : undefined),
@@ -1293,12 +1388,12 @@ const GIT_DESTRUCTIVE: Readonly<Record<string, (facts: GitFacts) => BashDenialKe
     facts.positionals[0] === "drop" || facts.positionals[0] === "clear"
       ? "gitStashDrop"
       : undefined,
-  branch: (facts) => (hasShort(facts, "D") ? "gitBranchDelete" : undefined),
+  branch: (facts) => (branchForceDelete(facts) ? "gitBranchDelete" : undefined),
   checkout: (facts) => (checkoutDiscards(facts) ? "gitCheckoutDiscard" : undefined),
 };
 
 function gitDestructive(facts: GitFacts): BashDenialKey | undefined {
-  return facts.sub === undefined ? undefined : GIT_DESTRUCTIVE[facts.sub]?.(facts);
+  return facts.sub === undefined ? undefined : ownLookup(GIT_DESTRUCTIVE, facts.sub)?.(facts);
 }
 
 /** 单段（已按候选头切好）：破坏性 git 子命令？词表入口与 `gitBypass` **同源**
@@ -1308,28 +1403,16 @@ function gitDestructiveOf(tokens: readonly ShellToken[]): BashVerdict | undefine
   let result: BashVerdict | undefined;
   if (head !== undefined && isExactBinIn(head, GIT_BIN_NAMES)) {
     const key = gitDestructive(gitFacts(tokens.map((token) => token.value)));
-    if (key !== undefined) {
+    if (key !== undefined && isBashDenialKey(key)) {
       result = { key };
     }
   }
   return result;
 }
 
-/** 长旗标等值（`--flag=value` 的取值在走查里已被切掉，这里只比旗标身份）。 */
-
-/**
- * 这一串里有 dry-run 开关吗（`--dry-run` 或 `--dry-run=client`）——有它只打印、不动东西。
- * 官方 `kubectl delete --dry-run=client` 是这条命令**推荐**的预演写法，拦它就是把
- * 官方教给模型的正确姿势掐掉。
- */
-const DRY_RUN_FLAG = "--dry-run";
-const hasDryRun = (words: readonly string[]): boolean =>
-  words.some((word) => word === DRY_RUN_FLAG || word.startsWith(`${DRY_RUN_FLAG}=`));
-
 /** 段内**非旗标**词（`terraform -chdir=x apply` 的全局旗标要跳掉）。
- *  ⚠ 它不跳旗标的**取值**（`-n foo` 里的 `foo` 仍算位置参数）：各族的判据因此一律
- *  用"包含某词"而不是"第 n 枚是某词"——少一层取值表要维护，代价是极少数生僻写法
- *  会多问一句（`kubectl get pod delete` 那种），而多问一句是本族可接受的代价。 */
+ *  ⚠ 它不跳旗标的**取值**（`-n foo` 里的 `foo` 仍算位置参数），只用于 terraform 的
+ *  首位置词判定；kubectl/docker 走 `lib/container-rules.ts` 的全局旗标解析。 */
 const positionalsOf = (words: readonly string[]): string[] =>
   words.filter((word) => !word.startsWith("-"));
 
@@ -1345,16 +1428,6 @@ function terraformDanger(words: readonly string[]): BashDenialKey | undefined {
   }
   return key;
 }
-
-/** `docker … prune` 的破坏性形态。`docker system df` / `docker image rm` 都不在此列。 */
-const dockerDanger = (words: readonly string[]): BashDenialKey | undefined =>
-  positionalsOf(words.slice(1)).includes("prune") ? "dockerPrune" : undefined;
-
-/** `kubectl delete` 的破坏性形态（`--dry-run` 除外）。 */
-const kubectlDanger = (words: readonly string[]): BashDenialKey | undefined => {
-  const positional = positionalsOf(words.slice(1));
-  return positional.includes("delete") && !hasDryRun(words) ? "kubectlDelete" : undefined;
-};
 
 /**
  * 能出现在迁移命令词之前的**启动器**：`python manage.py migrate`、`npx prisma migrate`、
@@ -1374,7 +1447,51 @@ const MIGRATE_LAUNCHERS: ReadonlySet<string> = new Set([
   "poetry",
   "uv",
   "pipenv",
+  "pnpm",
+  "yarn",
+  "npm",
+  "bun",
 ]);
+
+/** 启动器与命令之间的子命令：`uv run` / `poetry run` / `pnpm exec` / `pnpm dlx` 等。 */
+const MIGRATE_RUN_SUBS: ReadonlySet<string> = new Set(["run", "exec", "dlx", "x"]);
+
+/** 包管理器"旗标 + 空格 + 取值"的全局旗标；迁移启动器前缀与包管理器判定共用。 */
+const PKG_VALUE_FLAGS = new Set(["--filter", "--prefix", "--cwd", "-C", "--dir", "--registry"]);
+
+/** `python -m <module>`：`-m` 是解释器旗标，不是命令词。 */
+const PYTHON_LAUNCHERS: ReadonlySet<string> = new Set([
+  "python",
+  "python2",
+  "python3",
+  "pypy",
+  "pypy3",
+]);
+
+/** 迁移命令之前的词是否全是启动器（含 `run`/`-m` 与包管理器旗标）。
+ *  `grep manage.py migrate` 因 `grep` 不是启动器而仍然不命中。 */
+function isMigrateLauncherPrefix(words: readonly string[]): boolean {
+  let index = 0;
+  let ok = true;
+  while (index < words.length && ok) {
+    /* v8 ignore next —— while 条件已保证下标在界内 */
+    const word = words[index] ?? "";
+    const prev = words[index - 1];
+    if (MIGRATE_LAUNCHERS.has(word)) {
+      index += 1;
+    } else if (word === "-m" && prev !== undefined && PYTHON_LAUNCHERS.has(prev)) {
+      index += 1;
+    } else if (MIGRATE_RUN_SUBS.has(word) && prev !== undefined && MIGRATE_LAUNCHERS.has(prev)) {
+      index += 1;
+    } else if (word.startsWith("-") && prev !== undefined) {
+      // 包管理器自己的旗标（`npx -y`、`pnpm --filter web`）；带值旗标连取值一起跳。
+      index += PKG_VALUE_FLAGS.has(word) ? 2 : 1;
+    } else {
+      ok = false;
+    }
+  }
+  return ok;
+}
 
 /**
  * 迁移命令的 `(命令词, 动作词)` 对：只收**公认会改 schema** 的动作。
@@ -1400,11 +1517,16 @@ const MIGRATE_PAIRS: readonly (readonly [string, string])[] = [
   ["knex", "migrate:rollback"],
 ];
 
-/** 动作词之后跟这些时表示**只读**（`prisma migrate status` 查状态而非发布迁移）。 */
-const MIGRATE_READ_ONLY_TAILS: ReadonlySet<string> = new Set(["status", "diff", "list", "history"]);
+/** 动作词之后跟这些时表示**只读**（`prisma migrate status` 查状态而非发布迁移）。
+ *  `history`/`list` 不作为尾巴豁免：它们也可能被当作 revision 名称
+ *  （`alembic upgrade history` 会真的升级），只在独立动作位置才安全。 */
+const MIGRATE_READ_ONLY_TAILS: ReadonlySet<string> = new Set(["status", "diff"]);
 
-/** 干跑旗标：有它时工具只打印将执行的语句（`manage.py migrate --plan`）。 */
-const MIGRATE_DRY_RUN_FLAGS: ReadonlySet<string> = new Set(["--plan", "--sql", DRY_RUN_FLAG]);
+/** 干跑旗标按工具分表：`--plan`/`--sql` 不是所有迁移器都表示“只打印”。 */
+const MIGRATE_DRY_RUN_FLAGS: Readonly<Record<string, ReadonlySet<string>>> = {
+  "manage.py": new Set(["--plan", "--sql"]),
+  alembic: new Set(["--sql"]),
+};
 
 /**
  * 数据库迁移命令？**按"命令位置 + 动作词"对**判，不按"段头等于某命令"判 ——
@@ -1413,18 +1535,18 @@ const MIGRATE_DRY_RUN_FLAGS: ReadonlySet<string> = new Set(["--plan", "--sql", D
 function migrateDanger(words: readonly string[]): BashDenialKey | undefined {
   const bins = words.map((word) => binNameOf(word));
   let key: BashDenialKey | undefined;
-  const dryRun = words.some((word) => MIGRATE_DRY_RUN_FLAGS.has(word));
   for (let index = 0; index < bins.length - 1 && key === undefined; index += 1) {
-    // 命令位置：它前面的每一枚词都得是启动器（`grep manage.py migrate` 就不成立了）。
-    const atCommand = words.slice(0, index).every((word) => MIGRATE_LAUNCHERS.has(word));
-    const head = bins[index];
+    const atCommand = isMigrateLauncherPrefix(words.slice(0, index));
+    /* v8 ignore next —— 循环条件已保证下标在界内 */
+    const head = bins[index] ?? "";
     const action = bins[index + 1];
     const tail = bins[index + 2];
+    const dryRunFlags = ownLookup(MIGRATE_DRY_RUN_FLAGS, head);
     const destructive =
       atCommand &&
       MIGRATE_PAIRS.some(([bin, verb]) => bin === head && verb === action) &&
       (tail === undefined || !MIGRATE_READ_ONLY_TAILS.has(tail)) &&
-      !dryRun;
+      !words.some((word) => dryRunFlags?.has(word) === true);
     if (destructive) {
       key = "dbMigrate";
     }
@@ -1449,10 +1571,10 @@ function infraDestructiveOf(tokens: readonly ShellToken[]): BashVerdict | undefi
   let key: BashDenialKey | undefined;
   if (head !== undefined) {
     // 命令词按**去路径前缀**认（`/usr/local/bin/kubectl` 与 `kubectl` 同判，与 git 族同口径）。
-    const predicate = INFRA_DESTRUCTIVE[binNameOf(head.value)];
+    const predicate = ownLookup(INFRA_DESTRUCTIVE, binNameOf(head.value));
     key = predicate?.(words) ?? migrateDanger(words);
   }
-  return key === undefined ? undefined : { key };
+  return key === undefined || !isBashDenialKey(key) ? undefined : { key };
 }
 
 /** 系统关键前缀：整树删除不可逆。/var 与 /tmp **不在列**——它们是常见的缓存/临时
@@ -1694,6 +1816,11 @@ function isWindowsShapeTarget(raw: string, home: string): boolean {
   // 那正是此前拆掉的污染换了个 disjunct 复活的形状。盘符两条吃的是 `^[a-z]:`，
   // 压不压都撞不到；UNC 那条本来就判 shaped（前导 `//` 一压即失，判不得归一值）。
   const winTarget = pointed.startsWith("//") ? pointed : path.posix.normalize(pointed);
+  // 无盘符形态的 `..` 要在**当前盘根**上折掉：`\..\..\Windows` 在 Windows 上就是
+  // `\Windows`（根之上不再上跳）。只折这一支，UNC 的前导 `//` 与盘符形都不受影响。
+  const driveless = DRIVELESS_SHAPE_RE.test(raw)
+    ? path.posix.normalize(foldWindowsSeparators(raw))
+    : undefined;
   // 家目录在这一侧要过字形归一：Windows 上 os.homedir() 是 `C:\Users\x`，与折过斜杠的
   // winTarget 不同形，原样比较则永不成立（POSIX 侧那条字面比较用的仍是原值）。
   const winHome = normalizeWindowsShape(home);
@@ -1736,8 +1863,7 @@ function isWindowsShapeTarget(raw: string, home: string): boolean {
     // 无盘符的当前盘绝对形态 `\Windows\System32`：盘符字母未知 ⇒ 只比树名，且树名集合与
     // WINDOWS_SYSTEM_AND_USERS_RE 严格同族（**不**扩到 SYSTEM_PATH_PREFIXES 那 24 条——
     // `\etc`、`\usr` 这类相对删除在本包口径里是转义字面量，扩过来就是把 `\etc` 变成误拦）。
-    (DRIVELESS_SHAPE_RE.test(raw) &&
-      DRIVELESS_SYSTEM_AND_USERS_RE.test(foldWindowsSeparators(raw))) ||
+    (driveless !== undefined && DRIVELESS_SYSTEM_AND_USERS_RE.test(driveless)) ||
     // 混分隔符的家目录后代：家目录写成 POSIX 字形（`/data/bob`）再用 `\` 下钻。pwsh 两种
     // 分隔符都吃，折全量之后比家目录前缀；POSIX 侧不折（`\` 是转义），故这条只在轨道内。
     foldWindowsSeparators(raw).startsWith(`${foldWindowsSeparators(home)}/`) ||
@@ -1923,24 +2049,51 @@ function splitBraceAlternatives(inner: string): string[] {
   return parts;
 }
 
-/** 闭区间序列（含降序）；跨度超预算返回 null。 */
+/** 闭区间序列（含降序与显式步长）；非安全整数、零步长或超预算返回 null。
+ *  终止条件用**预算算出的固定次数**，不依赖 `current` 的数值比较：超出安全整数后
+ *  `current += 1` 可能不再前进，单靠边界判断会死循环。 */
 function rangeWords(
   start: number,
   end: number,
+  step: number,
   render: (current: number) => string,
 ): string[] | null {
-  let out: string[] | null;
-  if (Math.abs(end - start) + 1 <= BRACE_EXPANSION_BUDGET) {
+  const magnitude = Math.abs(step);
+  const count = Math.floor(Math.abs(end - start) / magnitude) + 1;
+  let out: string[] | null = null;
+  if (
+    Number.isSafeInteger(start) &&
+    Number.isSafeInteger(end) &&
+    Number.isSafeInteger(step) &&
+    step !== 0 &&
+    Number.isSafeInteger(count) &&
+    count <= BRACE_EXPANSION_BUDGET
+  ) {
     out = [];
-    const step = start <= end ? 1 : -1;
-    for (let current = start; step > 0 ? current <= end : current >= end; current += step) {
-      out.push(render(current));
+    // 负步长在 bash 里先交换端点再按绝对值走（`{1..5..-2}` 得 5 3 1、`{5..1..-2}` 得 1 3 5）。
+    const from = step < 0 ? end : start;
+    const to = step < 0 ? start : end;
+    const direction = from <= to ? 1 : -1;
+    for (let index = 0; index < count; index += 1) {
+      out.push(render(from + index * magnitude * direction));
     }
-  } else {
-    out = null;
   }
   return out;
 }
+
+/** bash 数字范围的补零：一端带前导零时，另一端也按最长的字面宽度补零。 */
+function braceNumberRenderer(width: number): (current: number) => string {
+  return (current) => {
+    if (width === 0) {
+      return String(current);
+    }
+    const digits = String(Math.abs(current)).padStart(width - (current < 0 ? 1 : 0), "0");
+    return current < 0 ? `-${digits}` : digits;
+  };
+}
+
+/** 端点带前导零（`0` 本身不算）时启用 bash 的补零展开。 */
+const BRACE_PADDED_RE = /^-?0\d/u;
 
 /** `{a..c}` 序列；没匹配上返回 null。 */
 function expandAlphaSequence(alpha: RegExpExecArray | null): string[] | null {
@@ -1951,17 +2104,36 @@ function expandAlphaSequence(alpha: RegExpExecArray | null): string[] | null {
         alpha.groups?.["start"]?.codePointAt(0) ?? 0,
         alpha.groups?.["end"]?.codePointAt(0) ?? 0,
         /* v8 ignore stop */
+        1,
         String.fromCodePoint,
       );
 }
 
 /** `{1..3}` / `{a..c}` 序列；没有序列（含只有一组字面花括号）一律返回 null。 */
 function expandBraceSequence(inner: string): string[] | null {
-  const numeric = /^(?<start>-?\d+)\.\.(?<end>-?\d+)(?:\.\.-?\d+)?$/u.exec(inner);
+  const numeric = /^(?<start>-?\d+)\.\.(?<end>-?\d+)(?:\.\.(?<step>-?\d+))?$/u.exec(inner);
   const alpha = /^(?<start>[A-Za-z])\.\.(?<end>[A-Za-z])$/u.exec(inner);
-  return numeric === null
-    ? expandAlphaSequence(alpha)
-    : rangeWords(Number(numeric.groups?.["start"]), Number(numeric.groups?.["end"]), String);
+  let out: string[] | null;
+  if (numeric === null) {
+    out = expandAlphaSequence(alpha);
+  } else {
+    /* v8 ignore start —— 正则已保证两个分组存在；?? 只是类型层兜底 */
+    const startText = numeric.groups?.["start"] ?? "0";
+    const endText = numeric.groups?.["end"] ?? "0";
+    /* v8 ignore stop */
+    const stepText = numeric.groups?.["step"];
+    const width =
+      BRACE_PADDED_RE.test(startText) || BRACE_PADDED_RE.test(endText)
+        ? Math.max(startText.length, endText.length)
+        : 0;
+    out = rangeWords(
+      Number(startText),
+      Number(endText),
+      stepText === undefined ? 1 : Number(stepText),
+      braceNumberRenderer(width),
+    );
+  }
+  return out;
 }
 
 /**
@@ -2191,11 +2363,17 @@ function catastrophicRm(
     // 语义必须保住，不能为了 pwsh 的便利放开（代价：pwsh 里 `rm` 是 Remove-Item 的别名，
     // 两种语义在这个命令词上重叠 ⇒ 宁可误拦）。
     const psParamTrack = bin === "remove-item" || bin === "ri";
+    // `rm`/`del`/`rd` 在 pwsh 里是 Remove-Item 别名：只有调用点声明 Windows 方言时才启用
+    // cmdlet 的“递归单独即灾难级”，POSIX 轨的 `rm -r ~`（需 force）保持原结论。
+    const psAliasTrack = windowsDialect && CMDLET_ALIASES.has(bin);
     // 轨道参与的**两个**入口在这一处合并：宿主自己是 Windows（总闸）**或**调用点
     // 声明这段源是 Windows 方言（工具身份 = pwsh，见 BashDangerOptions.shellDialect）。
     // 后者不是猜字形——方言由调用点说话，POSIX 宿主上的 bash 读法逐字不变。
     const windowsTrack = isWindowsHost() || windowsDialect;
     const { flags, targets } = partitionRmArgs(tokens.slice(1), cmdDialect);
+    const psAliasRecurses =
+      psAliasTrack &&
+      flags.some((word) => isPsParamAbbrev(word, "recurse") && !isPsSwitchOff(word));
     // 环境变量形态是**未展开**的字面判据，与 `$HOME` 同构：它不随轨道/平台退出，
     // 因为 `%SystemRoot%\System32`、`%USERPROFILE%\Documents` 在任何读法下都不是一个
     // 合法的相对目标，而展开后删的分别是系统根树与用户树。
@@ -2216,7 +2394,7 @@ function catastrophicRm(
         ) ||
       (windowsTrack && isWindowsShapeTarget(token.raw, os.homedir()));
     if (
-      hasForceRecursive(flags, cmdDialect, psParamTrack) &&
+      (hasForceRecursive(flags, cmdDialect, psParamTrack) || psAliasRecurses) &&
       targets.some((target) => disaster(target))
     ) {
       // 点名**触发判据的那几枚目标**（去重、按首次出现序）：一条 `rm -rf ./build ~` 里
@@ -2247,7 +2425,7 @@ const FETCH_VERBS = String.raw`\b(?:curl|wget|fetch|invoke-webrequest|invoke-res
 const FETCH_HEAD_RE = new RegExp(FETCH_VERBS, "iu");
 const FETCH_IN_SUBST_RE = new RegExp(`<\\(\\s*${FETCH_VERBS}`, "iu");
 
-/** 单段：下载即执行？执行端是 shell 解释器才拦；jq/grep 等接收端放行。
+/** 单段：下载即执行？执行端是 shell/脚本解释器才拦；jq/grep 等接收端放行。
  *  入参是**结构视图**（引号内字面文本已清空、`$( )`/反引号体内保留），所以
  *  `echo "curl x | sh"` 放行而 `echo "$(curl x | sh)"` 照拦——后者实测真会执行。 */
 function pipeToShell(unprefixed: string): BashVerdict | undefined {
@@ -2303,15 +2481,7 @@ function peelSeg(seg: string): string {
   return src;
 }
 
-/** 包管理器"旗标 + 空格 + 取值"分写的全局旗标。只跳旗标不跳值会把取值误认成子命令：
- *  `pnpm --filter web run dev` 的 web 被当成子命令 ⇒ 后面的 run dev 整个不再被看（实测漏拦；
- *  `npm --prefix /x run dev` 同）。逐枚收录"在这些工具里**恒**带独立取值"的旗标，不做
- *  "未知旗标一律吞值"——吞错一个子命令的代价是漏拦（gitSubcommand 同一条纪律）。
- *  已登记的洞：`yarn workspaces foreach …` 是子命令链 + 旗标再 + 脚本，不在跳词表能
- *  表达的形状里，与「包装词那一类」同款登记。 */
-const PKG_VALUE_FLAGS = new Set(["--filter", "--prefix", "--cwd", "-C", "--dir", "--registry"]);
-
-/** 跳包管理器自身旗标（-y / --yes / --silent / -w …，含上表带值旗标的取值词），
+/** 跳包管理器自身旗标（-y / --yes / --silent / -w …，含 `PKG_VALUE_FLAGS` 带值旗标的取值词），
  *  返回下一个非旗标词的下标。 */
 function packageIndex(words: readonly string[], from: number): number {
   let pos = from;
@@ -2424,8 +2594,8 @@ interface DangerContext {
   /** 长驻一系认得的命令头（词表 + 包管理器 + npx/cargo），供两形选形用。 */
   devHeads: ReadonlySet<string>;
   windowsDialect: boolean;
-  /** 本次档位下的处置（缺席 = 回落静态 `RULE_TIER`，见 `BashDangerOptions.severityOf`）。 */
-  severityOf: ((key: BashDenialKey) => RuleTier | "allow") | undefined;
+  /** 本次档位下的实际处置（缺席 = 回落静态 `RULE_TIER`，见 `BashDangerOptions.severityOf`）。 */
+  severityOf: ((verdict: BashVerdict) => RuleTier | "allow") | undefined;
 }
 
 function dangerContextOf(opts: BashDangerOptions): DangerContext {
@@ -2476,7 +2646,7 @@ const SHELL_BIN_NAMES = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "cs
 /** 自己也带「`-c` 后跟一整条命令串」语义的包装词：它们的体与 shell 的 `-c` 同判。
  *  `ssh` 的体可以不带 `-c`（`ssh host "cmd"` 直接给位置串），那一支由
  *  `sshPositionalBody` 单独取，见下。 */
-const BODY_CARRYING_WRAPPERS = new Set(["su", "runuser", "ssh"]);
+const BODY_CARRYING_WRAPPERS = new Set(["su", "runuser"]);
 
 /** shell 的 `-c`，含与短选项的合写（`-lc` / `-ic` / `-xc`）：其后第一词是命令串。 */
 const SHELL_C_FLAG = /^-[A-Za-z]*c[A-Za-z]*$/u;
@@ -2566,7 +2736,7 @@ function codeFlagIndex(words: readonly string[], isCodeFlag: (word: string) => b
 /** 段头是不是"取代码串再执行"的非 shell 解释器（它的动作看不见 ⇒ 需确认）。 */
 function codeInterpreterHead(words: readonly string[]): boolean {
   const [head] = words;
-  const flags = head === undefined ? undefined : CODE_EVAL_FLAGS[binNameOf(head)];
+  const flags = head === undefined ? undefined : ownLookup(CODE_EVAL_FLAGS, binNameOf(head));
   return flags !== undefined && codeFlagIndex(words, (word) => flags.includes(word)) !== -1;
 }
 
@@ -2588,15 +2758,21 @@ const COMMAND_STRING_RE = /[\s;|&$`()<>]/u;
  * @returns 目标之后的词；没有目标时为空数组
  */
 function sshTailAfterTarget(words: readonly string[]): readonly string[] {
+  /* v8 ignore next —— 表里确有 ssh；?? 只是类型层兜底 */
+  const valueFlags = ownLookup(PREFIX_VALUE_FLAGS, "ssh") ?? [];
   let index = 1;
   while (index < words.length) {
     // `?? ""` 兜底不可达：while 条件已保证下标在界内，`words` 也没有稀疏位。
     /* v8 ignore next */
     const word = words[index] ?? "";
-    if (word.length > 0 && !word.startsWith("-")) {
+    if (word.startsWith("-")) {
+      // `-p 22` / `-o Key=Value` / `-c aes` 的取值不是目标名；`-p22` 这类附着值只占一词。
+      index += valueFlags.includes(word) && words[index + 1] !== undefined ? 2 : 1;
+    } else if (word.length > 0) {
       return words.slice(index + 1).filter((item) => item.length > 0);
+    } else {
+      index += 1;
     }
-    index += 1;
   }
   return [];
 }
@@ -2660,9 +2836,8 @@ function normalizeIfs(command: string): string {
 /** shell 系段头的 `-c` 体：只取紧跟该旗标的**那一枚**参数；段头不是 shell 则 undefined。 */
 function codeBodyOf(words: readonly string[], bin: string): string | undefined {
   let body: string | undefined;
-  // `su -c` / `runuser -c` / `ssh <host> -c?` 的体与 shell 的 `-c` 同一语义：**一整条命令串**，
-  // 由对端 shell 执行。不在这里取出来下钻，`su -c "rm -rf ~"` 就整条落在判定域外
-  // （段头是 su 时 `headStarts` 的多点位扫描只看"像命令的词"，而体是一个带空格的字符串）。
+  // `su -c` / `runuser -c` 的体与 shell 的 `-c` 同一语义：**一整条命令串**，由对端 shell
+  // 执行。`ssh -c` 是 cipher_spec，不是命令体；它的远端命令由下面的位置体分支取。
   if (SHELL_BIN_NAMES.has(bin) || BODY_CARRYING_WRAPPERS.has(bin)) {
     const index = codeFlagIndex(words, (word) => SHELL_C_FLAG.test(word));
     body = index === -1 ? undefined : words[index + 1];
@@ -2749,6 +2924,49 @@ function nestedShellVerdictOf(segText: string, words: readonly string[]): Nested
   return codeInterpreterHead(words) ? { kind: "opaque" } : shellBodyVerdict(segText, words);
 }
 
+/** 严重度次序：`allow` < `ask` < `deny`（数字只用于比较，不对外）。 */
+const SEVERITY_RANK: Readonly<Record<RuleTier | "allow", number>> = {
+  allow: 0,
+  ask: 1,
+  deny: 2,
+};
+
+/** 这条命中在**本次判定**下的严重度（给了 `severityOf` 就按实际处置，否则回落静态表）。 */
+const severityIn = (ctx: DangerContext, verdict: BashVerdict): number =>
+  SEVERITY_RANK[ctx.severityOf?.(verdict) ?? RULE_TIER[verdict.key]];
+
+/**
+ * 严重度择优：更严重的档压过较弱的；**同档先到先得**（先命中的那个更贴近模型写的那一段）。
+ *
+ * 为什么必须有它（引入 `ask` 档带出来的漏拦）：`commandDanger` 原本是"首命中即返回"，
+ * 而一枚 `ask` 档命中会**让扫描提前收工**——`git push -f && rm -rf ~` 里第一段是 ask，
+ * 函数当场返回，`rm -rf ~` **从未被判定**。宿主只在结论是 allow 时才 dispatch，而 guard
+ * 读到的又正是这个 ask 结论，于是用户点了"允许"之后灾难照常执行。所以扫描要一直走到
+ * 拿到 `deny` 为止，`ask` 只是记下来的备选。
+ *
+ * 严重度按**本次档位的实际处置**求值（见 `BashDangerOptions.severityOf`）：按静态表排序会把
+ * "本档已放行的前段"排在"本档仍要拦的后段"之前，从而把后者整个吞掉。逐命中求值还让调用点
+ * 把"稍后会让给沙箱的那一枚"排成 `allow`，扫描因此不会在它那里收工。
+ */
+function preferSevere(
+  ctx: DangerContext,
+  current: BashVerdict | undefined,
+  candidate: BashVerdict | undefined,
+): BashVerdict | undefined {
+  let result = current;
+  if (
+    candidate !== undefined &&
+    (result === undefined || severityIn(ctx, candidate) > severityIn(ctx, result))
+  ) {
+    result = candidate;
+  }
+  return result;
+}
+
+/** 拿到本档最严重的那一档（`deny`）了吗——拿到了就可以停止扫描，后续候选改变不了结论。 */
+const settled = (ctx: DangerContext, verdict: BashVerdict | undefined): boolean =>
+  verdict !== undefined && severityIn(ctx, verdict) === SEVERITY_RANK.deny;
+
 /**
  * 四类规则里的三类（git 绕过 / 灾难删除 / 长驻服务）逐候选命令头点位判一遍。
  * 候选点位由 `headStarts` 给：段头不是包装词时就是单点（既有判定域一字不加），
@@ -2762,13 +2980,19 @@ function ruleAtCandidates(
 ): BashVerdict | undefined {
   let denial: BashVerdict | undefined;
   for (const start of starts) {
-    denial =
-      gitBypass(tokens.slice(start)) ??
-      gitDestructiveOf(tokens.slice(start)) ??
-      infraDestructiveOf(tokens.slice(start)) ??
-      catastrophicRm(tokens.slice(start), ctx.windowsDialect) ??
-      devServer(tokens.slice(start), ctx);
-    if (denial !== undefined) {
+    const candidate = tokens.slice(start);
+    // 同一候选头可能同时命中多条规则（例如 hooksPath 与 push --force）。全部参与聚合，
+    // 否则前一条即使在本档是 allow，也会挡住后面更严重的命中。
+    for (const verdict of [
+      gitBypass(candidate),
+      gitDestructiveOf(candidate),
+      infraDestructiveOf(candidate),
+      catastrophicRm(candidate, ctx.windowsDialect),
+      devServer(candidate, ctx),
+    ]) {
+      denial = preferSevere(ctx, denial, verdict);
+    }
+    if (settled(ctx, denial)) {
       break;
     }
   }
@@ -2791,48 +3015,6 @@ function faceDenialOf(
   }
   return denial;
 }
-
-/** 严重度次序：`allow` < `ask` < `deny`（数字只用于比较，不对外）。 */
-const SEVERITY_RANK: Readonly<Record<RuleTier | "allow", number>> = {
-  allow: 0,
-  ask: 1,
-  deny: 2,
-};
-
-/** 这条规则键在**本次判定**下的严重度（给了 `severityOf` 就按档位，否则回落静态表）。 */
-const severityIn = (ctx: DangerContext, key: BashDenialKey): number =>
-  SEVERITY_RANK[ctx.severityOf?.(key) ?? RULE_TIER[key]];
-
-/**
- * 严重度择优：更严重的档压过较弱的；**同档先到先得**（先命中的那个更贴近模型写的那一段）。
- *
- * 为什么必须有它（引入 `ask` 档带出来的漏拦）：`commandDanger` 原本是"首命中即返回"，
- * 而一枚 `ask` 档命中会**让扫描提前收工**——`git push -f && rm -rf ~` 里第一段是 ask，
- * 函数当场返回，`rm -rf ~` **从未被判定**。宿主只在结论是 allow 时才 dispatch，而 guard
- * 读到的又正是这个 ask 结论，于是用户点了"允许"之后灾难照常执行。所以扫描要一直走到
- * 拿到 `deny` 为止，`ask` 只是记下来的备选。
- *
- * 严重度按**本次档位**求值（见 `BashDangerOptions.severityOf`）：按静态表排序会把"本档已
- * 放行的前段"排在"本档仍要拦的后段"之前，从而把后者整个吞掉。
- */
-function preferSevere(
-  ctx: DangerContext,
-  current: BashVerdict | undefined,
-  candidate: BashVerdict | undefined,
-): BashVerdict | undefined {
-  let result = current;
-  if (
-    candidate !== undefined &&
-    (result === undefined || severityIn(ctx, candidate.key) > severityIn(ctx, result.key))
-  ) {
-    result = candidate;
-  }
-  return result;
-}
-
-/** 拿到本档最严重的那一档（`deny`）了吗——拿到了就可以停止扫描，后续候选改变不了结论。 */
-const settled = (ctx: DangerContext, verdict: BashVerdict | undefined): boolean =>
-  verdict !== undefined && severityIn(ctx, verdict.key) === SEVERITY_RANK.deny;
 
 /**
  * 一段命令的判定：三类规则逐候选命令头点位 + 执行面（shell 的 `-c`、`eval`、非 shell
@@ -2948,51 +3130,8 @@ function commandDanger(
   return result;
 }
 
-/** 一次调用**声明目标路径**的键形。密钥面按这里认，不按工具名认：工具名随 provider 与版本
- *  变（改名、加别名、换实现都在宿主侧发生），而"要动哪个文件"这件事在参数里就写着。
- *  换到键形口径 ⇒ 只读类工具读凭据文件也会被拒（模型不该翻凭据，这是本轮定的取舍，
- *  出路是把动作写成只读动词或让用户手动操作）；事实门**不跟着放宽**，仍走 `editTargetPath`
- *  的严格写类口径——给只读工具要求"先读后写"就是自相矛盾的死锁。 */
-const TARGET_PATH_KEYS = [
-  "file_path",
-  "filePath",
-  "path",
-  "notebook_path",
-  "notebookPath",
-  "target_path",
-  "targetPath",
-];
-
-/** 只读动词：这一类动作不改文件，密钥面跳过（`str_replace_editor` 的 `command:"view"` 就是它）。
- *  只认动词而不猜工具名，与上面同一口径。 */
-const READ_ONLY_VERBS = new Set(["view", "read", "cat", "list", "search", "fetch", "get"]);
-
-/** 这次调用的动作是不是只读动词（三个常见动词键位任取其一）。 */
-function readOnlyAction(args: Record<string, unknown>): boolean {
-  const verb = args["command"] ?? args["action"] ?? args["mode"];
-  return typeof verb === "string" && READ_ONLY_VERBS.has(verb.toLowerCase());
-}
-
 /**
- * 一次工具调用声明的**全部**目标路径（键形口径，去重后按键位顺序给出）。
- * 只取非空字符串值：数组型多目标（`paths: [...]`）不在本轮口径内——宿主侧的批量写会逐条
- * 派发成单路径调用，认数组等于把"哪一条命中"这个上报签名丢掉。
- */
-export function declaredTargets(args: Record<string, unknown> | undefined | null): string[] {
-  const targets: string[] = [];
-  if (args && typeof args === "object" && !readOnlyAction(args)) {
-    for (const key of TARGET_PATH_KEYS) {
-      const value = args[key];
-      if (typeof value === "string" && value.length > 0 && !targets.includes(value)) {
-        targets.push(value);
-      }
-    }
-  }
-  return targets;
-}
-
-/**
- * **事实门专用**的写类目标（严格工具名口径，与上面的键形口径刻意不同源）：
+ * **事实门专用**的写类目标（严格工具名口径，与 `lib/edit-targets.ts` 的键形口径刻意不同源）：
  * - edit / write（dsh-tool-fs）→ args.file_path（兼容 args.path）；
  * - str_replace_editor（dsh-tool-str-replace-editor 并存编辑器）→ args.path，
  *   但 command=view 是只读，返回 null（不拦、不过事实门）；
@@ -3074,10 +3213,12 @@ const SECRET_PATH_RE = new RegExp(SECRET_PATH_BRANCHES.join("|"), "iu");
  *  超限的结论是**需确认**，不是放行——判不完就是没判完。 */
 const MAX_JUDGED_COMMAND_LENGTH = 1_000_000;
 const MAX_JUDGED_PATH_LENGTH = 4096;
+/** 宿主解析形是**外部输入**：数量与长度都要有界，否则组合正则/长路径会把同步 guard 拖住。 */
+const MAX_RESOLVED_PATHS = 8;
 
 /** editDanger 的可选配置（词表可配置化；缺省 = 内置正则）。 */
 export interface EditDangerOptions {
-  /** 额外密钥路径正则片段（追加到内置 SECRET_PATH_RE 的 OR 分支）。 */
+  /** 额外密钥路径正则片段：逐条编译，与内置规则并列匹配（不与内置源码拼接）。 */
   extraSecretPatterns?: readonly string[];
   /** 会话工作目录：相对目标先按它解析成绝对路径再判。
    *  **调用点上下文，不是用户配置**——宿主从 `session.header.cwd` 拿（host 侧已有
@@ -3108,7 +3249,7 @@ const MAX_SECRET_PATTERN_LENGTH = 512;
 /**
  * 逐条试编译用户给的密钥模式：`new RegExp(pat, "u")` 抛错、或长度超限的进 `rejected`。
  * 这是**加载期校验**的谓词（host 侧读配置时调用并把 rejected 报出来）；判定链里
- * `secretRe` 也走同一个函数，两侧不可能给出不一致的模式集合。
+ * `secretRegexes` 也走同一个函数，两侧不可能给出不一致的模式集合。
  */
 export function partitionSecretPatterns(patterns: readonly string[]): SecretPatternPartition {
   const accepted: string[] = [];
@@ -3127,16 +3268,12 @@ export function partitionSecretPatterns(patterns: readonly string[]): SecretPatt
   return { accepted, rejected };
 }
 
-/** 合并内置 + 用户配置的密钥路径正则（每次调用构建；实测开销可忽略，不必缓存）。 */
-function secretRe(opts: EditDangerOptions = {}): RegExp {
+/** 内置 + 用户配置的密钥路径正则，**逐条独立编译、独立匹配**。
+ *  不把它们拼成一个大正则：拼接会改变捕获组编号与反向引用语义（`(b)\1` 里的 `\1`
+ *  会指向前面模式的分组），还会让重复命名组在部分运行时组合失败。 */
+function secretRegexes(opts: EditDangerOptions = {}): readonly RegExp[] {
   const { accepted } = partitionSecretPatterns(opts.extraSecretPatterns ?? []);
-  if (accepted.length === 0) {
-    return SECRET_PATH_RE;
-  }
-  // 每条用户模式**自带边界**再进 OR：不包 `(?:…)` 的话，`a|b` 这种模式会和内置分支
-  // 抢同一层 alternation，等价于把内置面也改写了一遍。
-  const userBranches = accepted.map((pat) => String.raw`(?:${pat})`).join("|");
-  return new RegExp(`${SECRET_PATH_RE.source}|${userBranches}`, "iu");
+  return [SECRET_PATH_RE, ...accepted.map((pat) => new RegExp(pat, "iu"))];
 }
 
 /**
@@ -3179,13 +3316,19 @@ function formsToJudge(targetPath: string, opts: EditDangerOptions | undefined): 
  * 返回的是文案键（`secretPath` / `opaqueTarget`），拒绝理由由宿主按当前语言从消息表取。
  */
 function secretPathDeny(targetPath: string, opts?: EditDangerOptions): EditDenialKey | undefined {
+  const resolved = opts?.resolvedPaths?.[targetPath] ?? [];
   let result: EditDenialKey | undefined;
-  if (targetPath.length > MAX_JUDGED_PATH_LENGTH) {
+  if (targetPath.length > MAX_JUDGED_PATH_LENGTH || resolved.length > MAX_RESOLVED_PATHS) {
     result = "opaqueTarget";
   } else {
-    const re = secretRe(opts);
-    if (formsToJudge(targetPath, opts).some((form) => re.test(form))) {
-      result = "secretPath";
+    const forms = formsToJudge(targetPath, opts);
+    if (forms.some((form) => form.length > MAX_JUDGED_PATH_LENGTH)) {
+      result = "opaqueTarget";
+    } else {
+      const regexes = secretRegexes(opts);
+      if (forms.some((form) => regexes.some((re) => re.test(form)))) {
+        result = "secretPath";
+      }
     }
   }
   return result;
@@ -3304,6 +3447,12 @@ const RUN_IN_BACKGROUND_KEY = "run_in_background";
 const isBackgroundCall = (args: Record<string, unknown> | undefined): boolean =>
   args?.[RUN_IN_BACKGROUND_KEY] === true;
 
+/** 后台调用里的 devServer 按 allow 参与扫描，其余命中沿用调用点的实际处置。 */
+const backgroundSeverityOf =
+  (opts: BashDangerOptions | undefined): ((verdict: BashVerdict) => RuleTier | "allow") =>
+  (verdict) =>
+    verdict.key === "devServer" ? "allow" : (opts?.severityOf?.(verdict) ?? RULE_TIER[verdict.key]);
+
 /**
  * 一次调用命中的事实：结论 + **被判定的那条命令原文**。
  *
@@ -3336,67 +3485,23 @@ export function bashVerdictOf(
 ): BashHit | undefined {
   const dialect = dialectOfTool(name);
   const { command } = args ?? {};
+  const background = isBackgroundCall(args);
+  // 后台执行让路必须发生在**扫描期间**：若只在拿到最终 verdict 后丢弃 devServer，
+  // 扫描会先因 devServer（静态档 deny）收工，后面的 git reset / rmrf 根本没人看。
+  // 把后台 devServer 折进 severityOf 后，它按 allow 参与排序，后段继续被判定。
+  const severityOf = background ? backgroundSeverityOf(opts) : opts?.severityOf;
   let hit: BashHit | undefined;
   if (dialect !== undefined && typeof command === "string" && command.length > 0) {
-    const { key, fix } = bashVerdict(command, { ...opts, shellDialect: dialect }) ?? {};
-    const backgroundLongRun = key === "devServer" && isBackgroundCall(args);
+    const scanOpts: BashDangerOptions =
+      severityOf === undefined
+        ? { ...opts, shellDialect: dialect }
+        : { ...opts, shellDialect: dialect, severityOf };
+    const { key, fix } = bashVerdict(command, scanOpts) ?? {};
+    const backgroundLongRun = key === "devServer" && background;
     if (key !== undefined && !backgroundLongRun) {
       // 条件展开：`fix` 缺席时**不写该键**（exactOptionalPropertyTypes 下两者语义不同）。
       hit = { verdict: { key, ...(fix === undefined ? {} : { fix }) }, command };
     }
   }
   return hit;
-}
-
-/**
- * 灾难目标词面 → **绝对路径**，供宿主做包含性判断（"这枚目标包不包含任何可写根"）。
- *
- * 只处理 `catastrophicRm` 会点名的那几类形态，**归一不出来的一律 `undefined`**，
- * 调用方据此**保守地不让路**。刻意不处理的：
- *  - **glob**（`/*`、`/usr/**`）：落点要展开才知道，猜它就是在给误放行开口子；
- *  - **Windows 字形**（盘符 / UNC / `~\`）：要过一张盘符表才知道它指向哪棵树；
- *  - **`~user/…`**：要查口令表（本包明令不查，见 `USER_HOME_RE`）；
- *  - **`${HOME:-…}` 的带默认值形**：展开规则带分支，取最保守的那种不猜。
- *
- * @param word - `Fix.offending` 里的词面。
- * @param cwd  - 会话工作目录（相对形按它归一）；缺席时相对形交回 `undefined`。
- * @returns 归一后的绝对路径；判不出来时 `undefined`。
- */
-export function disasterTargetPathOf(word: string, cwd: OsPath | undefined): OsPath | undefined {
-  const home = os.homedir();
-  const homeItself = word === "~" || word === "$HOME";
-  const homeChild = word.startsWith("~/") || word.startsWith("$HOME/");
-  // **判不出来的一律不归一**（调用方据此不让路）：glob 与反斜杠形的落点要过展开或盘符表，
-  // 而"以 `~`/`$` 开头却不属于上面两族"的是 `~user`、`${HOME:-…}`、别的变量形 ——
-  // 它们要过口令表或展开规则的分支（本包明令不猜）。少了这两条排除，它们会掉进下面的
-  // cwd 分支被拼成一个**看起来合理**的路径，那是这条判据最危险的那种错。
-  const opaque =
-    word.includes("*") || word.includes("\\") || (!homeItself && !homeChild && /^[~$]/u.test(word));
-  let result: string | undefined;
-  if (!opaque) {
-    if (homeItself) {
-      result = home;
-    } else if (homeChild) {
-      // 家目录是**宿主真实路径**（Windows 上 `C:\Users\x`），它后面的子段来自 shell 词面
-      // （总用 `/` 写）。两者拼接必须走平台实现：`path.posix.join` 会给出
-      // `C:\Users\x/Documents` 这种混分隔符串，而下游的包含性比较是按平台分隔符做的
-      // ——拼错的后果是"这枚目标包不住可写根"判错，方向恰是放行一次灾难删除。
-      result = path.join(home, word.startsWith("~/") ? word.slice(2) : word.slice("$HOME/".length));
-    } else if (path.posix.isAbsolute(word)) {
-      // 词面是 **shell 文本**里的路径，归一要在它自己的坐标系（POSIX）里做：
-      // `path.posix.normalize("/etc/../usr")` 得 `/usr`，而 `path.win32.normalize("/etc")`
-      // 会给出 `\\etc` —— 那是当前盘根下的另一棵树，拿它跟宿主真实可写根比是错坐标系。
-      // 带盘符的 Windows 字形（`C:/etc`）**不在这条分支上**：`path.posix.isAbsolute` 对它是
-      // 假，而含反斜杠的形态已在 `opaque` 里被排除 ⇒ 本包对它们一律不归一（不猜落点）。
-      result = path.posix.normalize(word);
-    } else if (cwd !== undefined) {
-      // 相对形要落到宿主世界，必须用平台实现拼（`path.posix.resolve` 在 Windows 上会
-      // 把 `D:\w\proj` 拼成 `/a/.../D:\w\proj/build`）。
-      result = path.normalize(path.resolve(cwd, word));
-    }
-  }
-  // 每条分支都已在**它自己的坐标系**里归过一次（绝对形走 posix/win32 归一，
-  // 相对形走平台 resolve），这里不再二次归一。
-  // 出参标成 `OsPath`：调用方拿它跟宿主给的沙箱可写根做包含性比较，两个世界必须同源。
-  return result === undefined ? undefined : asOsPath(result);
 }

@@ -257,18 +257,18 @@ describe("severityResolverOf：扫描层按真实档位排序（串行命令的�
   it("逐键回的就是 `decideRule` 的结论", () => {
     const severity = severityResolverOf(READ_ONLY_FACTS);
     for (const key of ALL_RULE_KEYS) {
-      assert.equal(severity(key), decideRule(READ_ONLY_FACTS, key), key);
+      assert.equal(severity({ key }), decideRule(READ_ONLY_FACTS, key), key);
     }
   });
 
   it("同一键重复求值结果稳定（内部有记忆，但语义与逐次求值一致）", () => {
     const severity = severityResolverOf(READ_ONLY_FACTS);
-    assert.equal(severity("gitForcePush"), severity("gitForcePush"));
+    assert.equal(severity({ key: "gitForcePush" }), severity({ key: "gitForcePush" }));
   });
 
   it("只读档里 `pipeShell` 是 allow、`gitForcePush` 是 ask（后者更严重）", () => {
     const severity = severityResolverOf(READ_ONLY_FACTS);
-    assert.equal(severity("pipeShell"), "allow");
-    assert.equal(severity("gitForcePush"), "ask");
+    assert.equal(severity({ key: "pipeShell" }), "allow");
+    assert.equal(severity({ key: "gitForcePush" }), "ask");
   });
 });

@@ -4,9 +4,10 @@
 // 升级为强校验：拒绝持续到"对目标文件做过 read 且 grep 过它"为止。
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
-import { FactGate, renderDenyMessage } from "../lib/fact-gate.ts";
+import { FactGate, NO_DELIVERY, renderDenyMessage, undeterminable } from "../lib/fact-gate.ts";
 import type {
   FactDecision,
+  FactDenial,
   FactEvidenceInput,
   FactGap,
   FactGapContext,
@@ -62,7 +63,7 @@ const done = (over: Partial<FactEvidenceInput> = {}): FactEvidenceInput => ({
   gaps: [],
   determinate: true,
   logSeq: 1,
-  fileEditSeq: -1,
+  externalChangeSeq: -1,
   ...over,
 });
 /** 缺指定取证项（默认 read+refs，成因 never）的证据输入。 */
@@ -73,7 +74,7 @@ const lack = (
   gaps: needs.map((need) => ({ need, why: "never" as const })),
   determinate: true,
   logSeq: 1,
-  fileEditSeq: -1,
+  externalChangeSeq: -1,
   ...over,
 });
 
@@ -165,10 +166,17 @@ describe("factGate：强校验状态机", () => {
   it('重试时仍无证据 → 继续拒绝（不再"拦一次即放行"）', () => {
     // 首次 DENY
     gate.check("edit", PROJECT_TARGET_FILE);
-    // 重试，无证据
-    const r2 = gate.check("edit", PROJECT_TARGET_FILE);
+    // 重试，明确可判定、仍无证据 → 继续拒绝
+    const r2 = gate.check("edit", PROJECT_TARGET_FILE, undefined, lack(["read", "refs"]));
     assert.equal(r2.kind, "deny", "无证据必须继续拒绝");
     assert.match(denyMessage(r2), /fact-gate/iu);
+  });
+
+  it("缺少 input 的第二次调用 → indeterminate（不再把缺省两项当成持续可判定的拒绝）", () => {
+    const first = gate.check("edit", "/w/no-input.ts");
+    assert.equal(first.kind, "deny", "首拒仍给行动清单");
+    const second = gate.check("edit", "/w/no-input.ts");
+    assert.equal(second.kind, "indeterminate", "无证据可判定时走交互确认，而不是无限拒绝");
   });
 
   it("连续无证据拒绝达 maxDenies 次 → 配额放行（防死锁）+ 标记 quota", () => {
@@ -274,11 +282,18 @@ describe("factGate：SKIP 面收紧", () => {
     assert.equal(okGate, true, "取证后放行");
   });
 
-  it("markdown/文档类编辑仍放行（非代码执行面）", () => {
+  it("markdown/rst/adoc 文档仍放行；.txt 不再按文档豁免", () => {
     const gate = new FactGate();
     assert.equal(pass(gate.check("edit", "/w/proj/README.md")), true);
-    assert.equal(pass(gate.check("edit", "/w/proj/docs/guide.md")), true);
-    assert.equal(pass(gate.check("edit", "/w/proj/notes.txt")), true);
+    assert.equal(pass(gate.check("edit", "/w/proj/docs/guide.rst")), true);
+    assert.equal(pass(gate.check("edit", "/w/proj/docs/guide.adoc")), true);
+    assert.equal(
+      gate.check("edit", "/w/proj/notes.txt").kind,
+      "deny",
+      ".txt 是通用文本容器，不是无执行影响的文档面",
+    );
+    assert.equal(gate.check("edit", "/w/proj/CMakeLists.txt").kind, "deny", "构建逻辑必须过门");
+    assert.equal(gate.check("edit", "/w/proj/requirements.txt").kind, "deny", "依赖清单必须过门");
   });
 
   it("配置文件仍拦（改配置影响面大，恰恰最需要事实）", () => {
@@ -320,12 +335,87 @@ describe("factGate：容量与并发安全", () => {
     assert.match(denyOfLackRead(gate, "/w/f1.ts"), /第 2 轮/u);
   });
 
+  it("pending 的命中也会续命（indeterminate 路径不是淘汰盲区）", () => {
+    const gate = new FactGate({ maxFiles: 2, maxDenies: 5 });
+    const needRead = lack(["read"]);
+    assert.equal(gate.check("edit", "/w/p0.ts", undefined, needRead).kind, "deny");
+    assert.equal(gate.check("edit", "/w/p1.ts", undefined, needRead).kind, "deny");
+    // p0 命中 → 续命（不可判定路径）
+    assert.equal(
+      gate.check("edit", "/w/p0.ts", undefined, lack(["read"], { determinate: false })).kind,
+      "indeterminate",
+    );
+    // 挤入 p2：容量 2，被挤掉的应是 p1
+    assert.equal(gate.check("edit", "/w/p2.ts", undefined, needRead).kind, "deny");
+    // p0 仍记住（第 2 次不可判定），p1 已被淘汰（首拒）
+    assert.equal(
+      gate.check("edit", "/w/p0.ts", undefined, lack(["read"], { determinate: false })).kind,
+      "indeterminate",
+    );
+    assert.doesNotMatch(denyOfLackRead(gate, "/w/p1.ts"), /第 2 轮/u, "最久未用的 p1 被淘汰");
+  });
+
+  it("released 的命中也会续命（配额复用不是淘汰盲区）", () => {
+    const gate = new FactGate({ maxFiles: 2, maxDenies: 1 });
+    const upper = lack(["refs"]);
+    const release = (file: string, logSeq: number): void => {
+      assert.equal(gate.check("edit", file, undefined, upper).kind, "deny");
+      assert.equal(gate.check("edit", file, undefined, lack(["refs"], { logSeq })).kind, "quota");
+    };
+    release("/w/r0.ts", 1);
+    release("/w/r1.ts", 2);
+    // r0 命中 → 续命
+    assert.equal(
+      gate.check("edit", "/w/r0.ts", undefined, lack(["refs"], { logSeq: 3 })).kind,
+      "allow",
+    );
+    release("/w/r2.ts", 4);
+    // r1 是最久未用 → 被挤掉，重新首拒；r0 仍在
+    assert.equal(gate.check("edit", "/w/r1.ts", undefined, upper).kind, "deny");
+    assert.equal(
+      gate.check("edit", "/w/r0.ts", undefined, lack(["refs"], { logSeq: 5 })).kind,
+      "allow",
+    );
+  });
+
   it("check 不抛错（防御式）", () => {
     const gate = new FactGate();
     assert.equal(pass(gate.check("", "/ok.ts")), true);
     assert.doesNotThrow(() => {
       gate.check("edit", null);
     });
+  });
+});
+
+describe("factGate：数值参数契约", () => {
+  it("构造参数必须是正安全整数：0/负数/小数/NaN/Infinity 一律拒绝", () => {
+    assert.throws(() => new FactGate({ maxSessions: 0 }), RangeError);
+    assert.throws(() => new FactGate({ maxSessions: -1 }), RangeError);
+    assert.throws(() => new FactGate({ maxSessions: 1.5 }), RangeError);
+    assert.throws(() => new FactGate({ maxSessions: Number.NaN }), RangeError);
+    assert.throws(() => new FactGate({ maxFiles: 0 }), RangeError);
+    assert.throws(() => new FactGate({ maxFiles: Number.POSITIVE_INFINITY }), RangeError);
+    assert.throws(() => new FactGate({ maxDenies: 0 }), RangeError);
+    assert.throws(() => new FactGate({ maxDenies: -1 }), RangeError);
+    assert.throws(() => new FactGate({ maxDenies: 2.5 }), RangeError);
+    assert.doesNotThrow(() => new FactGate({ maxSessions: 1, maxFiles: 1, maxDenies: 1 }));
+  });
+
+  it("运行时 maxDenies 非法值回落构造值，而不是让配额永不兑现", () => {
+    const gate = new FactGate({ maxDenies: 2 });
+    const upper = lack(["refs"]);
+    const limitFile = "/w/limit.ts";
+    assert.equal(gate.check("edit", limitFile, undefined, upper, 0).kind, "deny", "首拒");
+    assert.equal(
+      gate.check("edit", limitFile, undefined, upper, 0).kind,
+      "deny",
+      "0 回落为 2：第 2 次仍是拒绝",
+    );
+    assert.equal(
+      gate.check("edit", limitFile, undefined, upper, Number.NaN).kind,
+      "quota",
+      "第 3 次越过回落后的上限 → 配额",
+    );
   });
 });
 
@@ -391,6 +481,35 @@ describe("str_replace_editor 并存编辑器过事实门", () => {
     assert.equal(pass(gate.check("str_replace_editor", undefined)), true, "view 未传路径 → 放行");
     // 且不消耗记忆：随后真正的写操作仍会被拦
     assert.equal(gate.check("str_replace_editor", "/w/a.ts").kind, "deny");
+  });
+});
+
+describe("不可判定输入与投递水位", () => {
+  it("投递缺省常量在运行时也不可变", () => {
+    assert.equal(Object.isFrozen(NO_DELIVERY), true);
+    assert.equal(Object.isFrozen(NO_DELIVERY.layerSeqs), true);
+  });
+
+  it("历史不可得时只按 read/refs 起步；投递水位翻成 done，layerSeqs 不进入该退化面", () => {
+    const missing = undeterminable(NO_DELIVERY);
+    assert.deepEqual(
+      missing.gaps.map((gap) => gap.need),
+      ["read", "refs"],
+    );
+    assert.equal(missing.determinate, false);
+
+    const delivered = undeterminable({
+      readSeq: 1,
+      refsSeq: 1,
+      layerSeqs: { test: 1 },
+    });
+    assert.deepEqual(delivered.gaps, []);
+    assert.deepEqual(delivered.done, ["read", "refs"], "layerSeqs 不参与该退化面");
+
+    const gate = new FactGate();
+    assert.equal(gate.check("edit", "/w/u.ts", "su", missing).kind, "deny");
+    assert.equal(gate.check("edit", "/w/u.ts", "su", missing).kind, "indeterminate");
+    assert.equal(gate.check("edit", "/w/u2.ts", "su", delivered).kind, "allow");
   });
 });
 
@@ -488,19 +607,78 @@ describe("引用探查指令从生效策略派生（指令与实际认的工具�
 });
 
 describe("factGate：配额放行的失效条件（不变式，见 SessionState.released 注释）", () => {
-  it("放行水位之后目标被改过（fileEditSeq 抬升）→ 配额过期，重新过门", () => {
+  it("外部改动水位等于放行水位时同样失效（严格小于才保留配额）", () => {
     const gate = new FactGate({ maxDenies: 1 });
     // 缺项只落在上层探查：决策 ④ 之后缺 read 时配额会被扣下，那条路走不到"放行水位"。
     const upper = lack(["refs"]);
     assert.equal(gate.check("edit", "/w/q.ts", "sq", upper).kind, "deny", "首拒");
     // maxDenies=1：第 2 次无证据拒绝达配额 → 放行
     assert.equal(gate.check("edit", "/w/q.ts", "sq", lack(["refs"], { logSeq: 5 })).kind, "quota");
-    // 目标未变（fileEditSeq 仍早于放行水位）→ 持续放行（host 只在确属外部改动时抬升它）
+    // 只读查询与 check 用同一条严格判据：等于放行水位不算"之后"，必须失效。
+    assert.equal(
+      gate.releasedFor("sq", "/w/q.ts", lack(["refs"], { externalChangeSeq: 4 })),
+      true,
+      "更早的外部改动不撤销配额",
+    );
+    assert.equal(
+      gate.releasedFor("sq", "/w/q.ts", lack(["read"], { externalChangeSeq: 4 })),
+      false,
+      "当前仍有 read 缺项时，预检也不得让路",
+    );
+    assert.equal(
+      gate.releasedFor("sq", "/w/q.ts", lack(["refs"], { externalChangeSeq: 5 })),
+      false,
+      "等于放行水位即失效",
+    );
+    assert.equal(
+      gate.releasedFor("sq", "/w/q.ts", lack(["refs"], { externalChangeSeq: 6 })),
+      false,
+      "晚于放行水位即失效",
+    );
+    assert.equal(
+      gate.releasedFor("sq", "/w/q.ts", undeterminable(NO_DELIVERY)),
+      true,
+      "不可判定态沿用旧配额：历史读不到不证明模型没读过这一版",
+    );
+    // 目标未变（externalChangeSeq 仍早于放行水位）→ 持续放行
     assert.equal(gate.check("edit", "/w/q.ts", "sq", lack(["refs"], { logSeq: 6 })).kind, "allow");
-    // 目标在放行水位之后被改过 → 放行作废，回到正常过门（重新计数）
-    const after = gate.check("edit", "/w/q.ts", "sq", lack(["refs"], { fileEditSeq: 99 }));
-    assert.equal(after.kind, "deny", "外部改动使配额放行过期");
+    // 外部改动水位恰好等于放行水位 → 放行作废，回到正常过门（重新计数）
+    const equal = gate.check(
+      "edit",
+      "/w/q.ts",
+      "sq",
+      lack(["refs"], { logSeq: 7, externalChangeSeq: 5 }),
+    );
+    assert.equal(equal.kind, "deny", "第一个外部改动不能被相等水位漏掉");
+  });
+
+  it("更晚的外部改动水位使配额过期并重新计数", () => {
+    const gate = new FactGate({ maxDenies: 1 });
+    const upper = lack(["refs"]);
+    assert.equal(gate.check("edit", "/w/q2.ts", "sq", upper).kind, "deny");
+    assert.equal(gate.check("edit", "/w/q2.ts", "sq", lack(["refs"], { logSeq: 5 })).kind, "quota");
+    const after = gate.check(
+      "edit",
+      "/w/q2.ts",
+      "sq",
+      lack(["refs"], { logSeq: 6, externalChangeSeq: 99 }),
+    );
+    assert.equal(after.kind, "deny", "更晚的外部改动使配额过期");
     assert.match(denyMessage(after), /fact-gate/iu);
+  });
+
+  it("配额命中也不能豁免当前 read 缺项", () => {
+    const gate = new FactGate({ maxDenies: 1 });
+    const upper = lack(["refs"]);
+    assert.equal(gate.check("edit", "/w/q3.ts", "sq", upper).kind, "deny");
+    assert.equal(gate.check("edit", "/w/q3.ts", "sq", lack(["refs"], { logSeq: 5 })).kind, "quota");
+    const readGap = gate.check(
+      "edit",
+      "/w/q3.ts",
+      "sq",
+      lack(["read"], { logSeq: 6, externalChangeSeq: -1 }),
+    );
+    assert.equal(readGap.kind, "deny", "配额只免上层探查，当前 read 缺项仍要过门");
   });
 
   it("新建文件的拒绝走「免 read」头部文案（引用面仍要探）", () => {
@@ -529,6 +707,33 @@ describe("factGate：会话键与会话分片容量", () => {
     assert.match(denyOfLackRead(gate, "/w/k.ts", 7), /第 2 轮/u, "数字键会话记忆连续");
     assert.doesNotMatch(denyOfLackRead(gate, "/w/k.ts", 10n), /第 2 轮/u, "bigint 会话另起分片");
     assert.doesNotMatch(denyOfLackRead(gate, "/w/k.ts", true), /第 2 轮/u, "boolean 会话另起分片");
+  });
+
+  it('数字 1、字符串 "1"、1n、true 各自分片（类型前缀阻止 String() 碰撞）', () => {
+    const typedFile = "/w/typed.ts";
+    const numString = new FactGate();
+    assert.equal(numString.check("edit", typedFile, 1, lack(["read"])).kind, "deny");
+    assert.doesNotMatch(
+      denyOfLackRead(numString, typedFile, "1"),
+      /第 2 轮/u,
+      '字符串 "1" 不能续上数字 1 的计数',
+    );
+
+    const bigintNumber = new FactGate();
+    assert.equal(bigintNumber.check("edit", typedFile, 1, lack(["read"])).kind, "deny");
+    assert.doesNotMatch(
+      denyOfLackRead(bigintNumber, typedFile, 1n),
+      /第 2 轮/u,
+      "bigint 1n 不能续上数字 1 的计数",
+    );
+
+    const boolString = new FactGate();
+    assert.equal(boolString.check("edit", typedFile, true, lack(["read"])).kind, "deny");
+    assert.doesNotMatch(
+      denyOfLackRead(boolString, typedFile, "true"),
+      /第 2 轮/u,
+      '字符串 "true" 不能续上 boolean true 的计数',
+    );
   });
 
   it("dropSession 对默认分片（无 id）是 no-op——默认分片只能靠 LRU/reset 回收", () => {
@@ -610,6 +815,23 @@ describe("取证指令双语（文案表按语言渲染）", () => {
     const line = gapLine({ need: "read", why: "never" }, undefined, MESSAGES_EN);
     assert.match(line, /the target file/u, "缺省目标名也随语言走");
     assert.ok(!HAN.test(line), line);
+  });
+
+  it("已确认行按当前语言显示 need 标签，不再直接拼内部键名", () => {
+    const denial: FactDenial = {
+      gaps: [],
+      done: ["read", "refs", "test", "e2e", "docs"],
+      attempt: 1,
+      newFile: false,
+    };
+    assert.match(
+      renderDenyMessage(denial, MESSAGES_ZH),
+      /已确认：read、引用探查、test 层、e2e 层、文档层/u,
+    );
+    assert.match(
+      renderDenyMessage(denial, MESSAGES_EN),
+      /confirmed: read, references, test layer, e2e layer, docs layer/u,
+    );
   });
 
   it("en：整条拒绝消息（头部 + 缺项 + 尾巴）全是英文，zh 渲染路径同一条代码", () => {
