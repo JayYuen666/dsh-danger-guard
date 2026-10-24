@@ -6,8 +6,9 @@
 // 于是 .toSorted、Promise.withResolvers 这类 ES2023+ API 假报 TS2550，并级联出 no-unsafe-*
 // 与 no-undef（实测 zvec-grep 因此多出 34 条、ctx-observe 一处 .toSorted 带出 8 条）。
 // 写 extends ../tsconfig.client.json 而不是自己列 include：TS 对"来自基配置的相对路径按基配置
-// 所在目录解析"，所以 include 仍覆盖 src/** 加上该包在 client 配置里额外列的项，声明一处、两处生效；
-// 自己列 include 会漏掉那些额外项（实测漏掉 settings/ 与 ../lib 的包立刻炸出 TS2304）。
+// 所在目录解析"，所以 include 仍是 `src/**/*.ts` 这一条、只声明一处。别指望它顺带覆盖别的目录：
+// 别的包在各自 client 配置里额外列了 settings/ 与 ../lib，本包只列了 src/**，于是那些目录
+// 不在本程序里 —— 要收进来得改 tsconfig.client.json 的 include，不是改这一行。
 {
   "extends": "../tsconfig.client.json"
 }

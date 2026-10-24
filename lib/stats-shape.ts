@@ -7,8 +7,10 @@
 //
 // 本模块只有类型，所以它对产物字节数的贡献是零。
 
-/** 一份可读的判定统计快照：纯 JSON 值（跨 Remote 边界只能是 JSON，见官方
- *  `isRemoteJsonValue`），键一律是字符串，值一律是数字或对象。 */
+/** 一份可读的判定统计快照：跨 Remote 边界只能是 JSON（见官方 `isRemoteJsonValue`），
+ *  键一律是字符串，值一律是数字或对象。**生产侧必须只写有限整数**：`NaN`/`Infinity`
+ *  在类型上放得过、却不是合法 JSON 数值，序列化会变 `null` 或被判假——计数面新增
+ *  写入点时不要破坏这条约定。 */
 export interface StatsSnapshot {
   /** 判定次数（按面：`bash` / `secret` / `fact`）。 */
   readonly calls: Readonly<Record<string, number>>;
@@ -16,13 +18,18 @@ export interface StatsSnapshot {
   readonly slow: Readonly<Record<string, number>>;
   /** `deny` 档的规则键命中次数（按键）。 */
   readonly hits: Readonly<Record<string, number>>;
-  /** `ask` 档的命中次数（按键）：这些是**问过用户**的，不是拒掉的。 */
+  /** `ask` 档的命中次数（按键）：这些是**问过用户**的，不是拒掉的。它不等于
+   *  "用户被问过几次"——同一命令重复命中的那些次不算进来（见 `skipped`）。 */
   readonly asks: Readonly<Record<string, number>>;
-  /** 按档位"看见了但没拦"的命中（按键）：完全权限档的零兵底口径下放过了什么。 */
+  /** "看见了但没拦"的命中（按**规则键**；按档位汇总的是下一格）。这一格**不专指**
+   *  完全权限档的零兵底：自动审查档交给 reviewer 的命中、已退役规则（长驻服务器）
+   *  的命中同样计入——读它是「这一档总共放过多少」，不是「用户选了完全不拦」。 */
   readonly allowed: Readonly<Record<string, number>>;
   /** 上面那一格按档位汇总（键是 `GuardMode` 的名字）。 */
   readonly allowedByMode: Readonly<Record<string, number>>;
-  /** 被去重掉的询问（同一会话同一命令重复命中，不再打扰用户）。 */
+  /** 同一命令重复命中而未再上报的次数（按键）。被去重的那次**仍然会弹给用户**
+   *  （判定照旧是 `ask`）——这一格表达的是"教训卡没有为同一条命令再炸一张"，
+   *  不是"用户少被打扰一次"。 */
   readonly skipped: Readonly<Record<string, number>>;
   /** 事实门配额放行次数。 */
   readonly quotaReleases: number;

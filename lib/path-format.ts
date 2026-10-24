@@ -14,9 +14,10 @@
 //
 // 它与运行期零成本：brand 只存在于类型层，`tsc` 一擦就没，产物里没有这一层。
 
-// oxlint-disable typescript/no-unsafe-type-assertion -- 本文件存在的全部理由就是"给字符串打归属"：
-// brand 构造器必然是类型断言，换任何写法都只是把同一条断言挪个位置。断言的安全性由
-// **调用点**承担（谁标 brand 谁为"这确实是宿主路径"负责），不是这个模块能校验的。
+// brand 构造器必然是类型断言（本模块存在的全部理由就是"给字符串打归属"），换任何写法
+// 都只是把同一条断言挪个位置。断言的安全性由**调用点**承担（谁标 brand 谁为"这确实是
+// 宿主路径"负责），不是这个模块能校验的。豁免按行挂在三枚构造器上，不整文件放开——
+// 文件级的 disable 会连带屏蔽将来新增的、与 brand 无关的不安全断言。
 declare const osPathBrand: unique symbol;
 declare const posixPathBrand: unique symbol;
 declare const win32PathBrand: unique symbol;
@@ -43,6 +44,7 @@ export type Win32Path = string & { readonly [win32PathBrand]: true };
  * @param value 宿主真实路径。
  * @returns 带 brand 的同一枚字符串（运行期完全不变）。
  */
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- brand 构造器必然是断言，见文件头
 export const asOsPath = (value: string): OsPath => value as OsPath;
 
 /**
@@ -51,6 +53,7 @@ export const asOsPath = (value: string): OsPath => value as OsPath;
  * @param value 命令文本里的 POSIX 路径词面。
  * @returns 带 brand 的同一枚字符串（运行期完全不变）。
  */
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- brand 构造器必然是断言，见文件头
 export const asPosixPath = (value: string): PosixPath => value as PosixPath;
 
 /**
@@ -59,6 +62,7 @@ export const asPosixPath = (value: string): PosixPath => value as PosixPath;
  * @param value Windows 写法（反斜杠或盘符形）。
  * @returns 带 brand 的同一枚字符串（运行期完全不变）。
  */
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- brand 构造器必然是断言，见文件头
 export const asWin32Path = (value: string): Win32Path => value as Win32Path;
 
 /**

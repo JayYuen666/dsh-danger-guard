@@ -6,3 +6,14 @@ export function buildSettings(): Promise<string>;
  *  内联体被改名 —— 详见 build-host.mjs 里 `minify: true` 那一段）。 */
 export function buildHostReport(): Promise<{ code: string; inlinedModules: string[] }>;
 export function buildSettingsReport(): Promise<{ code: string; inlinedModules: string[] }>;
+/** 单文件产物只接受唯一的 entry chunk；多余 chunk / asset 直接构建失败。 */
+export function singleEntryChunk(
+  output: readonly {
+    type: string;
+    fileName: string;
+    code?: string;
+    isEntry?: boolean;
+    moduleIds?: string[];
+  }[],
+  source: string,
+): { type: "chunk"; code: string; moduleIds?: string[] };

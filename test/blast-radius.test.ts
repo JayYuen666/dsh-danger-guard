@@ -154,9 +154,49 @@ describe("blast-radius：目标确定性", () => {
     }
   });
 
+  it("紧凑写法的 `-C` 同样会让预演目标不确定", () => {
+    // git 自己接受 `-C<path>` 不带空格的形式。漏掉它们时，预演绑在会话 cwd 上跑，
+    // 量到的是**另一棵树**的状态，而那段输出会被当成原命令的证据交给用户。
+    for (const command of [
+      "git -Csub reset --hard",
+      "git -C/tmp/other reset --hard",
+      'git -C"/tmp/other" reset --hard',
+    ]) {
+      assert.equal(blastTargetUncertainOf(command), true, command);
+    }
+  });
+
+  it("`GIT_DIR` / `GIT_WORK_TREE` 环境变量同样会让预演目标不确定", () => {
+    for (const command of [
+      "GIT_DIR=/tmp/other/.git git reset --hard",
+      "GIT_WORK_TREE=/tmp/other git reset --hard",
+      "env GIT_WORK_TREE=/tmp/other git clean -fd",
+    ]) {
+      assert.equal(blastTargetUncertainOf(command), true, command);
+    }
+  });
+
+  it("`cd` 离开 cwd 子树后目标不确定；留在子树里不算", () => {
+    for (const command of [
+      "cd /tmp/other && git reset --hard",
+      "cd ~/other && git reset --hard",
+      "cd $HOME/other && git reset --hard",
+      "cd .. && git reset --hard",
+      "cd /tmp/other; git clean -nd",
+    ]) {
+      assert.equal(blastTargetUncertainOf(command), true, command);
+    }
+    // `cd src` 之后仓库根仍然唯一，不该因此退回盲问。
+    for (const command of [`cd src && ${ASK_COMMAND}`, ASK_COMMAND]) {
+      assert.equal(blastTargetUncertainOf(command), false, command);
+    }
+  });
+
   it("普通 git 命令不受影响", () => {
-    assert.equal(blastTargetUncertainOf("git reset --hard"), false);
+    assert.equal(blastTargetUncertainOf(ASK_COMMAND), false);
     assert.equal(blastTargetUncertainOf("git commit -m x"), false);
+    // `--config` 以 `-C` 打头，但它是另一枚选项：`(?!-)` 就是为了不把它误认成 `-C`。
+    assert.equal(blastTargetUncertainOf("git --config core.x=y status"), false);
   });
 });
 
@@ -402,6 +442,31 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
       undefined,
     );
     assert.equal(calls.length, 0);
+  });
+
+  it("策略解析结果没有 mode ⇒ 盲问，不给执行器一个空壳", async () => {
+    // `typeof === "object"` 这一层挡不住数组、Promise 与 `{}`。执行器拿到不带 mode 的策略时
+    // 是按**部署默认**跑的 —— 那可能比会话当前档位宽松，甚至就是 `danger-full-access`。
+    // 于是"我带上策略了"变成一句空话：命令照跑，沙箱退了一档。
+    const resolvedCases = [{}, [], Promise.resolve({ mode: WS_MODE }), { mode: 1 }];
+    const outcomes = await Promise.all(
+      resolvedCases.map(async (resolved) => {
+        const { shell, calls } = sandboxingShell();
+        const verdict = await measure({
+          shellRaw: shell,
+          policyRaw: { resolve: () => resolved },
+          command: STATUS_COMMAND,
+          cwd: "/w",
+          session: { id: "s1" },
+          signal: signalOf(),
+        });
+        return { spawned: calls.length, verdict };
+      }),
+    );
+    for (const { spawned, verdict } of outcomes) {
+      assert.equal(verdict, undefined);
+      assert.equal(spawned, 0, "没有 mode 就不该起子进程");
+    }
   });
 
   it("`sandboxMode` 读取本身抛错 ⇒ 盲问，不让异常逃出", async () => {

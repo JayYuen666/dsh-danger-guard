@@ -40,7 +40,9 @@ export const SETTINGS_READER = "dangerGuardSettings";
  *  0.1.7 逐字段落成下面 ConfigSchema 的 `.default(...)`（数组默认值必须是完整清单：
  *  数组整体替换、不做增量合并，settings/index.ts:175-185）。单源留在本处，
  *  schema 与降级读取（numOf/strArray）都引用它，防两处漂移。
- *  ⚠ 设置条目 FAILED / 不在组合里时，拦截半就落回这份——它必须永远是"闸门开着"那一组值。 */
+ *  ⚠ 设置条目 FAILED / 不在组合里时，拦截半就落回这份——它必须永远是"闸门开着"那一组值。
+ *  整体与其数组都冻结：host 的降级路径把这份实例**直接**交给下游当判定配置，任何一处
+ *  就地改写（push/sort/改字段）都会永久污染全局默认底座，后续所有降级判定读到坏值。 */
 export const BUILTIN_BASE: Config = {
   enabled: true,
   // 事实门独立开关：不想要首次编辑强制取证时关掉（默认开）。
@@ -62,6 +64,12 @@ export const BUILTIN_BASE: Config = {
   refSearchTools: [...DEFAULT_REF_SEARCH_TOOLS],
   refSearchStrictTools: [...DEFAULT_REF_SEARCH_STRICT_TOOLS],
 };
+for (const value of Object.values(BUILTIN_BASE)) {
+  if (Array.isArray(value)) {
+    Object.freeze(value);
+  }
+}
+Object.freeze(BUILTIN_BASE);
 
 /** 消费侧（拦截半与全部判定链）看到的配置形状：plain 值，不含宿主引用。 */
 export interface Config {
@@ -101,23 +109,11 @@ export interface Config {
 /** 设置条目 apply 收到的值面：全字段 volatile ⇒ 宿主一律以 `Volatile<T>` 引用交付
  *  （vendor/cosmokit/src/volatile.ts，fork 的 resolve 见 vendor/schemastery/src/index.ts:521-526）。
  *  引用即"现读"：设置卡改完，下一次 `.get()` 就是新值，不需要重载插件。
- *  官方同型声明见 packages/core/agent-default-model/src/index.ts:24-31。 */
-export interface ConfigRefs {
-  enabled: Volatile<boolean>;
-  factGateEnabled: Volatile<boolean>;
-  preflightEnabled: Volatile<boolean>;
-  judgeStats: Volatile<boolean>;
-  maxDenies: Volatile<number>;
-  strictMode: Volatile<boolean>;
-  smallEditChars: Volatile<number>;
-  bigEditChars: Volatile<number>;
-  extraTestDirs: Volatile<string[]>;
-  extraDevServerWords: Volatile<string[]>;
-  extraDevRunArgs: Volatile<string[]>;
-  extraSecretPatterns: Volatile<string[]>;
-  refSearchTools: Volatile<string[]>;
-  refSearchStrictTools: Volatile<string[]>;
-}
+ *  官方同型声明见 packages/core/agent-default-model/src/index.ts:24-31。
+ *  字段清单**从 Config 派生**（映射类型）而不是手抄一遍：新增设置字段时只改 Config 与
+ *  schema 两处，引用面自动跟上——五份清单（Config/ConfigRefs/BUILTIN_BASE/ConfigSchema/
+ *  snapshot）里能少抄一份就少抄一份。 */
+export type ConfigRefs = { [Field in keyof Config]: Volatile<Config[Field]> };
 
 /** 把值面（引用）落成一次判定用的 plain Config：下游判定链因此一行不改、也不持有宿主引用。
  *  官方同款读法见 quality-gate/host.ts 的 `settingsOf(config)`（逐字段 `.get()`）。

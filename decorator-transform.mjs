@@ -30,9 +30,15 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-/** 带装饰器的 TS 源：只认行首那种形状（本仓只有 `lib/stats-remote.ts` 命中）。
- *  它是"要不要跑一次 tsc"的**快速门槛**——绝大多数文件不该付这个子进程。 */
-const DECORATOR_SYNTAX = /^\s*@[A-Za-z_$][\w$]*/mu;
+/** 带装饰器的 TS 源形状（本仓只有 `lib/stats-remote.ts` 命中）。
+ *  它是"要不要跑一次 tsc"的**快速门槛**——绝大多数文件不该付这个子进程。
+ *
+ *  判据是「`@` 前面是空白或结构位置」，不是「`@` 在行首」：合法写法里有
+ *  `class X { @Remote("stats") m() {} }`、`export default @dec class {}`、
+ *  `const C = @dec class {}` 这些内联形态，行首锚定会把它们全部漏掉 —— 漏掉的后果是
+ *  含装饰器的原文直接进管线（正是文件头说的「产物是非法 JS、构建却报成功」）。
+ *  反向的误判（字符串里出现 `@foo`）只多跑一次 tsc，不会产出错东西，所以这一侧不必收紧。 */
+const DECORATOR_SYNTAX = /(?:^|[\s{;(,])@[A-Za-z_$][\w$]*/u;
 
 /** 这个文件需要预转换吗（后缀与装饰器形状两道筛）。 */
 export function needsDecoratorLowering(id, code) {
@@ -41,6 +47,21 @@ export function needsDecoratorLowering(id, code) {
 
 /** `tsc` 的入口（本仓 devDependency；用绝对路径而不靠 PATH，免得受调用方环境影响）。 */
 const TSC_BIN = path.resolve(import.meta.dirname, "node_modules/typescript/bin/tsc");
+
+/**
+ * 源文件后缀 → tsc 为它产出的 JS 后缀。
+ *
+ * 门槛接受 `.mts` / `.cts`，而 tsc 对它们的产物是 `.mjs` / `.cjs`（不是 `.js`）。
+ * 把后缀写死成 `.js` 时，这两种输入会去读一个不存在的文件，栈里只有一句 ENOENT。
+ * @param {string} file - 源文件路径
+ * @returns {string} 产物后缀
+ */
+function emittedExtensionOf(file) {
+  if (file.endsWith(".mts")) {
+    return ".mjs";
+  }
+  return file.endsWith(".cts") ? ".cjs" : ".js";
+}
 
 /**
  * 清理 tsc 注入的装饰器管线：删掉那行**永不生效**的 metadata 发布，并给注入的调用包一层
@@ -69,23 +90,53 @@ const TSC_BIN = path.resolve(import.meta.dirname, "node_modules/typescript/bin/t
  * @param {boolean} coverageHints - 给注入的调用加 v8 忽略提示（只有测试管线要）
  * @returns {string} 清理后的产物
  */
-function pruneInjectedPlumbing(code, coverageHints) {
-  const metadataLine = /^\s*if \(_metadata\) Object\.defineProperty\(this, Symbol\.metadata,/u;
-  return code
-    .split("\n")
-    .filter((line) => !metadataLine.test(line))
-    .map((line) => {
-      const injected = line.includes("__esDecorate(") || line.includes("__runInitializers(");
-      if (!injected || !coverageHints) {
-        return line;
-      }
-      return [
-        "/* v8 ignore start -- tsc 注入的装饰器调用（access 两枚箭头与实例初值器都不被本协议读取）*/",
-        line,
-        "/* v8 ignore stop */",
-      ].join("\n");
-    })
-    .join("\n");
+function pruneInjectedPlumbing(code, coverageHints, mapLines) {
+  // 目标是**任意标识符**，不是固定写 `this`：tsc 按装饰器落点给出不同的接收者 ——
+  // 方法装饰器写 `this`（见 lib/stats-remote.ts 的产物），类装饰器或静态成员写 `_classThis`，
+  // 派生类写 `_classSuper` 一类临时名。写死 `this` 时只有方法那一支被裁掉，类/静态成员那一支
+  // 的发布句会原样留下 —— 而它同样"永不生效"，且会让"删了哪些行"随装饰器位置而变。
+  const metadataLine =
+    /^\s*if \(_metadata\) Object\.defineProperty\([A-Za-z_$][\w$]*, Symbol\.metadata,/u;
+  const SOURCE_MAP_MARK = "//# sourceMappingURL=";
+  const out = [];
+  // 两件事一起做，并且都**不动行号**：
+  //  ① 删掉永不生效的 metadata 发布与文件尾的 sourceMappingURL 注释 —— 用空行占位，
+  //    删行会让其后每一行的源映射错位。
+  //  ② 把 tsc 注入的两处调用（`__esDecorate` / `__runInitializers`）在映射里"摘掉"——
+  //     它们没有对应的源位置，映射项置空之后覆盖率归因自然不看它们，也就不必再往产物里
+  //     插 `/* v8 ignore *\/` 提示（提示必须独占一行，那才是行号错位的来源）。
+  // 行数始终与 tsc 产物一致，映射逐行对应，不存在"插入位置算错几格"这一类错位。
+  //
+  // ⚠ 删行按**整条语句**判，不按前缀判：tsc 若哪天把这条 `if` 打成多行，删掉首行会留下
+  // 孤立的对象字面量残片 —— 产物直接语法错误，而错误位置指向转换器而不是 tsc。所以匹配到
+  // 的行必须以 `);` 收尾，否则当场抛错（宁可炸在构建里，也不发一份非法 JS）。
+  const mapped = [];
+  let cursor = 0;
+  for (const line of code.split("\n")) {
+    const sourceMapping = mapLines?.[cursor] ?? "";
+    cursor += 1;
+    if (metadataLine.test(line) && !line.trimEnd().endsWith(");")) {
+      throw new Error(
+        `danger-guard: Symbol.metadata 发布语句不是单行（${line.trim().slice(0, 80)}…）：按行裁剪会留下残片，产物会是非法 JS。`,
+      );
+    }
+    if (metadataLine.test(line) || line.startsWith(SOURCE_MAP_MARK)) {
+      out.push("");
+      mapped.push("");
+      continue;
+    }
+    if (coverageHints && (line.includes("__esDecorate(") || line.includes("__runInitializers("))) {
+      out.push(line);
+      mapped.push("");
+      continue;
+    }
+    out.push(line);
+    mapped.push(sourceMapping);
+  }
+  // 一条都没匹配上是**允许**的：门槛是"可能是装饰器"的快速筛，字符串里出现 ` @word`
+  // 这类误报会白白跑一次 tsc，产物原样返回。真出现"tsc 换了输出形状"时，那条永不生效的
+  // 发布句会留在产物里，覆盖率当场红 —— 那正是本文件头写明的取舍（不猜着切文件）。
+  return { code: out.join("\n"), mapLines: mapped };
 }
 
 /**
@@ -101,6 +152,7 @@ export function lowerStandardDecorators(code, file, coverageHints = false) {
     return { code, map: null };
   }
   const outDir = mkdtempSync(path.join(tmpdir(), "dg-decorators-"));
+  let tscStderr = "";
   try {
     try {
       execFileSync(
@@ -124,23 +176,55 @@ export function lowerStandardDecorators(code, file, coverageHints = false) {
           outDir,
           file,
         ],
-        { cwd: import.meta.dirname, stdio: "ignore" },
+        // stdout 仍然丢弃：`--noResolve` 下那条**必然**的 TS2307 走 stdout，它不该出现在
+        // 任何人的终端里。stderr 收下来只用于失败诊断（正常路径上一个字节都没有）。
+        { cwd: import.meta.dirname, stdio: ["ignore", "ignore", "pipe"], encoding: "utf8" },
       );
-    } catch {
+    } catch (error) {
       // 见文件头：`--noResolve` 下必有 TS2307，退出码不是可信信号 —— 产物在不在由下一句判。
+      // 但原因要留下：TSC_BIN 缺失、参数不被识别、进程崩掉，与"只有 TS2307"在这里长得一样，
+      // 最后都退化成 readFileSync 的 ENOENT。留着 stderr 才能把两者分开。
+      if (error instanceof Error && "stderr" in error && typeof error.stderr === "string") {
+        tscStderr = error.stderr.trim();
+      }
     }
-    const emitted = path.join(outDir, `${path.basename(file).replace(/\.[cm]?ts$/u, "")}.js`);
-    const js = readFileSync(emitted, "utf8");
+    const emitted = path.join(
+      outDir,
+      `${path.basename(file).replace(/\.[cm]?ts$/u, "")}${emittedExtensionOf(file)}`,
+    );
+    let js;
+    try {
+      js = readFileSync(emitted, "utf8");
+    } catch (error) {
+      // 产物没出来才算真失败。把 tsc 的 stderr 拼进来 —— 否则这里只剩一句 ENOENT，
+      // 而"哪一步错了"是调用方唯一想知道的事。
+      const detail = tscStderr === "" ? "（tsc 没有输出 stderr）" : tscStderr;
+      throw new Error(
+        `danger-guard: 装饰器降级没有产出 ${path.basename(emitted)}（${file}）。tsc stderr：${detail}`,
+        { cause: error },
+      );
+    }
     if (js.length === 0) {
       throw new Error(`danger-guard: decorator lowering produced no output for ${file}`);
     }
     let map = null;
     try {
       map = JSON.parse(readFileSync(`${emitted}.map`, "utf8"));
+      // tsc 写的 `sources` 是**相对临时 outDir** 的路径（`../../…/lib/stats-remote.ts`），
+      // 而那个目录紧接着就被删了 —— 这份映射交出去之后，任何按它解析的来源都指向不存在的
+      // 路径，覆盖率归因与堆栈映射一起失效。改写成源文件的绝对路径，并把源文本一并带上
+      // （没有 sourcesContent 时消费方还得自己去磁盘上找，找到的也可能是另一版）。
+      map.sources = [file];
+      map.sourcesContent = [code];
     } catch {
       // 源映射缺席不是致命项（覆盖率的归因会差一些，但那会由覆盖率门禁自己说话）。
     }
-    return { code: pruneInjectedPlumbing(js, coverageHints), map };
+    const mapLines = map === null ? null : map.mappings.split(";");
+    const pruned = pruneInjectedPlumbing(js, coverageHints, mapLines);
+    if (map !== null) {
+      map.mappings = pruned.mapLines.join(";");
+    }
+    return { code: pruned.code, map };
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
@@ -162,7 +246,10 @@ export function viteDecorators() {
     name: "danger-guard:standard-decorators",
     enforce: "pre",
     transform(code, id) {
-      const file = id.split("?", 1)[0] ?? id;
+      // `?` 之后的 query 不是文件名：Vite 用 `x.ts?import`、`x.ts?raw` 这类 id 表示同一份
+      // 源码的不同取用方式。`split("?", 1)[0]` 对不带 query 的 id 仍返回整串（含 `?` 的情况
+      // 已由下一行兜住），所以这里先判有没有 query 再切。
+      const file = id.includes("?") ? id.slice(0, id.indexOf("?")) : id;
       // 单 return：两个分支只差"要不要编译"，而 lint 的 consistent-return 盯着返回值形状。
       // 第三个实参 = 覆盖率提示：**只有测试管线要**（构建产物的字节不该带它，见 pruneInjectedPlumbing）。
       return needsDecoratorLowering(file, code)

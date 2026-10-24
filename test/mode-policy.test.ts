@@ -107,10 +107,11 @@ const EXPECTED: Readonly<Record<GuardMode, Readonly<Record<BashDenialKey, RuleVe
     kubectlDelete: "ask",
     dbMigrate: "ask",
   },
-  // 完全权限：零兵底，全部 allow（只统计不打断）。
-  "danger-full-access": Object.fromEntries(ALL_RULE_KEYS.map((key) => [key, "allow"])) as Readonly<
-    Record<BashDenialKey, RuleVerdict>
-  >,
+  // 完全权限：零兵底，只统计不打断 —— 除 `noVerify`：绕 git 钩子与沙箱无关，是这张表自己
+  // 的判据（`BASE` 里每一列都是 deny），不该被"这档不问"顺带放行。
+  "danger-full-access": Object.fromEntries(
+    ALL_RULE_KEYS.map((key) => [key, key === "noVerify" ? "deny" : "allow"]),
+  ) as Readonly<Record<BashDenialKey, RuleVerdict>>,
 };
 
 /** 自动审查不是 `GuardMode` 的一列（它是 `danger-full-access` + reviewer），期望单列一份。 */
@@ -131,9 +132,9 @@ describe("四档矩阵：每一枚规则键在每一个预设下的结论", () =
     }
   });
 
-  it("完全权限：零兵底，全部放行（用户明确选了只统计不打断）", () => {
+  it("完全权限：零兵底，除钩子绕以外全部放行（用户明确选了只统计不打断）", () => {
     for (const key of ALL_RULE_KEYS) {
-      assert.equal(decideRule(FULL_ACCESS, key), "allow", key);
+      assert.equal(decideRule(FULL_ACCESS, key), EXPECTED[FULL][key], key);
     }
   });
 
@@ -172,10 +173,12 @@ describe("完全权限档的两个分支：零兵底只属于「问不了」的�
     sandboxCovers: false,
   };
 
-  it("问不了 ⇒ 零兵底，整档放行", () => {
+  it("问不了 ⇒ 零兵底（`noVerify` 除外，它不靠问也不靠沙箱）", () => {
     for (const key of ALL_RULE_KEYS) {
-      assert.equal(decideRule(FULL_ACCESS, key), "allow", key);
+      assert.equal(decideRule(FULL_ACCESS, key), EXPECTED[FULL][key], key);
     }
+    // 单点钉住那条例外：整档 allow 会把它一起放掉，而这正是本条的缺口。
+    assert.equal(decideRule(FULL_ACCESS, "noVerify"), "deny");
   });
 
   it("还能问 ⇒ 不能按零兵底放行：沿用工作区档的处置（沙箱不兜底，写类要我们拦）", () => {

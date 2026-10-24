@@ -31,15 +31,24 @@ export interface RefSearchPolicy {
   readonly strictTools: readonly string[];
 }
 
-/** 默认可计入引用取证的检索工具名 = 修复前 host 硬编码的三个（默认判定逐条不变）。 */
-export const DEFAULT_REF_SEARCH_TOOLS: readonly string[] = ["grep", "glob", "zg_search"];
+/** 默认可计入引用取证的检索工具名 = 修复前 host 硬编码的三个（默认判定逐条不变）。
+ *  冻结：这些名单是**全局兜底**的原料，被就地改动会永久污染后续所有渲染与兜底策略。 */
+export const DEFAULT_REF_SEARCH_TOOLS: readonly string[] = Object.freeze([
+  "grep",
+  "glob",
+  "zg_search",
+]);
 /** 默认走严格口径的子集 = 修复前那个 `zg_search` 单分支。 */
-export const DEFAULT_REF_SEARCH_STRICT_TOOLS: readonly string[] = ["zg_search"];
+export const DEFAULT_REF_SEARCH_STRICT_TOOLS: readonly string[] = Object.freeze(["zg_search"]);
 
 /**
  * 由两份名单构造判据映射。**只有 refSearchTools 里的名字计入取证**，严格名单只切换口径：
  * 把陌生名字只写进严格名单不会给它开任何凭证——否则"顺手配上一个还没装的插件名"就会
  * 静默扩大凭证面（本包是安全拦截插件，配置面只能收紧不能放宽）。
+ *
+ * 同一名字只记一次、空串整条丢弃：设置层只校验 string，重复项与空串会原样进入
+ * 渲染指令（"grep、grep"、空项），而 criteria 作为 Map 键本就去重——两侧不同步时，
+ * never/narrow 两支指令会互相矛盾。
  */
 export const refSearchPolicyOf = (
   tools: readonly string[],
@@ -50,15 +59,23 @@ export const refSearchPolicyOf = (
   const patternTools: string[] = [];
   const strictTools: string[] = [];
   for (const tool of tools) {
-    if (strictNames.has(tool)) {
-      criteria.set(tool, "strict-relative");
-      strictTools.push(tool);
-    } else {
-      criteria.set(tool, "pattern");
-      patternTools.push(tool);
+    if (tool.length > 0 && !criteria.has(tool)) {
+      if (strictNames.has(tool)) {
+        criteria.set(tool, "strict-relative");
+        strictTools.push(tool);
+      } else {
+        criteria.set(tool, "pattern");
+        patternTools.push(tool);
+      }
     }
   }
-  return { criteria, patternTools, strictTools };
+  // 冻结两份名单：返回类型是 readonly，但那是编译期约束——任何一次 `as` 断言后的就地
+  // push 都会改写这份策略，而它同时是记账与指令文案的单源。
+  return {
+    criteria,
+    patternTools: Object.freeze(patternTools),
+    strictTools: Object.freeze(strictTools),
+  };
 };
 
 /** 内置默认判据：上下文未带策略时的兜底（文案宁可退回默认，也不能退成"谁都不认"）。 */

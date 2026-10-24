@@ -600,6 +600,12 @@ describe("引用探查指令从生效策略派生（指令与实际认的工具�
     assert.doesNotMatch(line, /grep|glob|zg_search/u);
   });
 
+  it("narrow + 空名单：指令说明「谁都不认」的真实原因，而不是渲染成空项", () => {
+    const line = refsLine(refSearchPolicyOf([], []), "narrow");
+    assert.match(line, /refSearchTools/u, "空名单不是「没说」，而是点名配置面");
+    assert.doesNotMatch(line, /grep|glob|zg_search/u);
+  });
+
   it("默认名单常量本身就是修复前的判定口径（单源，防三处漂移）", () => {
     assert.deepEqual([...DEFAULT_REF_SEARCH_TOOLS], ["grep", "glob", "zg_search"]);
     assert.deepEqual([...DEFAULT_REF_SEARCH_STRICT_TOOLS], ["zg_search"]);

@@ -181,6 +181,16 @@ type SandboxRequest =
   | { readonly ok: true; readonly request: { readonly sandboxPolicy?: unknown } }
   | { readonly ok: false };
 
+/** 解析出来的策略是否**真的带着一个模式**。
+ *
+ *  只验 `typeof === "object" && !== null` 不够：数组、`Promise`、`{}` 空壳都过得了，而执行器
+ *  拿到没有 `mode` 的策略会回落部署默认。这里不校验 mode 是不是那三枚已知字面量 —— 宿主
+ *  将来加档位时，多认一枚也不会让我们误判（模式由执行器解释，本模块只要求"它给了"）。 */
+const isResolvedPolicy = (value: unknown): boolean =>
+  typeof value === "object" &&
+  value !== null &&
+  typeof (value as { mode?: unknown }).mode === "string";
+
 /**
  * 预演要带的沙箱策略。
  *
@@ -202,7 +212,13 @@ function sandboxRequestOf(
   }
   try {
     const sandboxPolicy = policyRaw.resolve(session === undefined ? {} : { session });
-    return typeof sandboxPolicy === "object" && sandboxPolicy !== null
+    // 判据要**读到 mode**，不是"解析结果是个对象"：数组、Promise、`{}` 这类没有 mode 的壳
+    // 都会过 `typeof === "object"`，而执行器读到 `mode === undefined` 时是按**部署默认**跑的
+    // ——那可能比会话当前档位宽松，甚至就是 `danger-full-access`。于是"带上策略"这件事本身
+    // 会变成一句空话：命令照跑，沙箱却退了一档。同仓 `lib/sandbox-scope.ts` 的
+    // `scopeOfResolvedPolicy` / `sandboxModeOf` 都是从 `resolved` 里解出 `mode` 再判字符串，
+    // 这里照同一口径收口。
+    return isResolvedPolicy(sandboxPolicy)
       ? { ok: true, request: { sandboxPolicy } }
       : { ok: false };
   } catch {
@@ -211,17 +227,30 @@ function sandboxRequestOf(
 }
 
 /** 这些 git 全局选项会把操作指向另一个仓库/工作树；预演固定在会话 cwd，量到的就不是
- *  原命令的目标。宁可盲问，也不拿另一份盘冒充证据。 */
-const REPO_OVERRIDE_RE = /(?:^|[\s;&|()"'`])["']?(?:-C|--git-dir|--work-tree)["']?(?=[\s=]|$)/u;
+ *  原命令的目标。宁可盲问，也不拿另一份盘冒充证据。
+ *
+ *  `-C` 后面**不要求空白**：git 接受紧凑写法（`-Csub`、`-C/tmp/other`、`-C"/tmp/other"`，
+ *  后两种是同一件事在 shell 去引号前后的样子）。`(?!-)` 只排掉 `-C-` 这类别的选项前缀，
+ *  所以 `--config` 不会被误认成 `-C`。 */
+const REPO_OVERRIDE_RE = /(?:^|[\s;&|()"'`])["']?(?:-C(?!-)|--git-dir|--work-tree)/u;
+
+/** git 也认这两枚环境变量，效果与 `--git-dir` / `--work-tree` 等价，且可以前缀在命令上。 */
+const GIT_REPO_ENV_RE = /(?:^|[\s;&|()"'`])(?:GIT_DIR|GIT_WORK_TREE)=/u;
+
+/** `cd` 离开 cwd 子树（`..`/`~`/`$HOME`/绝对路径/盘符）后，后面的 git 命令量的就是另一棵树。
+ *  留在子树里的 `cd src` 不算：那种情形下 cwd 仍能唯一确定仓库根。 */
+const CD_ESCAPE_RE = /(?:^|[\s;&|()"'`])cd\s+(?:\.\.(?:[/\s;&|]|$)|[~/]|\$[A-Za-z_{(]|[A-Za-z]:)/u;
 
 /**
  * 原命令的仓库目标是否**无法用会话 cwd 唯一确定**。
  *
- * 宁可误判为不确定（多一次盲问），也不要展示另一仓库的干净状态。原命令只经过这一枚
- * 正则做跳过判断，绝不参与预演命令的拼接。
+ * 宁可误判为不确定（多一次盲问），也不要展示另一仓库的干净状态 —— 虚假证据比没有证据更
+ * 糟，因为它带着"我查过了"的权威。原命令只经过这三枚正则做跳过判断，绝不参与预演命令的拼接。
  */
 export function blastTargetUncertainOf(command: string): boolean {
-  return REPO_OVERRIDE_RE.test(command);
+  return (
+    REPO_OVERRIDE_RE.test(command) || GIT_REPO_ENV_RE.test(command) || CD_ESCAPE_RE.test(command)
+  );
 }
 
 /** 读 `aborted` 的显式函数：TypeScript 会把前面 `!signal.aborted` 的判断带进闭包，

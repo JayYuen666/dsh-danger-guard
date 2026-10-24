@@ -21,6 +21,9 @@
 // ⚠ 类型一律 `import type`（产物里零新说明符）：发布面那条纪律要求 `@deepseek-ai/*` 只作
 // 类型消费，值导入面只有四枚（schemastery / shared / dsh-brand / zod）。
 import type { InvocationDescriptor, RemoteResult } from "@deepseek-ai/dsh-typert-protocol";
+// 槽位键与 descriptor 的 package 位共用一枚单源（src/bundle-pkg.ts）：两处各写一遍时，
+// 改名漏一处没有任何编译期信号，表现是"读不到"而不是报错。
+import { BUNDLE_PKG } from "./bundle-pkg.ts";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 // 形状从**叶子**模块取，不从 lib/judge-stats.ts：后者带 node:os/node:path，
@@ -37,15 +40,12 @@ const STATS_NAMESPACE = "dangerGuardStats";
  *  在挂载后按这个键去读，而不是提前 inject。 */
 const STATS_SERVICE_KEY = `remote.${STATS_NAMESPACE}`;
 
-/** 卡片所在 bundle 的包名（`$mount` 的 `package` 位与槽位键同源，见 client-entry.ts 的 BUNDLE_PKG）。 */
-const PACKAGE_NAME = "@jayyuen66/dsh-danger-guard";
-
 /** 把宿主那枚方法挂到客户端远程面上的描述符（`id` 的形状照生成器：`<包>#<命名空间>/<方法>`）。
  *  导出它只为一件事：`test/stats-remote.test.ts` 拿它与宿主侧 `remoteMethods()` 的标记对质
  *  —— 两侧分叉时卡片不会报错，只会"读不到"，所以那条比较必须在门禁里。 */
 export const STATS_DESCRIPTORS: readonly InvocationDescriptor[] = [
   {
-    id: `${PACKAGE_NAME}#${STATS_NAMESPACE}/stats`,
+    id: `${BUNDLE_PKG}#${STATS_NAMESPACE}/stats`,
     service: STATS_NAMESPACE,
     namespace: STATS_NAMESPACE,
     method: "stats",
@@ -81,6 +81,43 @@ const isRemoteMounter = (value: unknown): value is RemoteMounter =>
 const isStatsNamespace = (value: unknown): value is StatsNamespace =>
   isRecord(value) && typeof value["stats"] === "function";
 
+/** 快照读数块的必要字段（对象表七枚 + 数字三枚）。跨进程返回值不经运行时校验就交给
+ *  卡片的话，形状漂移会拖到渲染期才以 `Object.entries(undefined)` 一类的方式炸。 */
+const TABLE_FIELDS = [
+  "calls",
+  "slow",
+  "hits",
+  "asks",
+  "allowed",
+  "allowedByMode",
+  "skipped",
+] as const;
+const NUMBER_FIELDS = ["quotaReleases", "slowMs", "window"] as const;
+
+/** 跨进程返回值的形状守卫：字段齐、表是对象、计数是有限数字。多出来的键不拦——
+ *  这是消费侧的下限校验，不是对宿主实现的穷举。 */
+const isStatsSnapshot = (value: unknown): value is StatsSnapshot => {
+  if (!isRecord(value)) {
+    return false;
+  }
+  for (const field of TABLE_FIELDS) {
+    const table: unknown = value[field];
+    if (
+      !isRecord(table) ||
+      !Object.values(table).every((count) => typeof count === "number" && Number.isFinite(count))
+    ) {
+      return false;
+    }
+  }
+  for (const field of NUMBER_FIELDS) {
+    const num: unknown = value[field];
+    if (typeof num !== "number" || !Number.isFinite(num)) {
+      return false;
+    }
+  }
+  return true;
+};
+
 /**
  * 造出真正的读取器（挂载一次 + 每次读命名空间服务）。
  * @param ctx - 客户端上下文
@@ -90,15 +127,31 @@ const isStatsNamespace = (value: unknown): value is StatsNamespace =>
 function buildStatsReader(ctx: RemoteHost, remote: RemoteMounter): () => Promise<StatsSnapshot> {
   let mounted: Promise<unknown> | undefined;
   return async () => {
-    mounted ??= remote.$mount({ package: PACKAGE_NAME, descriptors: STATS_DESCRIPTORS });
-    await mounted;
+    mounted ??= remote.$mount({ package: BUNDLE_PKG, descriptors: STATS_DESCRIPTORS });
+    try {
+      await mounted;
+    } catch (error: unknown) {
+      // 挂载失败不缓存拒绝：首次打开卡片时"网关/连接尚未就绪"正是最常见的瞬时失败，
+      // 缓存那枚 rejected promise 会让每次刷新都撞同一个旧错误，只能整页刷新才恢复。
+      // `$mount` 幂等，清空后下一次读取重新挂即可。
+      mounted = undefined;
+      throw error;
+    }
     const namespace = ctx.get?.(STATS_SERVICE_KEY, false);
     if (!isStatsNamespace(namespace)) {
       throw new Error(`${STATS_SERVICE_KEY} 未提供：宿主网关没有挂上这枚命名空间`);
     }
     const result = await namespace.stats();
     if (!result.ok) {
-      throw new Error(`${result.error.code}: ${result.error.message}`);
+      // error 的形状由宿主侧实现交付，实现漂移时可能整体缺席——降级读取，而不是让
+      // "读 undefined 的属性"的 TypeError 盖掉真正的失败原因。
+      const detail = isRecord(result.error)
+        ? `${result.error.code}: ${result.error.message}`
+        : "远端报告失败但未附错误详情";
+      throw new Error(detail);
+    }
+    if (!isStatsSnapshot(result.value)) {
+      throw new Error("判定统计快照形状不符：宿主侧实现漂移，读数块按读取失败呈现");
     }
     return result.value;
   };
@@ -121,7 +174,9 @@ function buildStatsReader(ctx: RemoteHost, remote: RemoteMounter): () => Promise
  * @returns 读取器；没有远程面时 `undefined`
  */
 export function createStatsReader(ctx: RemoteHost): (() => Promise<StatsSnapshot>) | undefined {
-  const remote = ctx.get?.("remote");
+  // strict 显式给 false：本读面是**可选读**——"没装远程面"要交回 undefined 降级，而不是抛。
+  // 与 buildStatsReader 里那一次读取同形，"可选读"在代码上自证。
+  const remote = ctx.get?.("remote", false);
   // 单 return（三元的另一支是 `undefined`）：`consistent-return` 不接受"早退 undefined + 晚退函数"
   // 这种混合形状，而这里两种结果本来就是同一件事的两面。
   return isRemoteMounter(remote) ? buildStatsReader(ctx, remote) : undefined;
@@ -137,12 +192,24 @@ export interface StatsLine {
   readonly count: number;
 }
 
-/** 按键的次数降序取前 `limit` 格（并列时按键名字典序，保证同一份快照渲染稳定）。 */
+/** 并列时的键序：按码点比较（`localeCompare` 随宿主 locale 变，跨机器可能不同序）——
+ *  "同一份快照渲染稳定"要的是逐字节确定的顺序。 */
+const compareKeys = (left: string, right: string): number => {
+  if (left === right) {
+    return 0;
+  }
+  return left < right ? -1 : 1;
+};
+
+/** 按键的次数降序取前 `limit` 格（并列时按键码点序，保证同一份快照渲染稳定）。
+ *  `limit` 只收正安全整数：其它取值按 0 处理交回空表——`slice` 对负数的"丢掉最后一格"
+ *  与 NaN 的"全丢"都是静默的错位语义，调用方将来不一定是常量。 */
 export function topLines(counts: Readonly<Record<string, number>>, limit: number): StatsLine[] {
+  const take = Number.isSafeInteger(limit) && limit > 0 ? limit : 0;
   return Object.entries(counts)
     .toSorted(([leftKey, left], [rightKey, right]) =>
-      right === left ? leftKey.localeCompare(rightKey) : right - left,
+      right === left ? compareKeys(leftKey, rightKey) : right - left,
     )
-    .slice(0, limit)
+    .slice(0, take)
     .map(([label, count]) => ({ label, count }));
 }

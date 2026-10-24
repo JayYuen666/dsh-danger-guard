@@ -108,7 +108,8 @@ async function profileBundleName(): Promise<string> {
   // 宿主派发插件页的 entryKey 就是被装 bundle 的包名（= 本包 package.json.name，与装法无关），
   // 核心判据不依赖 profile。profile 只在这台开发机上存在，装了才顺手钉两道机器侧针：
   // 清单里恰有一条、link 目标就是本目录（避免比到另一份残留副本）。
-  // 本包 node/no-sync 不放行 existsSync，故直接读并按 ENOENT 判缺失（其余错误照抛）。
+  // node/no-sync 的只读组（shared 基线的 READONLY_SYNC_ALLOWLIST）本就放行 existsSync，
+  // 这里用 readFile 是**异步**面（本文件整体 await 风格），不是被同步判据逼的。
   const override = process.env["DSH_PROFILE_PACKAGE_JSON"] ?? "";
   const profilePath =
     override === "" ? path.join(os.homedir(), ".dsh", "profiles", "web", "package.json") : override;
@@ -779,7 +780,7 @@ describe("b11：danger-guard 设置卡", () => {
       { onChange: (event: { target: { value: string } }) => void }
     >;
     await act(async () => {
-      record[propsKey]!.onChange({ target: { value: "/id_dsa$|\\.p12$/i" } });
+      record[propsKey]!.onChange({ target: { value: String.raw`/id_dsa$|\.p12$/i` } });
     });
     // 点「保存」落盘
     let save = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR);
@@ -949,6 +950,15 @@ describe("b11：danger-guard 设置卡", () => {
     assert.match(hint, /grep/u);
     assert.match(hint, /glob/u);
     assert.match(hint, /zg_search/u, "默认名单含 zg_search（未装 zvec-grep 时也无害）");
+    // 名单行**显示**同一份回落值：host 在同一形状下按默认名单判定，卡片若显示"空"，
+    // 说明与判定就是两张皮。显式空数组则照实显示（用户的选择）。
+    const toolsBox = container.querySelector<HTMLInputElement>('[data-field="refSearchTools"]');
+    const strictBox = container.querySelector<HTMLInputElement>(
+      '[data-field="refSearchStrictTools"]',
+    );
+    assert.ok(toolsBox !== null && strictBox !== null);
+    assert.match(toolsBox.value, /grep, glob, zg_search/u, "值缺失时行显示内置默认名单");
+    assert.match(strictBox.value, /zg_search/u, "严格子集同样回落显示");
   });
 
   // ── i18n：卡片文案取自官方 locale 字典（切语言 = 换 translator）──────────
@@ -1153,6 +1163,79 @@ describe("b11：danger-guard 设置卡", () => {
       container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)?.disabled,
       false,
       "草稿留住：保存失败后仍可重试（touched 未被清空）",
+    );
+  });
+
+  it("批量保存部分失败 → 只有失败的字段留在草稿里，重试不再重复写成功的字段", async () => {
+    const { DgCardForTest, makeScope } = await loadCard();
+    const calls: { field: string; value: unknown }[] = [];
+    let strictModeFailsOnce = true;
+    const scope = makeScope(
+      snap({ status: "ready", writable: true, value: { enabled: true, strictMode: false } }),
+      calls,
+    );
+    await renderCard(
+      React.createElement(DgCardForTest, {
+        t: tZh,
+        useCard: useCardOf({
+          status: "ready",
+          writable: true,
+          value: { enabled: true, strictMode: false },
+        }),
+        ...cardWrites(scope),
+        // strictMode 那一笔第一次传输失败（其余照常受理）：部分失败时已落盘的字段
+        // 不得再写一遍，重试只补失败的。
+        set: async (field: string, value: unknown): Promise<void> => {
+          if (field === "strictMode" && strictModeFailsOnce) {
+            strictModeFailsOnce = false;
+            await failingSet();
+          }
+          await scope.set(field, value);
+        },
+      }),
+    );
+    await act(async () => {
+      container.querySelector<HTMLElement>(HEADER_SELECTOR)!.click();
+    });
+    const swEnabled = container.querySelector<HTMLButtonElement>('[data-field="enabled"]');
+    const swStrict = container.querySelector<HTMLButtonElement>('[data-field="strictMode"]');
+    assert.ok(swEnabled !== null && swStrict !== null);
+    await act(async () => {
+      swEnabled.click();
+    });
+    await act(async () => {
+      swStrict.click();
+    });
+    const save = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR);
+    assert.ok(save);
+    await act(async () => {
+      save.click();
+    });
+    assert.match(
+      container.querySelector<HTMLElement>(".dgc-saveerr")?.textContent ?? "",
+      /保存失败/u,
+      "部分失败照实呈现",
+    );
+    const afterFirst = calls.filter((call) => call.field === "enabled").length;
+    assert.equal(afterFirst, 1, "enabled 那一笔已落盘");
+    // 重试：草稿里只剩 strictMode（成功的不重复写），这一轮写完草稿清空。
+    await act(async () => {
+      save.click();
+    });
+    assert.equal(
+      calls.filter((call) => call.field === "enabled").length,
+      afterFirst,
+      "已落盘的字段不重复写",
+    );
+    assert.equal(
+      calls.filter((call) => call.field === "strictMode").length,
+      1,
+      "失败的那一笔重试补上（第一次失败没有落盘，第二次成功才记录）",
+    );
+    assert.equal(
+      container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)?.disabled,
+      true,
+      "全部落盘后草稿清空、保存键回灰",
     );
   });
 });

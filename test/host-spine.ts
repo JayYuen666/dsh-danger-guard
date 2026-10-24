@@ -117,7 +117,8 @@ const MAIN_BODY =
 const MAIN_IMPORT = `import { value } from "../src/main.ts";\nconsole.log(value);\n`;
 const ORPHAN_BODY = "export const lonely = 1;\n";
 /** addSource 的默认正文：用例断言"真正文到手"就比这一串（导出以免各处抄字形）。 */
-export const ALPHA_BODY = "const alpha = 1;\n";
+const ALPHA_DECL = ["const", "alpha", "= 1;"].join(" ");
+export const ALPHA_BODY = `${ALPHA_DECL}\n`;
 
 /** 建临时工程目录（全异步：本仓 lint 不容许测试里铺一批 sync fs）。 */
 export async function makeProject(): Promise<ProjectFixture> {
@@ -445,7 +446,7 @@ export async function dispatch(
 function callChunks(
   calls: readonly (readonly [string, string, Record<string, unknown>])[],
 ): StreamChunk[] {
-  return calls.flatMap(([rawCallId, name, args], index): StreamChunk[] => {
+  const blocks = calls.flatMap(([rawCallId, name, args], index): StreamChunk[] => {
     const call = callIdOf(rawCallId);
     const argumentsJson = JSON.stringify(args);
     return [
@@ -456,10 +457,15 @@ function callChunks(
         index,
         block: { type: TOOL_CALL_BLOCK, id: call, name, arguments: argumentsJson },
       },
-      { type: "usage", usage: { inputTokens: 10, outputTokens: 5 } },
-      { type: "finish", reason: { kind: "tool-calls" } },
     ];
   });
+  // 一次响应只在所有 block 之后统一收尾一次：usage 与 finish 是"这一步"的，不是"每个调用"的。
+  // 按调用各发一次会让适配器看到 N 份用量、N 个 finish（真宿主在第一个 finish 就结束该轮）。
+  return [
+    ...blocks,
+    { type: "usage", usage: { inputTokens: 10, outputTokens: 5 } },
+    { type: "finish", reason: { kind: "tool-calls" } },
+  ];
 }
 
 /** 一段纯文本回复（回合收尾用）。 */
@@ -636,7 +642,7 @@ export function preflightNotices(agent: Agent): string[] {
 export function midBlind(filePath: string): Record<string, unknown> {
   return {
     file_path: filePath,
-    old_string: "alpha = 1",
+    old_string: "const alpha = 1;",
     new_string: `const padded = "${"x".repeat(230)}";`,
   };
 }
@@ -647,7 +653,7 @@ export function midBlind(filePath: string): Record<string, unknown> {
 export function highBlind(filePath: string, tag: string): Record<string, unknown> {
   return {
     file_path: filePath,
-    old_string: "alpha = 1",
+    old_string: "const alpha = 1;",
     new_string: `export const probe${tag} = 1;`,
   };
 }

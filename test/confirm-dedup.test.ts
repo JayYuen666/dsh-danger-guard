@@ -103,6 +103,21 @@ describe("askDeduper：同一会话同一命令只上报一次", () => {
     }
   });
 
+  it("maxSessions 只收正安全整数；分片数有上限，最旧的按插入序淘汰", () => {
+    for (const invalid of [0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.throws(() => new AskDeduper(4, invalid), RangeError, String(invalid));
+    }
+    const deduper = new AskDeduper(4, 2);
+    const key = dedupKeyOf("gitResetHard", RESET_HARD);
+    assert.equal(deduper.shouldReport("s-1", key), true);
+    assert.equal(deduper.shouldReport("s-2", key), true);
+    assert.equal(deduper.shouldReport("s-2", key), false, "容量内的会话照常去重");
+    // 第三个会话挤进两个分片位：最旧的 s-1 被淘汰，s-2 / s-3 存活。
+    assert.equal(deduper.shouldReport("s-3", key), true);
+    assert.equal(deduper.shouldReport("s-1", key), true, "最旧的分片被淘汰：重新上报");
+    assert.equal(deduper.shouldReport("s-3", key), false, "最新的分片还在：去重照常");
+  });
+
   it("drop 一个从未出现过的会话 / 键是幂等的（不抛）", () => {
     const deduper = new AskDeduper();
     assert.doesNotThrow(() => {

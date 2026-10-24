@@ -20,6 +20,7 @@ import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
 import plugin, { BUILTIN_BASE, noteJudgeCost } from "../host.ts";
 import type { Config } from "../host.ts";
+import { statsSnapshot } from "../lib/judge-stats.ts";
 import { SETTINGS_READER } from "../lib/settings-schema.ts";
 import { MESSAGES } from "../lib/messages.ts";
 import { BLAST_COMMANDS } from "../lib/blast-radius.ts";
@@ -826,6 +827,20 @@ describe("判定耗时与解析形随上报一起发（长度上限要按真实�
     }
   });
 
+  it("未判定样本在 noteJudgeCost 入口就被拒收：零长度不污染 calls，显式 judged 置位优先", () => {
+    const before = statsSnapshot().calls["contract-unjudged"] ?? 0;
+    // 零长度且未显式判定 = "这一面没跑判定"：不发样本（calls 不涨、窗口不进）。
+    noteJudgeCost({ face: "contract-unjudged", ms: 5, length: 0 });
+    assert.equal(statsSnapshot().calls["contract-unjudged"] ?? 0, before, "零长度样本被拒收");
+    // 判定真的发生过（哪怕输入为空）：host 以 judged 置位表态，样本照记。
+    noteJudgeCost({ face: "contract-unjudged", ms: 5, length: 0, judged: true });
+    assert.equal(
+      statsSnapshot().calls["contract-unjudged"] ?? 0,
+      before + 1,
+      "judged 置位后零长度样本照记",
+    );
+  });
+
   it("滚动摘要：攒满一窗才发一条，分档与最大值都在行里，发完清零", () => {
     const infos: string[] = [];
     const original = console.info;
@@ -834,7 +849,7 @@ describe("判定耗时与解析形随上报一起发（长度上限要按真实�
     };
     try {
       for (let i = 0; i < 199; i += 1) {
-        noteJudgeCost({ face: "windowed", ms: i % 3, length: i * 10 });
+        noteJudgeCost({ face: "windowed", ms: i % 3, length: i * 10 + 1 });
       }
       assert.deepEqual(infos, [], "不满一窗不发条，否则摘要本身就是噪声");
       noteJudgeCost({ face: "windowed", ms: 250, length: 300_000 });

@@ -6,6 +6,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isExternalModule, singleEntryChunk } from "../build-client.mjs";
 import { declareClientFreshness } from "./client-freshness.ts";
 import { declareSchemaCoverage } from "./schema-coverage.ts";
 
@@ -101,5 +102,85 @@ describe("danger-guard client 构建", () => {
     //（installed config-form-types.d.ts 的 ConfigForm）：slot disposer 只注销登记。
     // 判据取全链 `.dispose()`：客户端产物里**一处**都不该有（表单归 provider 持有）。
     assert.ok(!/\.dispose\(\)/u.test(text), "产物不得销毁 provider 的表单");
+  });
+});
+
+/** 输出守卫测试用的最小 chunk 正文。 */
+const CHUNK_CODE = "export {};";
+/** 输出守卫测试用的产物文件名。 */
+const ARTIFACT_FILE = "artifact.js";
+
+/**
+ * 造一个最小输出项；判据只看 type/fileName/isEntry/code。
+ * @param type - rolldown 输出项类型
+ * @param fileName - 产物文件名
+ * @param extra - 该类型需要的其余字段
+ * @returns 可交给 singleEntryChunk 的输出项
+ */
+function outputItem(
+  type: string,
+  fileName: string,
+  extra: Partial<{ isEntry: boolean; code: string }> = {},
+): { type: string; fileName: string } & Partial<{ isEntry: boolean; code: string }> {
+  return { type, fileName, ...extra };
+}
+
+describe("单文件产物的输出守卫", () => {
+  it("拒绝多个 chunk：单文件产物不能静默丢掉第二个", () => {
+    const output = [
+      outputItem("chunk", ARTIFACT_FILE, { isEntry: true, code: CHUNK_CODE }),
+      outputItem("chunk", "chunk-abc.js", { isEntry: false, code: CHUNK_CODE }),
+    ];
+    assert.throws(() => singleEntryChunk(output, "entry.ts"), /2 项输出/u);
+  });
+
+  it("拒绝 asset：单文件产物没有落盘 asset 的位置", () => {
+    const output = [
+      outputItem("chunk", ARTIFACT_FILE, { isEntry: true, code: CHUNK_CODE }),
+      outputItem("asset", "x.css"),
+    ];
+    assert.throws(() => singleEntryChunk(output, "entry.ts"), /2 项输出/u);
+  });
+
+  it("拒绝非 entry 的单个 chunk", () => {
+    const output = [outputItem("chunk", "chunk-abc.js", { isEntry: false, code: CHUNK_CODE })];
+    assert.throws(() => singleEntryChunk(output, "entry.ts"), /entry chunk/u);
+  });
+
+  it("接受唯一的 entry chunk", () => {
+    const output = [outputItem("chunk", ARTIFACT_FILE, { isEntry: true, code: CHUNK_CODE })];
+    const chunk = singleEntryChunk(output, "entry.ts");
+    assert.equal(chunk.code, CHUNK_CODE);
+  });
+
+  it("拒绝正文为空或纯空白的 entry chunk", () => {
+    // 只带 `// GENERATED` 头、正文为空时，产物在装载期才炸，而那时宿主只报一句与根因无关的
+    // 解析错误。构建期是唯一能把它与"正常产物"分开的地方。
+    for (const blank of ["", "   ", "\n\t "]) {
+      const output = [outputItem("chunk", ARTIFACT_FILE, { isEntry: true, code: blank })];
+      assert.throws(() => singleEntryChunk(output, "entry.ts"), /entry chunk/u);
+    }
+  });
+});
+
+describe("外部化判据：react 家族只放行宿主 seed 表真有的那四条", () => {
+  it("登记过的四条说明符外置", () => {
+    for (const id of ["react", "react/jsx-runtime", "react-dom", "react-dom/client"]) {
+      assert.equal(isExternalModule(id), true, `${id} 应外置`);
+    }
+  });
+
+  it("react 家族里未登记的说明符当场失败而不是静默内联", () => {
+    // 静默内联 = 产物里打进第二份 React，页面里两个实例，hooks 直接报错；
+    // 前缀放行 = 得到一条宿主模块表里没有的 require，整张卡片静默不渲染。
+    for (const id of ["react/jsx-dev-runtime", "react-dom/server", "react/experimental"]) {
+      assert.throws(() => isExternalModule(id), /不在外置清单/u, `${id} 应构建失败`);
+    }
+  });
+
+  it("非 react 家族的第三方模块走常规打包（不外置、不报错）", () => {
+    for (const id of ["zod", "@jayyuen66/dsh-plugin-shared", "./local.ts"]) {
+      assert.equal(isExternalModule(id), false, `${id} 应打包进产物`);
+    }
   });
 });

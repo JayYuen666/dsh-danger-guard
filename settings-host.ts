@@ -18,7 +18,13 @@
 
 import type { Context, Fiber } from "@deepseek-ai/cordis";
 import type { SettingsForms } from "@deepseek-ai/dsh-settings";
-import { ConfigSchema, SETTINGS_READER, snapshot } from "./lib/settings-schema.ts";
+import {
+  BUILTIN_BASE,
+  ConfigSchema,
+  SETTINGS_NS,
+  SETTINGS_READER,
+  snapshot,
+} from "./lib/settings-schema.ts";
 import type { Config, ConfigRefs } from "./lib/settings-schema.ts";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
@@ -53,9 +59,11 @@ interface SettingsHostCtx {
 }
 
 /** 设置条目的服务面守卫：只探它真正调用的那几件（configure / provide / effect / fiber）。
+ *  谓词只声明 `SettingsHostCtx`：真正证明的只有这几位，把值收窄成完整的
+ *  `Context & SettingsHostCtx` 会替类型系统编造没验过的成员。
  *  ⚠ 缺项即抛：cordis 把**本条目**判 FAILED，设置页没了——但拦截半不受影响，
  *  它读不到读数口就落回内置默认底座（这正是分家的意义）。 */
-function isSettingsHost(value: unknown): value is Context & SettingsHostCtx {
+function isSettingsHost(value: unknown): value is SettingsHostCtx {
   if (!isRecord(value)) {
     return false;
   }
@@ -66,6 +74,21 @@ function isSettingsHost(value: unknown): value is Context & SettingsHostCtx {
   return isRecord(settings) && typeof settings["configure"] === "function";
 }
 
+/** 值面守卫：每个设置字段都必须是带 `get()` 的引用（`ConfigRefs` 的全部键）。
+ *  宿主交来 plain 值（0.1.6→0.1.7 迁移期踩过的形状错）时，`snapshot(config)` 的
+ *  `.get is not a function` 会拖到**拦截半第一次工具调用**才爆——那时 host 的读数口
+ *  没有 try/catch，等于闸门每次调用都抛。在 apply 阶段就点名，本条目 FAILED、读数口
+ *  不 provide，拦截半自然回落 BUILTIN_BASE（分家设计的既定路径）。 */
+function isConfigRefs(value: unknown): value is ConfigRefs {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return Object.keys(BUILTIN_BASE).every((key) => {
+    const ref: unknown = value[key];
+    return isRecord(ref) && typeof ref["get"] === "function";
+  });
+}
+
 /**
  * 装配设置条目：声明页面策略 + 挂出值面读数口。
  * @param ctx 宿主上下文
@@ -73,15 +96,23 @@ function isSettingsHost(value: unknown): value is Context & SettingsHostCtx {
  */
 export function apply(ctx: Context, config: ConfigRefs): void {
   if (!isSettingsHost(ctx)) {
-    throw new Error("[danger-guard] settings entry: settings.configure/provide surface missing");
+    throw new Error(
+      "[danger-guard] settings entry: cordis service surface missing (settings.configure / provide / effect / fiber)",
+    );
+  }
+  if (!isConfigRefs(config)) {
+    throw new Error(
+      "[danger-guard] settings entry: config value face is not a reference surface (every field must carry get())",
+    );
   }
   const svc: SettingsHostCtx = ctx;
   const reader: SettingsReader = { read: () => snapshot(config) };
   // provide 与页面策略都走 effect：条目重载/卸载时随 fiber 回收，不留上一份读数的幽灵。
-  svc.effect(() => svc.provide(SETTINGS_READER, reader), "danger-guard-settings: value reader");
+  // label 的条目 id 复用 SETTINGS_NS（单源在 lib/settings-schema.ts），不再手写字面量。
+  svc.effect(() => svc.provide(SETTINGS_READER, reader), `${SETTINGS_NS}: value reader`);
   svc.effect(
     () => svc.settings.configure({ auto: false }, svc.fiber),
-    "danger-guard-settings: page policy",
+    `${SETTINGS_NS}: page policy`,
   );
 }
 

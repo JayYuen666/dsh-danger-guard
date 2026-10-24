@@ -29,29 +29,107 @@ const TARGET_PATH_ARRAY_KEYS = [
 /** 只读动词（`str_replace_editor` 的 `command:"view"` 是合法只读形态）。 */
 const READ_ONLY_VERBS = new Set(["view", "read", "cat", "list", "search", "fetch", "get"]);
 
-/** 出现这些字段就说明是写调用，不再信任 `action:"read"` 之类的声明。 */
+/**
+ * 出现这些字段就说明是写调用，不再信任 `action:"read"` 之类的声明。
+ *
+ * 名单按**实际会遇到的写形态**列，不按某一个工具的 schema 列：`str_replace_editor` 用
+ * `old_str`/`new_str`，官方文件工具用 `old_string`/`new_string`，批量改动用 `edits`，打补丁用
+ * `patch`/`diff`。漏一个就等于「带只读声明 + 那个字段」的调用整趟放开——目标清单为空，
+ * 下游密钥闸连判都不判。宁可把不认识的字段判成写：写判多了只是多判一次路径，判少了是漏拦。
+ */
+const WRITE_PAYLOAD_KEYS = [
+  "content",
+  "file_text",
+  "fileText",
+  "new_text",
+  "newText",
+  "old_string",
+  "new_string",
+  "oldString",
+  "newString",
+  "old_str",
+  "new_str",
+  "oldStr",
+  "newStr",
+  "edits",
+  "patch",
+  "diff",
+  "insert_line",
+  "insertLine",
+  "replacement",
+] as const;
+
+/** 键名本身像写载荷（`*_text`/`*_content`/`*_string`）时也算写：新 provider 换了字段名不失效。 */
+const WRITE_PAYLOAD_SUFFIX = /(?:^|_)(?:text|content|string|str|patch|diff)$/u;
+
+const WRITE_PAYLOAD_SET: ReadonlySet<string> = new Set(WRITE_PAYLOAD_KEYS);
+
+/**
+ * 该键的取值是否携带写载荷。
+ *
+ * 走到这里时键名已经落在白名单或 `*_text`/`*_content` 这类后缀里，所以取值形态够用即可：
+ * 非空字符串是写内容；非空数组是批量编辑（`edits: []` 等于没改，不算写）；行号是插入写。
+ */
+function isWriteValue(key: string, value: unknown): boolean {
+  if (typeof value === "string") {
+    return true;
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  return typeof value === "number" && /^(?:insert_line|insertLine)$/u.test(key);
+}
+
 function hasWritePayload(args: Record<string, unknown>): boolean {
-  return (
-    typeof args["content"] === "string" ||
-    typeof args["file_text"] === "string" ||
-    typeof args["old_string"] === "string" ||
-    typeof args["new_string"] === "string"
+  return Object.entries(args).some(
+    ([key, value]) =>
+      (WRITE_PAYLOAD_SET.has(key) || WRITE_PAYLOAD_SUFFIX.test(key)) && isWriteValue(key, value),
   );
 }
 
+/**
+ * 参数里**任一**动作字段声明为写，就按写处理。
+ *
+ * 原实现 `args["command"] ?? args["action"] ?? args["mode"]` 只取第一个非空值：同时带
+ * `command:"read"` 与 `action:"write"` 时读到的是前者，于是整趟被当只读、目标路径全丢。
+ * 只读需要所有出现的动词都是只读，写只要有一个说是写。
+ */
 function readOnlyAction(args: Record<string, unknown>): boolean {
-  const verb = args["command"] ?? args["action"] ?? args["mode"];
-  return (
-    typeof verb === "string" && READ_ONLY_VERBS.has(verb.toLowerCase()) && !hasWritePayload(args)
+  const verbs = [args["command"], args["action"], args["mode"]].filter(
+    (verb): verb is string => typeof verb === "string",
   );
+  if (verbs.length === 0) {
+    return false;
+  }
+  return verbs.every((verb) => READ_ONLY_VERBS.has(verb.toLowerCase())) && !hasWritePayload(args);
+}
+
+/** 普通对象判定（不认 null、不认数组）。 */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /** 一次工具调用声明的全部目标路径（键形口径，去重后按键位顺序给出）。 */
 export function declaredTargets(args: Record<string, unknown> | undefined | null): string[] {
   const targets: string[] = [];
   const add = (value: unknown): void => {
-    if (typeof value === "string" && value.length > 0 && !targets.includes(value)) {
-      targets.push(value);
+    if (typeof value !== "string") {
+      return;
+    }
+    // 首尾空白先去掉：`"  "` 这类纯空白串会被下游解析成 cwd，变成一个不存在却"有效"的目标；
+    // 带空白的真实路径也会与同一调用的另一种写法重复。
+    const trimmed = value.trim();
+    if (trimmed.length > 0 && !targets.includes(trimmed)) {
+      targets.push(trimmed);
+    }
+  };
+  /** 数组键里的目标偶尔是对象形态（`{ path: "a" }`）；只认键、不认这种形态会静默丢目标。 */
+  const addItem = (item: unknown): void => {
+    add(item);
+    if (isRecord(item)) {
+      for (const key of TARGET_PATH_KEYS) {
+        add(item[key]);
+      }
     }
   };
   if (args && typeof args === "object" && !readOnlyAction(args)) {
@@ -62,7 +140,7 @@ export function declaredTargets(args: Record<string, unknown> | undefined | null
       const value = args[key];
       if (Array.isArray(value)) {
         for (const item of value) {
-          add(item);
+          addItem(item);
         }
       }
     }

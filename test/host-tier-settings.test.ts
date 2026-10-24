@@ -316,6 +316,34 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
       );
     });
 
+    it("small ≥ big 的非法组合整对回落内置阈值并告警一次（mid 档不可达是静默改写）", () => {
+      const ctx = createMockCtx();
+      apply(ctx);
+      const { call, ok } = makeEvents();
+      const logs: string[] = [];
+      const original = console.warn;
+      console.warn = (...args: unknown[]): void => {
+        logs.push(args.map(String).join(" "));
+      };
+      try {
+        // 30 字符改动在默认阈值下是 low（只要求 read）；把 small 抬到 big 之上，
+        // 若不回落，(big, small] 区间全被升成 high——同一份证据必须仍按默认档放行。
+        ctx.value.smallEditChars = 5000;
+        ctx.value.bigEditChars = 2000;
+        assert.equal(
+          fire(ctx, targetA, "xfall-low", [call("read", { file_path: targetA }), ok()], SMALL),
+          undefined,
+          "非法组合回落内置阈值：同一改动仍是 low",
+        );
+        assert.equal(logs.length, 1, "降级告警只响一次");
+        assert.match(logs[0] ?? "", /smallEditChars/u, "告警点名是哪一对阈值");
+        fire(ctx, targetA, "xfall-low2", [call("read", { file_path: targetA }), ok()], SMALL);
+        assert.equal(logs.length, 1, "第二次调用不再刷屏（告警一次）");
+      } finally {
+        console.warn = original;
+      }
+    });
+
     it("extraTestDirs：非标准目录名默认不算层；声明后才成为被要求的层", () => {
       const ctx = createMockCtx();
       apply(ctx);

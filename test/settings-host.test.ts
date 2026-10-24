@@ -177,6 +177,57 @@ describe("danger-guard 设置条目（settings-host.ts）", () => {
     }
   });
 
+  it("值面守卫：plain 值 / 缺字段 / 字段不是引用 → apply 阶段即抛，不拖到第一次 read", () => {
+    const { ctx } = createSettingsCtx();
+    // 0.1.6→0.1.7 迁移期踩过的形状错：plain 值面会让 snapshot() 的 `.get is not a function`
+    // 拖到拦截半第一次工具调用才爆——host 的读数口没有 try/catch，等于闸门每次调用都抛。
+    assert.throws(
+      () => {
+        settingsPlugin.apply(ctx as never, { ...BUILTIN_BASE } as never);
+      },
+      /reference surface/u,
+      "plain 值面（值不是引用）当场点名",
+    );
+    for (const bad of [undefined, null, 7, "config"]) {
+      assert.throws(
+        () => {
+          settingsPlugin.apply(ctx as never, bad as never);
+        },
+        /reference surface/u,
+        `非对象的值面（${String(bad)}）同样当场点名`,
+      );
+    }
+    const partial = refsFrom(live) as unknown as Record<string, unknown>;
+    delete partial["refSearchTools"];
+    assert.throws(
+      () => {
+        settingsPlugin.apply(ctx as never, partial as never);
+      },
+      /reference surface/u,
+      "缺字段同样过不了值面守卫",
+    );
+    const brokenField = refsFrom(live) as unknown as Record<string, unknown>;
+    brokenField["maxDenies"] = 3;
+    assert.throws(
+      () => {
+        settingsPlugin.apply(ctx as never, brokenField as never);
+      },
+      /reference surface/u,
+      "字段是裸值而不是带 get() 的引用同样判不过",
+    );
+    // 守卫抛错 = cordis 判本条目 FAILED、读数口不 provide：拦截半 ctx.get 落空即回落
+    // BUILTIN_BASE——那条回落路径由 test/host.test.ts 与 bulkhead-isolation.test.ts 钉。
+  });
+
+  it("bUILTIN_BASE 是冻结的：降级路径把它直接交给下游，就地改写当场暴露而不是静默生效", () => {
+    assert.equal(Object.isFrozen(BUILTIN_BASE), true, "对象本体冻结");
+    for (const value of Object.values(BUILTIN_BASE)) {
+      if (Array.isArray(value)) {
+        assert.equal(Object.isFrozen(value), true, "数组字段同样冻结");
+      }
+    }
+  });
+
   it("config 键在本条目上：设置条目 FAILED 只影响设置面", () => {
     assert.equal(typeof settingsPlugin.apply, "function");
     assert.equal(settingsPlugin.inject.join(","), "settings");

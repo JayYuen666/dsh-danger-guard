@@ -7,8 +7,8 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-import { isDenied, policyDenyFlags, policyDenyText } from "../lib/policy-deny.ts";
-import { modeNoteKeyOf } from "../lib/mode-policy.ts";
+import { policyDenyFlags, policyDenyText } from "../lib/policy-deny.ts";
+import { decideRule, modeNoteKeyOf } from "../lib/mode-policy.ts";
 import { MESSAGES } from "../lib/messages.ts";
 import type { PolicyFacts } from "../lib/mode-policy.ts";
 
@@ -83,15 +83,14 @@ describe("policyDenyText：三段文案的顺序与内容", () => {
   });
 });
 
-describe("isDenied / policyDenyFlags：与文案同一份判据", () => {
-  it("deny 档两类都算（本档硬拒 + 降级硬拒）", () => {
-    assert.equal(isDenied(WORKSPACE, "pipeShell"), true, "本档硬拒");
-    assert.equal(isDenied({ ...WORKSPACE, askable: false }, "gitForcePush"), true, "降级硬拒");
-  });
-
-  it("ask 与 allow 都不算 deny", () => {
-    assert.equal(isDenied(WORKSPACE, "gitForcePush"), false, "ask");
-    assert.equal(isDenied(WORKSPACE, "devServer"), false, "allow");
+describe("policyDenyFlags：与文案同一份判据", () => {
+  it("deny 档两类都算（本档硬拒 + 降级硬拒）；判据即 mode-policy 的 decideRule", () => {
+    // isDenied 已删：guard 的两个调用点直接调 decideRule（判据单源在 mode-policy），
+    // 这里钉的是 policyDenyFlags 与 decideRule 同源。
+    assert.equal(decideRule(WORKSPACE, "pipeShell"), "deny", "本档硬拒");
+    assert.equal(decideRule({ ...WORKSPACE, askable: false }, "gitForcePush"), "deny", "降级硬拒");
+    assert.equal(decideRule(WORKSPACE, "gitForcePush"), "ask", "ask");
+    assert.equal(decideRule(WORKSPACE, "devServer"), "allow", "allow");
   });
 
   it("判别位里 policyDenied 只在降级那一支为真", () => {

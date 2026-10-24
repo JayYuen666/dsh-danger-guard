@@ -36,12 +36,43 @@ const globalMtime = new Map<string, number>();
 /** 会话|目标 → 该会话的观测记录（新鲜度与失效点同一条，理由见文件头第 1 条）。 */
 const basis = new Map<string, ReadBasis>();
 
-/** 会话|目标 → **尚未落地**的观测（guard 时点看到的那一版，理由见文件头第 2 条）。 */
-const pending = new Map<string, { mtimeMs: number; targetN: string }>();
+/** 一次尚未落地的观测。 */
+interface StagedRead {
+  readonly mtimeMs: number;
+  readonly targetN: string;
+}
+
+/**
+ * 会话|目标 → **尚未落地**的观测队列（guard 时点看到的那一版，理由见文件头第 2 条）。
+ *
+ * 同一个目标可以同时有多次读在飞（模型一轮里连发两个 read）。每条记录按**先后**排队、
+ * 提交与丢弃都从队首取：只留一条时，后一次暂存会把前一次的观测顶掉，于是队首那次读的
+ * 提交拿到的是**更晚**那一版 mtime —— 提交一个比实际读到的更新的基线，正好会在
+ * "外部在两次读之间改了文件"时把改动抹掉（探针实测：暂存 1111/2222 后提交，落库的是 2222）。
+ */
+const pending = new Map<string, StagedRead[]>();
 
 /** 暂存一次读取观测（guard 时点调用；此时这一趟还**没执行**）。 */
 export function stageReadObservation(key: string, mtimeMs: number, targetN: string): void {
-  lruPut(pending, key, { mtimeMs, targetN });
+  const queue = pending.get(key);
+  if (queue === undefined) {
+    lruPut(pending, key, [{ mtimeMs, targetN }]);
+    return;
+  }
+  queue.push({ mtimeMs, targetN });
+}
+
+/** 取走队首那条暂存观测（提交与丢弃共用）。 */
+function shiftStaged(key: string): StagedRead | undefined {
+  const queue = pending.get(key);
+  let staged: StagedRead | undefined;
+  if (queue !== undefined) {
+    staged = queue.shift();
+    if (queue.length === 0) {
+      pending.delete(key);
+    }
+  }
+  return staged;
 }
 
 /**
@@ -53,8 +84,7 @@ export function stageReadObservation(key: string, mtimeMs: number, targetN: stri
  * @param currentMtime 现读的 mtime（同样只在 `pending` 缺席时用）
  */
 export function commitReadObservation(key: string, targetN: string, currentMtime: number): void {
-  const staged = pending.get(key);
-  pending.delete(key);
+  const staged = shiftStaged(key);
   // 没有暂存（执行面与 guard 时点的键不同源，例如中途 `cd`）时退回现读那一枚：
   // 调用方已确认内容交付了，记下"现在这一版"仍然是对的，方向保守。
   const observedN = staged?.targetN ?? targetN;
@@ -68,7 +98,7 @@ export function commitReadObservation(key: string, targetN: string, currentMtime
  * "这一版看过"；失效点同样原样留着（它不是"这次读失败"的结论，而是"还没看过这一版"）。
  */
 export function discardReadObservation(key: string): void {
-  pending.delete(key);
+  shiftStaged(key);
 }
 
 /**
@@ -84,17 +114,34 @@ export function observeVersion(
   mtimeMs: number,
 ): { mtimeJump: boolean; staleBase: number } {
   const seen = basis.get(key);
+  // 全局基线只供"本会话还没评估过这一版"这一档回落，**不能在这里刷新**：写下去之后
+  // 紧随其后的另一个会话就再也看不到这次跳变（探针实测：A、B 依次 observe 同一目标，
+  // B 的 mtimeJump 是 false），而它恰恰是这一档唯一的判据来源。刷新点在下一次
+  // settleVersion ——结论落定之后才轮到它。
   const seenMtime = seen?.mtimeMs ?? globalMtime.get(targetN);
-  lruPut(globalMtime, targetN, mtimeMs);
   return {
     mtimeJump: seenMtime !== undefined && mtimeMs > seenMtime,
     staleBase: seen?.staleBase ?? -1,
   };
 }
 
-/** 落定本次评估的结论：观测到的版本 + 这一版还欠不欠一次重读（同一条记录）。 */
-export function settleVersion(key: string, mtimeMs: number, staleBase: number): void {
+/**
+ * 落定本次评估的结论：观测到的版本 + 这一版还欠不欠一次重读（同一条记录）。
+ *
+ * 全局基线**在这里**刷新，不在 `observeVersion` 里：那边写下就等于替所有会话宣布
+ * "这一版有人看过了"，紧接着评估的另一个会话再也看不到这次跳变。挪到这里之后，
+ * 语义变成"这一版既被看见了、结论也定下来了"，而那正是全局兜底该记的时点。
+ * @param key      `会话|目标`
+ * @param targetN  归一后的目标绝对路径（`globalMtime` 用它当键）
+ */
+export function settleVersion(
+  key: string,
+  targetN: string,
+  mtimeMs: number,
+  staleBase: number,
+): void {
   lruPut(basis, key, { mtimeMs, staleBase });
+  lruPut(globalMtime, targetN, mtimeMs);
 }
 
 /** 归因的输入：本轮观测 + 本会话那条成功编辑的证据。 */
@@ -132,7 +179,14 @@ export function attributeExternalChange(input: AttributionInput): Attribution {
   const { lastEditSeq, selfTextPresent, mtimeJump, pendingStaleBase, jumpSeq } = input;
   const settled = pendingStaleBase >= 0;
   // 已落定的失效点不接受自证销账（见上）；本轮跳变才看自证。
-  const selfExplains = !settled && lastEditSeq >= jumpSeq && selfTextPresent !== false;
+  // 自证要求 `selfTextPresent === true`：`undefined` 表示"取不到写入文本"，那是不知，
+  // 不是自证。旧写法 `!== false` 把不知当成了知道（探针实测：undefined 下判 externallyChanged=false，
+  // 于是外部改动被抹掉）。
+  //
+  // 另一边不需要再加 `lastEditSeq >= 0`：外部改动成立的前提是 `staleCandidate >= 0`，
+  // 而 `lastEditSeq >= jumpSeq` 与 `staleCandidate >= jumpSeq` 联立即已给出 `lastEditSeq >= 0`
+  // （`pendingStaleBase` 那一支已被 `settled` 排除）。多写一条是够不到的分支。
+  const selfExplains = !settled && selfTextPresent === true && lastEditSeq >= jumpSeq;
   // 两种来源同时在位时取**较严**的那个水位：失效点说的是"从那时起就没读过这一版"，
   // 取较大的下标意味着要求一次更晚的读取才算解，方向保守。
   let staleCandidate = pendingStaleBase;
@@ -152,7 +206,14 @@ export function clearStaleness(key: string): void {
   }
 }
 
-/** 会话键台账集合（会话销毁时按前缀回收）：键形都是 会话id|目标。 */
+/**
+ * 会话键台账集合（会话销毁时按前缀回收）：键形都是 会话id|目标。
+ *
+ * `globalMtime` 刻意**不在**这里：它的键是目标绝对路径，没有会话前缀，按前缀删一条都删不掉；
+ * 而且它存在的目的正是跨会话——"本会话还没评估过该文件"那一档（重启前另一会话看过）靠它回落。
+ * 跟着会话销毁清空，等于让"另一会话看过"这件事永远不成立，那一档回落地基就再也没了。
+ * 它只在换代（`clearReadBasis`）时整表清空。
+ */
 export function readBasisLedgers(): readonly Map<string, unknown>[] {
   return [basis, pending];
 }
@@ -162,4 +223,8 @@ export function readBasisLedgers(): readonly Map<string, unknown>[] {
 export function clearReadBasis(): void {
   basis.clear();
   pending.clear();
+  // 全局基线同样不能跨代：它记的是"上一代看见过哪一版"，而换代后工作树已经变了，
+  // 留着它会让新一代把上一代的版本号当成自己的观测基线（探针实测：清完之后新会话
+  // 仍从旧基线判出 mtimeJump，而那一次的"旧版"属于上一代）。
+  globalMtime.clear();
 }

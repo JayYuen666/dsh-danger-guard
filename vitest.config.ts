@@ -3,6 +3,9 @@ import { definePackageConfig } from "@jayyuen66/dsh-plugin-shared/config/vitest.
 
 // 公共面（test.include / environment / testTimeout / provider / exclude / reporter /
 // reportsDirectory / 四项 100% 阈值）在 shared/config/vitest.base.ts 单源；这里只留本包差异。
+// ⚠ `test` 块是**浅合并**（base 里 `{ ...baseTest, ...test }` 整块展开）：本包的 setupFiles
+// 会整体替换公共层同名键。约束随之而来——公共层若将来新增 setupFiles（全局 mock、env 注入），
+// 必须同步把那份名单并进这里，不能指望自动追加。
 const base = definePackageConfig({
   coverageInclude: ["host.ts", "settings-host.ts", "lib/**/*.ts"],
   test: {

@@ -12,7 +12,7 @@
   <a href="https://github.com/JayYuen666/dsh-danger-guard/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-danger-guard/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D22.12-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.2-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.3-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -88,7 +88,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 卸载：`dsh plugin --profile web remove @jayyuen66/dsh-danger-guard`。包在公共 npm 上，安装不需要凭据，也不需要配作用域源。
 
 - **要求 Node.js `>= 22.12`。** 本包是纯 ESM；正是这个下限让 ESM 入口的 `require()` 形式可用，所以声明了 `engines.node`。
-- **要求宿主 `dsh` 在 `0.2.1-rc.2` 这条线上。** 宿主真正读的是 `engines.dsh`（`^0.2.1-rc.2`），而且它**单独决定**：`evaluatePluginCompatibility` 在 `engines.dsh` 那一支就返回了，根本走不到读 `peerDependencies` 的那段——所以 `@deepseek-ai/dsh*` 那几枚 peer 在这里不参与兼容判定。预发布版本参与范围比较。宿主是 `0.2.x` 任一小版本都满足；`0.3.0` 及以后不满足，要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。`peerDependencies` 里的精确钉版是一条**独立的编译期纪律**（由 `test/publish-manifest.test.ts` 钉住）：本插件的类型与名义品牌与宿主 ABI 耦合，"自动跟上去"正是宿主类型面被装出第二份的那条路。
+- **要求宿主 `dsh` 在 `0.2.1-rc.3` 这条线上。** 宿主真正读的是 `engines.dsh`（`^0.2.1-rc.3`），而且它**单独决定**：`evaluatePluginCompatibility` 在 `engines.dsh` 那一支就返回了，根本走不到读 `peerDependencies` 的那段——所以 `@deepseek-ai/dsh*` 那几枚 peer 在这里不参与兼容判定。预发布版本参与范围比较。宿主是 `0.2.x` 任一小版本都满足；`0.3.0` 及以后不满足，要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。`peerDependencies` 里的精确钉版是一条**独立的编译期纪律**（由 `test/publish-manifest.test.ts` 钉住）：本插件的类型与名义品牌与宿主 ABI 耦合，"自动跟上去"正是宿主类型面被装出第二份的那条路。
 - **`dependencies` 里不放任何 `@deepseek-ai/*`，这是契约**（`test/publish-manifest.test.ts` 钉着）。消费方的 profile 用 `nodeLinker: hoisted` 且 `autoInstallPeers: false` 安装，于是写在 `dependencies` 里的宿主包会被落成**真实目录**，与运行中的宿主已加载的那份并存。`@deepseek-ai/dsh-tools` 的工具运行期调度键是普通 `Symbol`（不是 `Symbol.for`），符号身份按模块实例算：宿主从 profile 副本上读那个键拿到 `undefined`，于是**每一次原生工具调用都抛**——而构建、类型检查、覆盖率门禁在此之前全部照绿。peer 与 devDependencies 都不会进 profile，所以都物化不出第二份。
 - **按值导入的宿主包必须保持外部化。** `@deepseek-ai/dsh-brand` 与 `@deepseek-ai/schemastery` 是值导入（`brandNumber`、`import Schema from …`）。外部化名单读 `dependencies` ∪ `peerDependencies`；只写 `devDependencies` 会被打包器把官方函数体内联进产物，本包就各持一份官方构造器。必需 peer 同时满足两件事：说明符仍是外部的，而消费方 profile 不多装任何东西。`zod` 是普通依赖（由 `lib/tool-ledger.ts` 值导入）。
 - **产物刻意不压缩。** `test/build-host.test.ts` 钉着 `host.js` 里那几枚裸说明符、以及 `settings.js` 里没有它们；压缩会把字符串一并去掉，那两条断言就会永远变绿。
@@ -104,7 +104,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 1. **已装载**：设置页出现「danger-guard 危险拦截」这一行，且 `dsh --profile web --dump-config` 出现本包的层。
    - `--dump-config` 是唯一被接受的"进了层栈"信号，而它**不是只读命令**——它会重写该 profile 的根装配文件。所以判读要分别捕获 stdout 与 stderr；未匹配的 patch 目标只出现在 stderr，只看退出码什么都证明不了。
    - 层行可能是 `# == <层>`，也可能是 `# == <层>, patched by <路径>`；判据必须容得下后者，否则它会对着真实存在的层报"没装"。
-2. **有拦截**：在一个会拦它的预设下（仅可查看或工作区内修改——完全权限档按设计放行这一条），让 agent 跑 `git commit --no-verify`。这次调用本身必须失败并给出 `Error: <理由>` 与一条出路。若"行为毫无变化"，读法是**闸门没装**，不是规则太松。
+2. **有拦截**：在一个会拦它的预设下（仅可查看、工作区内修改与完全权限都拦；自动审查档放行），让 agent 跑 `git commit --no-verify`。这次调用本身必须失败并给出 `Error: <理由>` 与一条出路。若"行为毫无变化"，读法是**闸门没装**，不是规则太松。
 3. **设置**：打开卡片改一个值，`保存` 由 disabled 转 enabled，写入回 200。非本机 loopback 页面上控件禁用并显示只读状态。
 4. **读数**：打开卡片（以及手动「刷新」）会走一次 `dangerGuardStats` 命名空间的 Remote 调用。按需拉取、不订阅——判定统计只在 agent 干活时变，而跨宿主重连缓存一份旧值正是这套设计要避开的失效。
 
@@ -170,7 +170,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 
 | 规则族 | 仅可查看 | 工作区内修改 | 完全权限 | 自动审查 |
 |---|---|---|---|---|
-| `noVerify`（git 钩子绕过） | deny | deny | allow | allow |
+| `noVerify`（git 钩子绕过） | deny | deny | **deny** | allow |
 | `rmrf`（包住可写根 / 家目录 / 根） | allow¹ | deny | allow | **deny** |
 | `rmrf`（沙箱完全覆盖这次目标） | allow | allow | allow | allow |
 | `pipeShell`（下载即执行） | allow | **deny** | allow | **deny** |
@@ -182,7 +182,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 ¹ 只读档拒一切写，所以不存在"部分删除成功"——每个目标都被完全覆盖，整族让给宿主；宿主会给出官方拒绝标记与 `sandbox_permissions` 升级路径。
 ² 宿主自带的协作式超时与 `promoteOnTimeout` 已经管住长驻命令，这条规则不再提供安全属性，故整条让给宿主。
 
-- **完全权限 = 零兵底，但仅限"问不了"的那一支。** 官方预设把这一档绑死 `approval: never`，用户选它就是"不要拦、不要问"：整档放行、命中只进设置卡的统计，模型侧一个字都不改。而 `danger-full-access + ask`（自定义组合，或没装预设服务时的默认）**还能问**，那一支沿用工作区档的处置——沙箱什么都不拦却把动作静默放行，方向正好相反。
+- **完全权限 = 零兵底，但仅限"问不了"的那一支，且有一处例外。** 官方预设把这一档绑死 `approval: never`，用户选它就是"不要拦、不要问"：命中只进设置卡的统计，模型侧一个字都不改；例外是 `noVerify`，它仍然拒绝——绕 git 钩子与沙箱无关，整档放行会让它成为唯一的绕过口。而 `danger-full-access + ask`（自定义组合，或没装预设服务时的默认）**还能问**，那一支沿用工作区档的处置——沙箱什么都不拦却把动作静默放行，方向正好相反。
 - **自动审查只留两条确定性硬拦**（`rmrf` 与 `pipeShell`）。reviewer 是一个 LLM，它的 allow 不等于用户批准，而这一档沙箱什么都不拦；其余全部交给 reviewer，避免同一动作问两次。
 - **一条硬规则：「能不能问」决定 `ask` 能不能落地。** `never` 在**任何应答者之前**就确定性返回 `rejected`（理由还会被宿主换成它自己的固定串），所以本该 `ask` 的规则在这一档由我们自己收口成 `deny`，并附一段"这档问不了、换哪一档才能问"，不让模型只拿到一句"不许"。
 - **读不到沙箱模式时**（没有可约束的执行器，或服务形状不符）走一条保守列：写类判据照拦，"认不准"照问。它**刻意不复用**工作区档那一列——那一列依赖"沙箱会拦住一部分"这个前提，而这里没有这个前提。
@@ -190,7 +190,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 
 ### 与沙箱的让路，以及为什么只有 `rmrf` 有
 
-- 让路只在三件事同时成立时发生：执行器自报在拦、解析出的模式不是完全权限、且目标**包不住任何可写根**。
+- 让路只在四件事同时成立时发生：执行器自报在拦、**它自报的默认模式本身也在拦**、解析出的模式不是完全权限、且双向包含性都不成立——目标既不能包住可写根，也不能落在可写根之内。
 - 最后一条是刻意收紧的。`workspace-write` 的语义是*允许*改工作区内的文件，于是 `rm -rf ~`（工作区在 `~` 下）会**先删光工作区内容**、再在边界外被拒——沙箱是路径白名单，**不提供原子性**。所以 `~`、`/`、`.`、`..` 一律不让路，只有 `rm -rf /etc/foo`、`rm -rf ~/Downloads` 这类才让。
 - `secretPath` 完全不开让路：本地与沙箱两套文件系统后端是**互斥装配**，"装的是哪个"没有可读的口子，按本仓纪律**不猜**。代价也不对称——误拦只是让用户去终端改，漏拦是凭据外泄且难以发现。
 

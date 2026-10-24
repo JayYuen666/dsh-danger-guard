@@ -3,8 +3,10 @@
 // 与 tsconfig.json 的差别有三处，都是为了产出物而非检查：
 //   `declaration` + `emitDeclarationOnly` —— 前者产 .d.ts，后者保证不产 .js（本包的运行期
 //     产物由 rolldown 出，形状与 tsc 无关，两条路各管各的）。
-//   `include` 不含 test/** —— 声明目录整目录进 package.json 的 `files`，把测试声明打进去
-//     等于把测试面公开发布。
+//   `include` 不含 test/**，另有 exclude 兜底（**/*.test.ts / **/*.spec.ts / __tests__）：
+//     include 的递归通配对"将来新增到 lib 下的测试文件"没有防不住的能力，exclude 把
+//     这条约定固化——声明目录整目录进 package.json 的 `files`，把测试声明打进去等于
+//     把测试面公开发布。
 //   不开 `rewriteRelativeImportExtensions` —— 它只改写 JS 产物的说明符，对 emitDeclarationOnly
 //     是空操作。声明里的 `.ts` 后缀由 build-types.mjs 手工改写，原因见该文件。
 {
@@ -15,8 +17,10 @@
     "outDir": "types",
     "declaration": true,
     "emitDeclarationOnly": true,
-    "removeComments": true,
+    // 刻意**不开** removeComments：types/ 是随包发布、供消费方读取的唯一类型入口，
+    // JSDoc（IDE 悬停、@deprecated、@param）就是它的正文，剥掉等于把 API 文档删了。
     "noEmit": false
   },
-  "include": ["host.ts", "settings-host.ts", "lib/**/*.ts"]
+  "include": ["host.ts", "settings-host.ts", "lib/**/*.ts"],
+  "exclude": ["**/*.test.ts", "**/*.spec.ts", "**/__tests__/**"]
 }

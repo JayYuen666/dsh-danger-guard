@@ -16,10 +16,24 @@ import type { FsTarget } from "@deepseek-ai/dsh-fs";
 import { lruPut } from "./lru.ts";
 import type { PreflightFs } from "./preflight-scan.ts";
 
-/** 路径归一化：相对路径按会话 cwd 解析（模型常报相对路径）。cwd 缺席时原样交回——
- *  那时 `process.cwd()` 是**插件进程**的目录，与工具的执行世界无关，拿它归一是猜。 */
-export const resolveTarget = (value: string, cwd: string | undefined): string =>
-  cwd !== undefined && !path.isAbsolute(value) ? path.resolve(cwd, value) : value;
+/** 路径归一化：相对路径按会话 cwd 解析（模型常报相对路径），绝对路径也折成规范形。
+ *  cwd 缺席时的**相对**路径原样交回——那时 `process.cwd()` 是插件进程的目录，与工具的
+ *  执行世界无关，拿它归一是猜。
+ *
+ *  绝对形为什么也要折：这份形同时是 `officialPaths` 的**键**。`/w/./.ssh/id_rsa`、
+ *  `/w/x/../.ssh/id_rsa`、`/w/.ssh/id_rsa/` 与 `/w/.ssh/id_rsa` 是同一枚文件，不归一就
+ *  各占一格——官方通道按其中一种写法记下真实路径，换一种写法来判时缓存 miss，于是这一
+ *  形缺席、待判形态少一枚。归一之后四种写法落进同一格。 */
+export const resolveTarget = (value: string, cwd: string | undefined): string => {
+  if (value.length === 0) {
+    return value;
+  }
+  if (path.isAbsolute(value)) {
+    // 绝对路径的解析与 cwd 无关，这里借 `path.resolve` 只为折掉 `.`/`..` 与尾分隔符。
+    return path.resolve(value);
+  }
+  return cwd === undefined ? value : path.resolve(cwd, value);
+};
 
 /** **官方通道**交出的目标真实路径（`归一后的目标 → 该执行世界里的绝对路径`）。
  *  两处写、一处读：
@@ -170,7 +184,11 @@ export function resolvedFormsOf(
   cwd: string | undefined,
   localRealpath: LocalRealpath,
 ): Record<string, string[]> {
-  const forms: Record<string, string[]> = {};
+  // 键是**模型给的目标路径**，所以这张表不能是普通对象字面量：`forms["__proto__"] = [...]`
+  // 命中的是 Object.prototype 的设值器，改的是这张表的原型而不是加一个键（实测：写完之后
+  // `Object.keys` 里没有 `__proto__`，而 `getPrototypeOf` 变成数组）。`Object.fromEntries`
+  // 走的是 CreateDataProperty，`__proto__` 会老老实实成为一个自有属性。
+  const entries: [string, string[]][] = [];
   for (const target of targets) {
     const union = new Set<string>();
     const local = localRealpath(target, cwd);
@@ -182,8 +200,8 @@ export function resolvedFormsOf(
       union.add(official);
     }
     if (union.size > 0) {
-      forms[target] = [...union];
+      entries.push([target, [...union]]);
     }
   }
-  return forms;
+  return Object.fromEntries(entries);
 }

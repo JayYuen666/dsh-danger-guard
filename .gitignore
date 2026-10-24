@@ -1,7 +1,12 @@
 node_modules/
-client.js
+# 前导斜杠是必须的：不带它时 `client.js` 会匹配任意层级下的同名文件，将来某个子目录里
+# 真的放一份源码/入口叫这个名字，就会被静默忽略掉（干净克隆后编译失败，本地却看不出来）。
+/client.js
 .toolchain/
-host.js
-settings.js
+/host.js
+/settings.js
 coverage/
-types/
+/types/
+
+# 统一构建件的原子落盘草稿目录（shared/lib/build-artifacts 的 writeArtifact）。
+/.tmp/

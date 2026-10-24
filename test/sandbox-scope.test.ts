@@ -35,6 +35,9 @@ const scopeWith = (root: string): SandboxScope => ({ mode: WS_MODE, roots: [asOs
 const identity = (absolute: string): string => absolute;
 
 /** 判据的主角 mode（收常量：它在本文件里出现十几次，sonarjs 的 no-duplicate-string 盯着）。 */
+const WS_ROOT = "/ws";
+const FULL_ACCESS_MODE = "danger-full-access";
+const UNKNOWN_MODE = "something-new";
 const WRITABLE_MODE = `workspace-write`;
 /** 常驻夹具：工作区根与临时区（这两枚字面量在本文件里各出现多次）。 */
 const WORKSPACE = path.resolve(path.parse(process.cwd()).root, "w", "proj");
@@ -107,11 +110,11 @@ describe("sandboxScopeOf：读宿主的两个能力面", () => {
   });
 
   it("`danger-full-access` 绕开限制 ⇒ 不留 scope（与我们已定的『保持硬拒』一致）", () => {
-    assert.equal(scopeOf("danger-full-access"), undefined);
+    assert.equal(scopeOf(FULL_ACCESS_MODE), undefined);
   });
 
   it("mode 是没见过的字符串 ⇒ 不留 scope（保守：宁可不放行）", () => {
-    assert.equal(scopeOf("something-new"), undefined);
+    assert.equal(scopeOf(UNKNOWN_MODE), undefined);
   });
 
   it("`resolve` 交回的形状不对 ⇒ 不留 scope", () => {
@@ -256,11 +259,19 @@ describe("注入 pathApi：同一份判据按 Windows 规则验证（不伪装�
     }
   });
 
-  it("windows 规则：可写根内的子路径与够不着的地方 ⇒ 让路", () => {
+  it("windows 规则：可写根内的子路径 ⇒ 不让路；够不着的地方 ⇒ 让路", () => {
     const scope = { mode: WS_MODE, roots: [asOsPath(winRoot)] };
-    for (const target of [`${winRoot}${bs}build`, `C:${bs}elsewhere`]) {
-      assert.equal(sandboxDropsOf(scope, [asOsPath(target)], path.win32), true, `${target} 应让路`);
-    }
+    // 根内子路径**可写**：沙箱不会拦下这条删除，所以不能让它替我们兜底。
+    assert.equal(
+      sandboxDropsOf(scope, [asOsPath(`${winRoot}${bs}build`)], path.win32),
+      false,
+      "可写根内的子路径必须不让路",
+    );
+    assert.equal(
+      sandboxDropsOf(scope, [asOsPath(`C:${bs}elsewhere`)], path.win32),
+      true,
+      "够不着可写根 ⇒ 让路",
+    );
   });
 
   it("两种规则对同一棵树给出一致的结论（避免「只在 Windows 上错」）", () => {
@@ -272,8 +283,9 @@ describe("注入 pathApi：同一份判据按 Windows 规则验证（不伪装�
     const posixScope = { mode: WS_MODE, roots: [asOsPath(posixRoot)] };
     const parentDir = asOsPath(path.posix.dirname(posixRoot));
     const insideDir = asOsPath(path.posix.join(posixRoot, "build"));
-    assert.equal(sandboxDropsOf(posixScope, [parentDir], path.posix), false);
-    assert.equal(sandboxDropsOf(posixScope, [insideDir], path.posix), true);
+    // 两个方向都「包着可写的东西」：祖先包住整棵根，子路径本身就在根里可写。
+    assert.equal(sandboxDropsOf(posixScope, [parentDir], path.posix), false, "祖先包住可写根");
+    assert.equal(sandboxDropsOf(posixScope, [insideDir], path.posix), false, "子路径落在可写根里");
   });
 });
 
@@ -284,13 +296,16 @@ describe("包含性判据的组件边界：`..` 只是名字前缀时不算上�
   // 第一版我写的是 `path.resolve(process.cwd().root, …)` —— 那是"按宿主平台拼、再按 POSIX 判"，
   // 在 Windows 上 `path.resolve` 给出 `D:\w\proj`，`path.posix` 把它当文件名，判据自然错。
   // 教训：方言由判据那侧的 `pathApi` 决定，夹具必须同方言（CI 就是这么红的）。
-  it("根内名为 `..cache` 的目录 ⇒ 在根内（让路给沙箱）", () => {
+  it("根内名为 `..cache` 的目录 ⇒ 在根内（不让路：它可写）", () => {
     const root = path.posix.join("/w", "proj");
     const tricky = asOsPath(path.posix.join(root, "..cache"));
-    assert.equal(sandboxDropsOf(scopeWith(root), [tricky], path.posix), true);
+    // 判据要的是"这枚目标底下有没有可写的东西"：`..cache` 本身就在可写根里。
+    // 若把 `..cache` 误当成上跳（只判 `startsWith("..")` 就会），两个方向都不成立，
+    // 结论会翻成"沙箱盖得住" ⇒ 放行一次真实删除。
+    assert.equal(sandboxDropsOf(scopeWith(root), [tricky], path.posix), false);
     // 再深一层同样在根内。
     const deeper = asOsPath(path.posix.join(root, "..cache", "x"));
-    assert.equal(sandboxDropsOf(scopeWith(root), [deeper], path.posix), true);
+    assert.equal(sandboxDropsOf(scopeWith(root), [deeper], path.posix), false);
   });
 
   it("真正的上跳（`..` 单独一段）⇒ 在根外（不让路）", () => {
@@ -303,7 +318,7 @@ describe("包含性判据的组件边界：`..` 只是名字前缀时不算上�
     const bs = String.fromCodePoint(92);
     const winRoot = `C:${bs}w${bs}proj`;
     const tricky = asOsPath(`${winRoot}${bs}..cache`);
-    assert.equal(sandboxDropsOf(scopeWith(winRoot), [tricky], path.win32), true);
+    assert.equal(sandboxDropsOf(scopeWith(winRoot), [tricky], path.win32), false);
     // 对照：真的上跳到 `C:\w` ⇒ 包住可写根 ⇒ 不让路。
     assert.equal(sandboxDropsOf(scopeWith(winRoot), [asOsPath(`C:${bs}w`)], path.win32), false);
   });
@@ -361,6 +376,41 @@ describe("disasterTargetPathOf：灾难目标词面 → 绝对路径", () => {
     }
   });
 
+  // 这两段词面里的 `${` 与 `$(` 是**被测数据**，不是模板占位：拆成两段再拼，
+  // 免得静态检查把普通字符串里的 `${` 判成「占位不会插值」。
+  const BRACE_VAR = ["$", "{X}"].join("");
+  const CMD_SUBST = ["~", "/$", "(id)"].join("");
+
+  it("家目录**子段**单独判不透明：`~/x` 可判，`~/$W` 判不出来", () => {
+    // 前缀 `~/` / `$HOME/` 是合法写法，但子段里的 `$` 展开后落到哪棵树要过口令表才知道。
+    // 判据是「子段这一侧」：只判整串会把前缀的 `~`/`$HOME` 也算可疑，于是 `~/Documents`
+    // 这种最常见、完全可判的写法退成 undefined —— 那是误伤（判不出来 ⇒ 让路 ⇒ 不让路）。
+    const home = disasterTargetPathOf("~", undefined);
+    assert.ok(home !== undefined);
+    assert.equal(disasterTargetPathOf("~/Documents", undefined), path.join(home, "Documents"));
+    assert.equal(disasterTargetPathOf("$HOME/Documents", undefined), path.join(home, "Documents"));
+    for (const word of ["~/$W", `$HOME/${BRACE_VAR}`, "~/$HOME", "~/`id`", CMD_SUBST]) {
+      assert.equal(disasterTargetPathOf(word, asOsPath(WORKSPACE)), undefined, word);
+    }
+  });
+
+  it("变量在**工作区内**展开时不许让路：`rm -rf ~/$W` 真删的是整个工作区", () => {
+    // 修复前 `~/$W` 归一成「家目录 + 字面 `$W`」，那个字符串落在可写根之外 ⇒
+    // `sandboxDropsOf` 判「沙箱会整体拦下」⇒ 守卫让路。而它真实展开后正是工作区本身。
+    // 让路的前提是「沙箱会拦下这枚目标」，判不出落点的词面根本不该进那条推理。
+    const target = disasterTargetPathOf("~/$W", asOsPath(WORKSPACE));
+    assert.equal(target, undefined);
+    assert.equal(sandboxDropsOf(scopeWith(WORKSPACE), [target]), false);
+  });
+
+  it("反引号与引号也判不出来：命令替换要先执行才知落点", () => {
+    // 修复前它们不在不透明字符集里：`/tmp/\`id\`` 被当普通绝对路径归一（`path.posix.normalize`
+    // 只折 `.`/`..`，不碰反引号）⇒ 判出一个看起来合法的落点，而真实落点由另一条命令决定。
+    for (const word of ["`cmd`", "/tmp/`id -u`", '/tmp/x"', "/tmp/a\nb"]) {
+      assert.equal(disasterTargetPathOf(word, asOsPath(WORKSPACE)), undefined, word);
+    }
+  });
+
   it("含根的 brace 展开式不让路：不会把 /workspace/{...} 当成 workspace 内路径", () => {
     const target = disasterTargetPathOf(BRACE_ROOT_TARGET, asOsPath(WORKSPACE));
     assert.equal(target, undefined);
@@ -368,9 +418,94 @@ describe("disasterTargetPathOf：灾难目标词面 → 绝对路径", () => {
   });
 });
 
+describe("sandboxScopeOf 的两道前提：执行器自报在拦 + 策略也说在拦", () => {
+  it("执行器自报 danger-full-access ⇒ 不留 scope（哪怕策略说自己 read-only）", () => {
+    // 让路的前提是"沙箱真会拦下这枚目标"。一个自报不拦文件效应的执行器，
+    // 拿它配出来的策略当判据就等于凭一句自述放行整道闸门。
+    assert.equal(
+      sandboxScopeOf(
+        { sandboxMode: FULL_ACCESS_MODE },
+        { resolve: () => ({ mode: "read-only", workspaceRoot: WS_ROOT }) },
+        undefined,
+        identity,
+        TEMP_ROOT,
+      ),
+      undefined,
+    );
+  });
+
+  it("执行器自报的默认模式不认识 ⇒ 也不留 scope", () => {
+    assert.equal(
+      sandboxScopeOf(
+        { sandboxMode: "future-mode" },
+        { resolve: () => ({ mode: "read-only", workspaceRoot: WS_ROOT }) },
+        undefined,
+        identity,
+        TEMP_ROOT,
+      ),
+      undefined,
+    );
+  });
+});
+
+/** `/ws` 折成 `/real/ws`、其余原样成功。 */
+function wsCanonicalizesToReal(absolute: string): string | undefined {
+  return absolute === WS_ROOT ? "/real/ws" : absolute;
+}
+
+/** `/tmp` 折不出来，其余原样成功。 */
+function tempFails(absolute: string): string | undefined {
+  return absolute === TEMP_ROOT ? undefined : absolute;
+}
+
+describe("writableRootsOf：规范化失败的那一枚按 path.resolve 形保留，不丢", () => {
+  it("规范化成功的用规范形，失败的那一枚退回 resolve 形（两侧同世界）", () => {
+    // 丢掉这一枚的后果是反方向的：它底下的目标看起来"谁都没包住"⇒ 判成沙箱覆盖 ⇒
+    // 我们让路，而那条删除其实落在可写根里、会真实执行完。所以宁可保留 resolve 形。
+    const scope = sandboxScopeOf(
+      { sandboxMode: WRITABLE_MODE },
+      { resolve: () => ({ mode: WRITABLE_MODE, workspaceRoot: WS_ROOT }) },
+      undefined,
+      wsCanonicalizesToReal,
+      TEMP_ROOT,
+    );
+    // `/ws` 折成 `/real/ws`；`/tmp` 与 TEMP_ROOT 同值、去重后只留一枚。桩对 `/tmp` 是
+    // identity（原样成功），所以那一枚保持字面形——不写 path.resolve：它在 Windows 上
+    // 会折成盘符形，断言就平台相关了。
+    assert.deepEqual(scope?.roots, ["/real/ws", TEMP_ROOT]);
+  });
+
+  it("一枚可写根都折不出来 ⇒ 并不缺席，按 resolve 形进表", () => {
+    // 缺席 scope 与"空根表"是两个方向相反的坑；这里两者都不踩。
+    const scope = sandboxScopeOf(
+      { sandboxMode: WRITABLE_MODE },
+      { resolve: () => ({ mode: WRITABLE_MODE, workspaceRoot: WS_ROOT }) },
+      undefined,
+      tempFails,
+      TEMP_ROOT,
+    );
+    // `/ws` 被 identity 桩原样成功（保持字面形）；TEMP_ROOT 折不出来退 resolve 形——
+    // 这一枚才是本组的主角，期望按 path.resolve 现推，两侧在任何平台同世界。
+    assert.deepEqual(scope?.roots, [WS_ROOT, path.resolve(TEMP_ROOT)]);
+  });
+
+  it("workspaceRoot 不是字符串 ⇒ 这一枚不算根，其余照常", () => {
+    const scope = sandboxScopeOf(
+      { sandboxMode: WRITABLE_MODE },
+      { resolve: () => ({ mode: WRITABLE_MODE, workspaceRoot: 42 }) },
+      undefined,
+      identity,
+      TEMP_ROOT,
+    );
+    // 剩下的两枚候选（`/tmp` 与 TEMP_ROOT）同值且被 identity 桩原样成功，去重后一枚；
+    // 期望用字面值而不是 path.resolve，理由同上组。
+    assert.deepEqual(scope?.roots, [TEMP_ROOT]);
+  });
+});
+
 describe("sandboxModeOf：原始模式读法（按档位分叉用的那一份）", () => {
   it("三种模式都原样读出（`danger-full-access` 也在内，这是它与让路判据的分工差别）", () => {
-    for (const mode of ["read-only", WS_MODE, "danger-full-access"]) {
+    for (const mode of ["read-only", WS_MODE, FULL_ACCESS_MODE]) {
       assert.equal(
         sandboxModeOf({ sandboxMode: mode }, { resolve: () => ({ mode }) }, undefined),
         mode,

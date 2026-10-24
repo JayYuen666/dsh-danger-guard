@@ -1,128 +1,47 @@
 #!/usr/bin/env node
+// @ts-check
 /// <reference types="node" />
 // 构建 types/：先让 tsc 出声明，再把声明里的相对说明符从源码后缀改写成产物后缀。
-//
-// 为什么需要后处理：host.ts / settings-host.ts / lib/*.ts 按 NodeNext 约定写
-// `./lib/settings-schema.ts` 这种显式 `.ts` 后缀（基线 tsconfig 的 allowImportingTsExtensions
-// + verbatimModuleSyntax 都要求它），而 tsc 的**声明**产物会把这个说明符原样抄进 .d.ts——于是
-// `types/host.d.ts` 里留着 `from "./lib/settings-schema.ts"`，而包里根本没有那个文件（只有
-// `types/lib/settings-schema.d.ts`）。`rewriteRelativeImportExtensions` 救不了：它只作用于 JS
-// 产物，不动声明。
-//
-// 改成 `./lib/settings-schema.js` 才是对的：TypeScript 把 `.js` 说明符解析到同名 `.d.ts`，于是
-// 消费方解析 `types/lib/settings-schema.d.ts`，正是本包发出去的那份。
-//
-// 与兄弟包 @jayyuen66/dsh-dir-prep-organize 的 build-types.mjs 同源。本包多做了两件事：
-//   1. 出声明前**清空** types/——那边另有一个 build-clean.mjs 承担这件事，本包没有第二个
-//      构建脚本，直接在这里 rm，少一个入口也少一处「忘了清」的余地。tsc 自己不清 outDir，
-//      删掉源文件后旧 .d.ts 会留在原地，而 `files` 里的 `types` 是整目录，于是陈旧声明照样发出去。
-//   2. 产出文件清单交给调用方（check / 测试要按它核对「声明覆盖全部运行时导出」）。
-//
-// 顶部 node reference：oxlint 类型检查对 .mjs 不自动加载 @types/node，需显式声明才能解析
-// node:fs/promises、node:child_process、process（否则整文件按 error 类型误报 unsafe）。
-import { execFileSync } from "node:child_process";
-import { readFile, readdir, rm, writeFile } from "node:fs/promises";
+// 编排（两阶段草稿→替换、说明符正典化、清单口径）统一住在 @jayyuen66/dsh-plugin-shared/
+// lib/build-types，一处可改；本文件只定位本仓依赖图里的 tsc 入口并转交目录约定。
+// 为什么需要后处理与两阶段——见 shared 同名切面的文件头。
+import { readFileSync } from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
+import { buildDeclarations } from "@jayyuen66/dsh-plugin-shared/lib/build-types";
+import { invokedDirectly } from "@jayyuen66/dsh-plugin-shared/lib/build-artifacts";
+
+// 声明类门禁按同一口径列 types/ 与判说明符，此处转导出，测试里不必改路径。
+export {
+  canonicalizeDeclarationSpecifiers,
+  listDeclarations,
+} from "@jayyuen66/dsh-plugin-shared/lib/build-types";
 
 const root = import.meta.dirname;
-const outDir = path.join(root, "types");
+const require = createRequire(import.meta.url);
 
 /**
- * 只改写相对说明符（以 `./` 或 `../` 开头）里的 `.ts` 后缀。
+ * 本地 tsc 的入口文件绝对路径。
  *
- * 裸说明符（`node:fs`、`@deepseek-ai/…`）一概不碰：包名段里出现 `.ts` 的形状不存在，而放宽到
- * 任意说明符会误伤 `import("some-pkg.ts")` 这类合法的第三方引用。
- * 命中的形态有三处：`import type … from`、`export … from` 与内联的 `import("…")` 类型。
+ * 不拼 `node_modules/typescript/bin/tsc`：非提升布局下它不存在，脚代会以一个与成因无关
+ * 的 ENOENT 失败。先按解析器找到 typescript 包根，再读它 package.json 的 `bin.tsc`——
+ * 那是包自己声明的入口，布局无关。
+ * @returns {string} tsc 入口绝对路径
  */
-const RELATIVE_SOURCE_SPECIFIER = /(?<quote>["'])(?<prefix>\.{1,2}\/[^"']*)\.ts\k<quote>/gu;
-
-/**
- * 把一段声明正文里的相对 `.ts` 说明符改写成 `.js`。
- *
- * @param {string} text - 声明文件正文
- * @returns {string} 改写后的正文
- */
-export function canonicalizeDeclarationSpecifiers(text) {
-  return text.replace(
-    RELATIVE_SOURCE_SPECIFIER,
-    (_match, quote, prefix) => `${quote}${prefix}.js${quote}`,
-  );
-}
-
-/**
- * 跑一条命令；失败时抛出的信息取子进程自己的 stderr，而不是包装层的壳。
- *
- * 用同步版：这是构建步骤，阻塞等 tsc 跑完完全够用，异步包装在这里只会为一个用不上的并发度
- * 引入回调与 Promise 两种形态。
- *
- * @param {string} file - 可执行文件
- * @param {string[]} args - 参数
- * @returns {void}
- */
-function run(file, args) {
-  try {
-    execFileSync(file, args, { cwd: root, stdio: ["ignore", "ignore", "pipe"] });
-  } catch (error) {
-    const stderr = error instanceof Error && "stderr" in error ? error.stderr : "";
-    const detail = typeof stderr === "string" ? stderr.trim() : "";
-    throw new Error(detail === "" ? String(error) : detail, { cause: error });
+function tscEntry() {
+  const manifestPath = require.resolve("typescript/package.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const binTable = manifest?.bin;
+  const bin = typeof binTable === "object" && binTable !== null ? binTable.tsc : binTable;
+  if (typeof bin !== "string" || bin.length === 0) {
+    throw new Error(`typescript 的 package.json 没有可用的 bin.tsc：${manifestPath}`);
   }
+  return path.resolve(path.dirname(manifestPath), bin);
 }
 
-/**
- * 递归列出 `types/` 下的声明文件（相对包根、`/` 分隔）。
- *
- * 文件与目录分成两支再汇总：混在一个 map 里时，只有文件的那一支会变成一个没有 `await`
- * 的 `async` 回调；拆开后两支各自理由完整。
- *
- * 导出而非私藏：`test/publish-manifest.test.ts` 的声明类门禁要按同一口径列 types/，在测试
- * 里重写一份遍历逻辑只会让两边的目录形状悄悄分叉。
- *
- * @param {string} dir - 当前目录绝对路径
- * @param {string} prefix - 相对包根前缀
- * @returns {Promise<string[]>} 命中的文件清单（相对包根）
- */
-export async function listDeclarations(dir, prefix) {
-  const entries = await readdir(dir, { withFileTypes: true });
-  const files = entries
-    .filter((entry) => !entry.isDirectory() && entry.name.endsWith(".d.ts"))
-    .map((entry) => `${prefix}${entry.name}`);
-  const nested = await Promise.all(
-    entries
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => listDeclarations(path.join(dir, entry.name), `${prefix}${entry.name}/`)),
-  );
-  return [...files, ...nested.flat()];
-}
-
-/**
- * 产出 types/：跑 tsc 出声明，再逐个改写相对说明符。
- *
- * @returns {Promise<string[]>} 改写过的声明文件清单（相对包根，`/` 分隔）
- */
+/** 产出 types/：跑 tsc 出声明，再逐个改写相对说明符。 */
 export async function buildTypes() {
-  // 先清空：tsc 不清 outDir，留着旧声明等于把陈旧类型一起发出去。
-  await rm(outDir, { recursive: true, force: true });
-  // tsc 自己已经按 tsconfig 排好了依赖与增量，交给它报错即可；这里只把失败原样抛出。
-  //
-  // 直接跑**本地 tsc 的入口 JS**，不经 `npx`：Windows 上 `npx` 实际是 `npx.cmd`，而
-  // `execFileSync` 不按 PATHEXT 解析（`shell` 默认 false），于是那条调用在 Windows runner 上
-  // 一律 `spawnSync npx ENOENT`——构建在 `build:types` 这一步必红，与代码无关。
-  // 用 `process.execPath`（当前 node）跑 `.bin` 指向的同一个文件，则不依赖任何 shell 与扩展名。
-  run(process.execPath, [
-    path.join(root, "node_modules", "typescript", "bin", "tsc"),
-    "-p",
-    "tsconfig.types.json",
-  ]);
-  const files = await listDeclarations(outDir, "");
-  await Promise.all(
-    files.map(async (file) => {
-      const full = path.join(outDir, file);
-      const text = await readFile(full, "utf8");
-      await writeFile(full, canonicalizeDeclarationSpecifiers(text), "utf8");
-    }),
-  );
-  return files;
+  return buildDeclarations({ root, tscEntry: tscEntry() });
 }
 
 async function main() {
@@ -130,7 +49,7 @@ async function main() {
   console.info("types/ written:", files.length, "files");
 }
 
-if (process.argv[1] === import.meta.filename) {
+if (invokedDirectly(import.meta.filename)) {
   try {
     await main();
   } catch (error) {

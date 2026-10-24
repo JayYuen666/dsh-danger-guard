@@ -18,13 +18,22 @@ import {
   resultsOf,
   toolLedgerProjection,
 } from "../lib/tool-ledger.ts";
-import type { ToolLedger } from "../lib/tool-ledger.ts";
-import { foldLedger } from "./ledger-fold.ts";
+import type { LedgerCallRow, ToolLedger } from "../lib/tool-ledger.ts";
+import { foldLedger, INIT_PLACEHOLDER } from "./ledger-fold.ts";
 import { badEvent, call, ptcCall, ptcSettle, unrelated, result } from "./fixtures/events.ts";
 
 /** 单张台账的行数上限。写数字而不是引常量：下面那组窗口用例的价值就是把 2000 这档闸门
  *  钉住（超一行即作废、刚好一行不作废），lib 侧改窗口必须让这些用例一起红。 */
 const LEDGER_WINDOW = 2000;
+
+/** 一行缺 callId 的调用行（坏水位/行序用例的原料；seq 是唯一的可变位）。 */
+const callRowAt = (seq: number): LedgerCallRow => ({
+  name: "read",
+  callId: null,
+  arguments: {},
+  badArguments: false,
+  seq,
+});
 
 // 事件先攒进本模块的数组，再由用例一次喂两条读法（夹具负责 seq/品牌位）。
 const collected: SessionEvent[] = [];
@@ -401,6 +410,64 @@ describe("stateOf 回填与单元形状", () => {
     }
   });
 
+  it("结构不变量：行序必须按 seq 严格升序、length 必须大于最大行内 seq（坏水位不得被采信）", () => {
+    // host 把 length 当 logSeq 新鲜度基准、把"更靠后的行即更新的证据"当隐含前提——
+    // 这两条被坏缓存破坏时判定会基于错位的水位，且不会退回全量扫描。
+    const disordered = {
+      calls: [callRowAt(1), callRowAt(0)],
+      results: [],
+      length: 2,
+      dropped: false,
+    };
+    assert.equal(asLedger(disordered), undefined, "行序倒挂 ⇒ 不采信");
+    const duplicate = {
+      calls: [callRowAt(0), callRowAt(0)],
+      results: [],
+      length: 1,
+      dropped: false,
+    };
+    assert.equal(asLedger(duplicate), undefined, "重复 seq 同样不采信");
+    const shortLength = {
+      calls: [callRowAt(0)],
+      results: [],
+      length: 1,
+      dropped: false,
+    };
+    const staleLength = {
+      calls: [callRowAt(3)],
+      results: [],
+      length: 3,
+      dropped: false,
+    };
+    assert.equal(asLedger(staleLength), undefined, "length 不大于行内 seq ⇒ 水位错位，不采信");
+    assert.ok(asLedger(shortLength) !== undefined, "合法形状（length > seq）仍采信");
+  });
+
+  it("重投递幂等：seq 已折过的同一事件再投一遍，行不重复追加（不提前撞窗口作废）", () => {
+    const first = call("c1", "read", READ_ARGUMENTS_JSON);
+    const settled = result("c1");
+    const state = foldLedger([first, settled]);
+    const replayed = toolLedgerProjection.apply(state, first);
+    assert.deepEqual(replayed.calls, state.calls, "重放不追加第二份拷贝");
+    assert.equal(replayed.length, state.length, "长度也不前移");
+    // 重放后的状态仍过得了采信门（schema 的行序不变量不被重放破坏）。
+    assert.ok(asLedger(replayed) !== undefined);
+  });
+
+  it("asLedger 按对象身份记忆化：同一份状态重复读取交回同一份解析结果", () => {
+    // 守卫热路径上一趟判定会读多次水位/证据；投影态不可变，按身份缓存不改变语义。
+    const value = {
+      calls: [{ name: "read", callId: null, arguments: {}, badArguments: false, seq: 0 }],
+      results: [],
+      length: 1,
+      dropped: false,
+    };
+    const first = asLedger(value);
+    assert.ok(first !== undefined);
+    assert.equal(asLedger(value), first, "同一对象同一结果（不做第二遍 safeParse）");
+    assert.equal(asLedger("still-not-an-object"), undefined, "非对象输入照旧直接判");
+  });
+
   it("行里的可选位在状态中是 null（不是缺席）", () => {
     push(badEvent({ type: "tool/call", data: { name: "read", arguments: "{}" } }));
     const state = foldLedger(pendingEvents());
@@ -455,7 +522,7 @@ describe("stateOf 回填与单元形状", () => {
     assert.equal("wire" in toolLedgerProjection, false, "host-only：不进客户端快照");
     const first = call("c1", "read", "{}");
     const stepped = toolLedgerProjection.apply(
-      toolLedgerProjection.init({} as never, 0 as never),
+      toolLedgerProjection.init(INIT_PLACEHOLDER, INIT_PLACEHOLDER),
       first,
     );
     // 期望值按字面写：折一条 read 调用之后该是哪一行、长度停在哪一格。与 lib 里那份

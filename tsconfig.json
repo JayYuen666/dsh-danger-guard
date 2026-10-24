@@ -1,6 +1,11 @@
 {
   "extends": "@jayyuen66/dsh-plugin-shared/config/tsconfig.base.json",
   "compilerOptions": {
+    // DOM 在这一列是**测试面**要的（test/client-card.test.ts 的 HTMLElement / document）；
+    // 宿主侧（host.ts / settings-host.ts / lib/**）在 Node 里运行，只需要 @types/node 已
+    // 声明的全局（如 AbortController）。代价自知：宿主代码误用 window / localStorage 一类
+    // 浏览器全局，这里不会红、要等运行期 ReferenceError——拆 host/test 两个 program 是
+    // 已知未做的可读性改进，动它要连 typecheck 脚本一起改。
     "lib": ["ES2024", "DOM", "DOM.Iterable"]
   },
   "include": ["host.ts", "settings-host.ts", "lib/**/*.ts", "test/**/*.ts", "vitest.config.ts"]

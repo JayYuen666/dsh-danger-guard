@@ -109,6 +109,24 @@ const isAncestorDirOf = (pathApi: PathApi, candidate: string, target: string): b
  * @param tempDir    平台临时目录（宿主给；lib 不 import `node:os` 也能算，但那会重复
  *                   一次 `os.tmpdir()` 的语义，故由调用方给）。
  */
+
+/**
+ * 执行器**自报**的、确实在拦的模式；自报不沙箱、读不到、或不是三种模式之一 ⇒ `undefined`。
+ *
+ * 只看策略那一侧时，一个自报"不沙箱"的执行器配上一条说自己在拦的策略就能骗到让路——
+ * 而让路之后没人再兜底。
+ */
+function confiningShellModeOf(shellRaw: unknown): string | undefined {
+  let out: string | undefined;
+  if (isShellFace(shellRaw)) {
+    const declared = shellRaw.sandboxMode;
+    if (typeof declared === "string" && CONFINING_MODES.has(declared)) {
+      out = declared;
+    }
+  }
+  return out;
+}
+
 /**
  * 该 mode 下的可写根（**规范形**、去重）。
  *
@@ -122,18 +140,50 @@ function writableRootsOf(
   tempDir: string,
 ): OsPath[] {
   const roots: OsPath[] = [];
-  for (const item of [workspaceRoot, "/tmp", tempDir]) {
-    if (typeof item === "string" && item.length > 0) {
-      const canonical = canonicalize(item) ?? item;
-      // 这里的每一枚都是宿主真实路径（工作区根、临时区、规范化后的形），
-      // 标成 `OsPath` 让下游的包含性判据只能收同一个世界的东西。
-      const branded = asOsPath(canonical);
-      if (!roots.includes(branded)) {
-        roots.push(branded);
-      }
+  for (const candidate of [workspaceRoot, "/tmp", tempDir]) {
+    // 非字符串/空串不算一枚根（`workspaceRoot` 来自宿主服务的原始值）。
+    // 解析不出来时按 `path.resolve` 形保留，**不丢这一枚**：宿主的 `realpathOf` 在整条
+    // 前缀都不存在时才回 `undefined`，而灾难目标那一侧同样出自 `path.resolve` 的世界，
+    // 保留 resolve 形才让两侧同世界。丢掉这一枚的后果是**反方向**的：它底下的目标
+    // 看起来"谁都没包住"，于是被判成沙箱覆盖而让路——实测 `rm -rf .` 会因此变成放行。
+    const branded =
+      typeof candidate === "string" && candidate.length > 0
+        ? asOsPath(canonicalize(candidate) ?? path.resolve(candidate))
+        : undefined;
+    // 这里的每一枚都是宿主真实路径（工作区根、临时区、规范化后的形），
+    // 标成 `OsPath` 让下游的包含性判据只能收同一个世界的东西。
+    if (branded !== undefined && !roots.includes(branded)) {
+      roots.push(branded);
     }
   }
   return roots;
+}
+
+/**
+ * 策略解析出来的管辖面；mode 不在拦、解析不全、或一枚可写根都拿不到时 `undefined`。
+ *
+ * 入参形状照官方 `tool-bash` 自己的读法（`sandboxPolicy.resolve(exec.agent === undefined
+ * ? {} : { session })`）：官方在"执行器自报在拦"时**要求** `sandboxPolicy` 在场
+ *（否则 bash 工具加载期就抛），所以两枚一起读才是完备的判据。
+ */
+function scopeOfResolvedPolicy(
+  policyRaw: SandboxPolicyFace,
+  session: unknown,
+  canonicalize: Canonicalize,
+  tempDir: string,
+): SandboxScope | undefined {
+  let scope: SandboxScope | undefined;
+  const resolved: unknown = policyRaw.resolve(session === undefined ? {} : { session });
+  if (typeof resolved === "object" && resolved !== null) {
+    const { mode, workspaceRoot } = resolved as { mode?: unknown; workspaceRoot?: unknown };
+    if (typeof mode === "string" && CONFINING_MODES.has(mode)) {
+      // 根表**至少一枚**：`/tmp` 与 `tempDir` 是模块自己的常量，即使宿主给的
+      // `workspaceRoot` 形状不对，这两枚仍会进表（规范化失败时退 `path.resolve` 形）。
+      // 所以这里不再判空——那条判据在实现上一格都走不到，留着只会让覆盖率门禁永远差一分支。
+      scope = { mode, roots: writableRootsOf(workspaceRoot, canonicalize, tempDir) };
+    }
+  }
+  return scope;
 }
 
 export function sandboxScopeOf(
@@ -144,22 +194,12 @@ export function sandboxScopeOf(
   tempDir: string,
 ): SandboxScope | undefined {
   let scope: SandboxScope | undefined;
-  // 执行器自报"不沙箱"（或读不到）⇒ 不留 scope ⇒ 让路不发生，我们兜底。
-  if (
-    isShellFace(shellRaw) &&
-    shellRaw.sandboxMode !== undefined &&
-    isSandboxPolicyFace(policyRaw)
-  ) {
-    // 入参形状照官方 `tool-bash` 自己的读法（`sandboxPolicy.resolve(exec.agent === undefined
-    // ? {} : { session })`）：官方在"执行器自报在拦"时**要求** `sandboxPolicy` 在场
-    //（否则 bash 工具加载期就抛），所以两枚一起读才是完备的判据。
-    const resolved: unknown = policyRaw.resolve(session === undefined ? {} : { session });
-    if (typeof resolved === "object" && resolved !== null) {
-      const { mode, workspaceRoot } = resolved as { mode?: unknown; workspaceRoot?: unknown };
-      if (typeof mode === "string" && CONFINING_MODES.has(mode)) {
-        scope = { mode, roots: writableRootsOf(workspaceRoot, canonicalize, tempDir) };
-      }
-    }
+  // 两道前提，缺一不让路：① 执行器**自报的默认模式**本身在拦（`danger-full-access`
+  // 意味着它不拦文件效应，那种执行器给出的 `resolve()` 无论说什么都不该让我们让路）；
+  // ② 策略确实能解析出在拦的 mode。只看 ② 时，一个自报"不沙箱"的执行器配上一条
+  // 说自己在拦的策略就能骗到让路——而让路之后没人再兜底。
+  if (confiningShellModeOf(shellRaw) !== undefined && isSandboxPolicyFace(policyRaw)) {
+    scope = scopeOfResolvedPolicy(policyRaw, session, canonicalize, tempDir);
   }
   return scope;
 }
@@ -173,6 +213,11 @@ export function sandboxScopeOf(
  * 已落下的删除不会回滚。所以"沙箱覆盖了这枚目标"必须严格到"它之下没有一丁点可写的东西"。
  * 这条纠正直接决定了可让路范围：`rm -rf ~`、`rm -rf /`、`rm -rf .` 一律**不让路**
  *（它们都包住工作区），只有 `rm -rf /etc/foo`、`rm -rf ~/Downloads` 这类才让路。
+ *
+ * ⚠ 包含性必须**双向**判：既排除"目标包住可写根"，也排除"目标落在可写根之内"。
+ * 只判前一个方向时 `rm -rf ./src`（目标 `/work/src`、可写根 `/work`）会被判成"沙箱整体
+ * 拦下"而让路，而 `workspace-write` 恰恰允许写工作区 —— 那条删除会真实执行完。
+ * 目标自身可写，就不可能是"被完整覆盖"。
  *
  * `read-only` 是特例：**一切写都被禁**，所以任何目标都被完全覆盖（不存在"部分成功"）。
  *
@@ -191,7 +236,12 @@ export function sandboxDropsOf(
   return targets.every(
     (target) =>
       target !== undefined &&
-      scope.roots.every((root) => !(root === target || isAncestorDirOf(pathApi, target, root))),
+      scope.roots.every(
+        (root) =>
+          root !== target &&
+          !isAncestorDirOf(pathApi, target, root) &&
+          !isAncestorDirOf(pathApi, root, target),
+      ),
   );
 }
 

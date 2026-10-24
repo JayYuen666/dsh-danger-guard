@@ -73,13 +73,21 @@ const QUOTES = new Set(['"', "'", "`"]);
 const OPENERS = new Set(["(", "[", "{"]);
 const CLOSERS = new Set([")", "]", "}"]);
 const IDENT_START = /^[A-Za-z_$]/u;
+/** 整个字符串内容是不是一个裸字段名（决定它保留还是被抹成空格，见 stripCommentsAndStrings）。 */
+const IDENT_ONLY = /^[A-Za-z_$][\w$]*$/u;
 const IDENT = /^[A-Za-z_$][\w$]*/u;
 const FIELD_VALUE = /^\s*:/u;
 
-/** 引号内的一次推进：转义吞掉下一个字符。返回 `[步长, 是否正好闭合]`。 */
+/** 引号内的一次推进：转义吞掉下一个字符。返回 `[步长, 是否正好闭合]`。
+ *  闭合判据看的是**被吞掉之后**那一枚字符：`"a \" b"` 里 `\` 吞掉的是转义引号本身，
+ *  `block[i + step - 1]` 正好是那枚 `"`，于是整串被判成闭合、后面的字段全被漏计
+ *  （漏计 = 门禁静默失效，正是本文件要防的那类错）。 */
 function stepInsideQuote(block: string, i: number, quote: string): readonly [number, boolean] {
-  const step = block[i] === "\\" ? 2 : 1;
-  return [step, block[i + step - 1] === quote] as const;
+  if (block[i] === "\\") {
+    // 转义把下一枚字符一起吞掉：被吞掉的那枚就算长得像引号，也是内容而不是闭合。
+    return [2, false];
+  }
+  return [1, block[i] === quote];
 }
 
 /** 注释起始 → 跳过后应推进的步长；不是注释则 0。
@@ -151,7 +159,7 @@ function advanceOutsideQuote(block: string, i: number, state: ScanState, out: st
  *  「字段名」还要求出现在顶层 `,` 之后（中间只允许空白或注释）——三元表达式
  *  `a ? b : c` 里 `b` 后面也有冒号，光看形状会把它当成字段。
  *  ⚠ 本文件在全包 lint 的扫描范围内：不用 `continue`（no-continue），每轮走统一步长。 */
-function topLevelFieldNames(block: string): string[] {
+export function topLevelFieldNames(block: string): string[] {
   const out: string[] = [];
   const state: ScanState = { depth: 0, quote: "", expectKey: true };
   let i = 0;
@@ -204,17 +212,68 @@ function hostSchemaFields(hostTs: string): string[] {
   return topLevelFieldNames(unwrapObjectLiteral(source.slice(open + 1, end)));
 }
 
+/** 把**注释**抹成空格，并把「看起来不像字段名」的字符串内容也抹掉。
+ *
+ *  两件事分开做，因为要识别的字段名字面量**自己就在字符串里**（`set("x")`）：
+ *  注释里写过的 `set('legacy')` 一定不是调用（整条抹掉）；而字符串只在内容
+ *  **不是一个裸标识符**时才抹 —— 提示文案里引用的 `set('ghost')` 是多词句子，
+ *  抹掉；`set("realField")`、`field: 'fieldPropField'` 是单个标识符，保留。
+ *  把它们算进来等于给这些字段一张免检证：门禁的假阴性方向被收窄，
+ *  `allowUnbound` 的反向校验也不会再把它们判成「已绑定」而逼人删掉正当豁免。 */
+function stripCommentsAndStrings(src: string): string {
+  let out = "";
+  let i = 0;
+  let quote = "";
+  let content = "";
+  const flushContent = (): void => {
+    out += IDENT_ONLY.test(content) ? content : " ".repeat(content.length);
+    content = "";
+  };
+  while (i < src.length) {
+    const ch = src[i] ?? "";
+    if (quote === "") {
+      const skipped = commentSkip(src, i);
+      if (skipped > 0) {
+        out += " ".repeat(skipped);
+        i += skipped;
+      } else if (QUOTES.has(ch)) {
+        out += ch;
+        quote = ch;
+        i += 1;
+      } else {
+        out += ch;
+        i += 1;
+      }
+    } else if (ch === "\\") {
+      // 转义吞掉两枚字符：整对抹成空格，免得里面的引号被当成闭合。
+      content += "  ";
+      i += 2;
+    } else if (ch === quote) {
+      flushContent();
+      out += quote;
+      quote = "";
+      i += 1;
+    } else {
+      content += ch;
+      i += 1;
+    }
+  }
+  return out;
+}
+
 /** 扫描一个 client 源文件，收集作为「设置写入第一参」出现的字段名字面量。 */
-function boundFieldsIn(src: string): Set<string> {
+export function boundFieldsIn(src: string): Set<string> {
   const out = new Set<string>();
+  // 注释与字符串内容先抹掉再匹配：字段名字面量本身在引号里，引号被保留所以仍能命中。
+  const code = stripCommentsAndStrings(src);
   // 输入行组件的 field prop：field: 'x'
-  for (const match of src.matchAll(/\bfield\s*:\s*["'](?<field>[A-Za-z_$][\w$]*)["']/gu)) {
+  for (const match of code.matchAll(/\bfield\s*:\s*["'](?<field>[A-Za-z_$][\w$]*)["']/gu)) {
     out.add(match.groups?.["field"] ?? "");
   }
   // 各种写入惯用法：props.set('x' / set('x' / unset('x' / fireAndForget('x' / writeSet('x'
   //   刻意不要求限定 receiver——各包惯用法不同（props.set / fireAndForget / writer.set），
   //   收得太紧会假阴性。字段名是否算"绑定"由 declareSchemaCoverage 与 host 字段名交集判定。
-  for (const match of src.matchAll(
+  for (const match of code.matchAll(
     /\b(?:set|unset|fireAndForget|writeSet|commit)\s*\(\s*["'](?<field>[A-Za-z_$][\w$]*)["']/gu,
   )) {
     out.add(match.groups?.["field"] ?? "");

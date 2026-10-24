@@ -8,6 +8,7 @@
 // 可能把 `rmrf` 从 deny 降成 allow；如果排序按未覆盖的 facts 走，这枚 rmrf 会先让扫描
 // 收工，后段（`git push -f`、`--no-verify`）就没人看过。
 
+import path from "node:path";
 import { SANDBOX_COVERED } from "./danger-rules.ts";
 import type { BashDenialKey, BashVerdict, Fix } from "./danger-rules.ts";
 import { decideRule } from "./mode-policy.ts";
@@ -28,10 +29,20 @@ export interface EffectiveDispositionInput {
   readonly tempDir: string;
 }
 
+/** 收口侧一次要的两样：最终处置 + 覆盖后的事实（上报里要记是哪一档、沙箱有没有让路）。 */
+export interface EffectiveOutcome {
+  readonly verdict: RuleVerdict;
+  readonly facts: PolicyFacts;
+}
+
 /** 扫描层排序与收口共用的两枚函数。 */
 export interface EffectiveDisposition {
   readonly dispositionOf: (verdict: BashVerdict) => RuleVerdict;
   readonly coveredFactsOf: (key: BashDenialKey, fix: Fix | undefined) => PolicyFacts;
+  /** 收口侧专用：按 (key, fix) 一次求出处置与覆盖后的事实。"排序与收口必须同一处置"
+   *  这条不变量由**结构**保证——收口处手写 `decideRule(facts, key)`（漏掉覆盖）的写法
+   *  没有这个成员可调，也就写不出来。 */
+  readonly verdictOf: (key: BashDenialKey, fix: Fix | undefined) => EffectiveOutcome;
 }
 
 /** 宿主持有的稳定面；`shellRaw` / `policyRaw` 每趟现读（服务可能换代）。 */
@@ -61,13 +72,20 @@ export function effectiveDispositionOf(input: EffectiveDispositionInput): Effect
   let scopeComputed = false;
   const scopeOf = (): SandboxScope | undefined => {
     if (!scopeComputed) {
-      scope = sandboxScopeOf(
-        input.shellRaw(),
-        input.policyRaw(),
-        input.session,
-        input.canonicalize,
-        input.tempDir,
-      );
+      // 宿主服务面（shellRaw / policyRaw / 其 resolve）抛错不能中断扫描排序——dispositionOf
+      // 在热路径上，异常会从排序阶段直接冒出、整趟判定中断。按"读不到就兜底"的既有口径
+      // 交回 undefined：sandboxCoveredFacts 原样返回，rmrf 保持 deny（方向保守）。
+      try {
+        scope = sandboxScopeOf(
+          input.shellRaw(),
+          input.policyRaw(),
+          input.session,
+          input.canonicalize,
+          input.tempDir,
+        );
+      } catch {
+        scope = undefined;
+      }
       scopeComputed = true;
     }
     return scope;
@@ -76,9 +94,14 @@ export function effectiveDispositionOf(input: EffectiveDispositionInput): Effect
     SANDBOX_COVERED.has(key)
       ? sandboxCoveredFacts(input.facts, key, fix, scopeOf(), input.cwd)
       : input.facts;
+  const verdictOf = (key: BashDenialKey, fix: Fix | undefined): EffectiveOutcome => {
+    const covered = coveredFactsOf(key, fix);
+    return { verdict: decideRule(covered, key), facts: covered };
+  };
   return {
-    dispositionOf: (verdict) => decideRule(coveredFactsOf(verdict.key, verdict.fix), verdict.key),
+    dispositionOf: (verdict) => verdictOf(verdict.key, verdict.fix).verdict,
     coveredFactsOf,
+    verdictOf,
   };
 }
 
@@ -94,7 +117,12 @@ export function effectiveDispositionFactory(host: EffectiveDispositionHost): Dis
     effectiveDispositionOf({
       facts,
       session,
-      cwd: cwd === undefined ? undefined : asOsPath(cwd),
+      // 铸造边界校验绝对性：`asOsPath` 是纯声明，第三方 `workingDirectory` 服务给出相对
+      // 路径时原样打 brand，灾难目标会按 `process.cwd()` 解析出与可写根无关的绝对形——
+      // 一次真实的工作区删除可能被判成"沙箱已覆盖"而由 deny 降为 allow。不绝对就交回
+      // undefined（不让路，方向保守）。
+      cwd:
+        cwd === undefined || cwd.length === 0 || !path.isAbsolute(cwd) ? undefined : asOsPath(cwd),
       shellRaw: host.shellRaw,
       policyRaw: host.policyRaw,
       canonicalize: host.canonicalize,

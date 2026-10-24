@@ -16,6 +16,7 @@ import { remoteMethods } from "@deepseek-ai/dsh-typert-protocol";
 import { noteJudgeCost, noteQuotaRelease, noteRuleHit, SLOW_JUDGE_MS } from "../lib/judge-stats.ts";
 import type { StatsSnapshot } from "../lib/judge-stats.ts";
 import { installStatsRemote, STATS_SERVICE_KEY } from "../lib/stats-remote.ts";
+import { loggedText } from "./setup-logs.ts";
 import { STATS_DESCRIPTORS } from "../src/stats-reader.ts";
 
 /** 从真 Context 上取回读面（服务键缺席时 `get` 给 undefined —— 断言里当场点名）。 */
@@ -74,6 +75,25 @@ describe("判定统计读面（官方 Typert Remote）", () => {
     // 阈值与窗口随快照出去：卡片要能把"慢"这个字说成具体数字。
     assert.equal(after.slowMs, SLOW_JUDGE_MS);
     assert.ok(after.window > 0);
+  });
+
+  it("注册口在、但 provide 抛错 ⇒ 收口成 false 并说明少了哪一栏，不把闸门带下去", () => {
+    // 真实形态：服务键已被别的插件占了，宿主在 `reflect.provide` 里直接抛。
+    // host.ts 的 apply 是裸调用，这一抛若不在这里收口，会把整条拦截链一起打掉——
+    // 而这条读面只是给设置卡多一栏。
+    const boom = new Error("service already registered: dangerGuardStats");
+    const ctx = {
+      reflect: {
+        provide: (): never => {
+          throw boom;
+        },
+      },
+    };
+    assert.equal(installStatsRemote(ctx as never), false, "注册失败必须返回 false，不能抛");
+    const logged = loggedText();
+    assert.match(logged, /判定统计读面没能注册/u);
+    assert.match(logged, /设置卡会少一栏判定统计，门禁本身不受影响/u);
+    assert.match(logged, /service already registered/u, "要把宿主那句原因带出来");
   });
 
   it("注册口缺席或畸形：四种形状都返回 false（可选读面只该少一栏展示，绝不让闸门下线）", () => {
