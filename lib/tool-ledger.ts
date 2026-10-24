@@ -96,12 +96,47 @@ const resultRowSchema = z.object({
   seq: intSchema,
 });
 
-const toolLedgerSchema: z.ZodType<ToolLedger> = z.object({
-  calls: z.array(callRowSchema),
-  results: z.array(resultRowSchema),
-  length: intSchema,
-  dropped: z.boolean(),
-});
+const toolLedgerSchema: z.ZodType<ToolLedger> = z
+  .object({
+    calls: z.array(callRowSchema),
+    results: z.array(resultRowSchema),
+    length: intSchema,
+    dropped: z.boolean(),
+  })
+  // 字段类型之外的两条**结构不变量**（host 把 `length` 当 logSeq 新鲜度基准、把
+  // "更靠后的行即更新的证据"当隐含前提——坏缓存破坏它们时判定会基于错位的水位，
+  // 且不会像其它坏形状那样退回全量扫描）：
+  //   1. 行在各表内按 `seq` 严格升序；
+  //   2. `length` 严格大于任何行内 `seq`（空表时只需非负，intSchema 已保证）。
+  .superRefine((value, ctx) => {
+    const checkRows = (rows: readonly { seq: number }[], label: string): void => {
+      for (let index = 1; index < rows.length; index += 1) {
+        const row = rows[index];
+        const previous = rows[index - 1];
+        if (row !== undefined && previous !== undefined && row.seq <= previous.seq) {
+          ctx.addIssue({
+            code: "custom",
+            path: [label, index, "seq"],
+            message: `rows must be strictly ascending by seq (${String(row.seq)} after ${String(previous.seq)})`,
+          });
+        }
+      }
+    };
+    checkRows(value.calls, "calls");
+    checkRows(value.results, "results");
+    const maxSeq = Math.max(
+      -1,
+      ...value.calls.map((row) => row.seq),
+      ...value.results.map((row) => row.seq),
+    );
+    if (maxSeq >= 0 && value.length <= maxSeq) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["length"],
+        message: `length (${String(value.length)}) must exceed max row seq (${String(maxSeq)})`,
+      });
+    }
+  });
 
 declare module "@deepseek-ai/dsh-session-projection/types" {
   interface SessionProjectionStateMap {
@@ -188,6 +223,13 @@ function applyEvent(state: ToolLedger, event: SessionEvent): ToolLedger {
     // 已作废：只跟长度（回退路径自己读全量日志，这份表没人再读）。
     return { ...state, length };
   }
+  // 幂等自卫：`seq < state.length` = 该事件位已折过（持久缓存回填后重放、宿主重投递、
+  // 非严格递增的投递）。再折一遍会在表尾追加同一事件的第二份拷贝——既让证据链重复，
+  // 也会提前撞上窗口作废（之后每次判定都退回全量扫描）。与其余越界情况一样，这里
+  // 不信"官方保证只投新事件"的口头契约。
+  if (seq < state.length) {
+    return state;
+  }
   // 跳号 = 折叠起点不在日志开头（前缀没交给本单元）⇒ 台账不可能完整。
   if (seq > state.length) {
     return { calls: [], results: [], length, dropped: true };
@@ -222,10 +264,27 @@ export const toolLedgerProjection = {
  * `stateOf()` 的返回值 → 可信台账。坏形状与被窗口/跳号作废的台账都交回 `undefined`
  * （结构读口交回 unknown：官方 `stateOf` 第一参是名义类 `Session`，本包的替身会话
  * 永远满足不了，见 host.ts 的 ProjectionsRegistry）。
+ *
+ * 校验/解码按**对象身份**记忆化：投影态不可变（`applyEvent` 每次返回新对象），而本函数
+ * 在守卫判定的热路径上被反复调用（每次判定多处读水位/证据），每次 safeParse 都要为
+ * 最多两千行逐行重建对象。按身份缓存让同一份状态只解析一次；缓存键是 WeakMap，状态
+ * 对象被宿主换代后自然回收。同一对象被就地改写后再来（违反不可变契约）会拿到旧结果——
+ * 投影态的不可变是官方单元契约的一部分，这里不再为违约者多付一遍解析。
  */
+const ledgerCache = new WeakMap<object, ToolLedger | undefined>();
+
 export function asLedger(value: unknown): ToolLedger | undefined {
-  const parsed = toolLedgerSchema.safeParse(value);
-  return parsed.success && !parsed.data.dropped ? parsed.data : undefined;
+  if (typeof value !== "object" || value === null) {
+    const parsed = toolLedgerSchema.safeParse(value);
+    /* v8 ignore next -- 原始值必然过不了对象 schema（数组的 typeof 是 object，走缓存分支），
+       "解析成功"那一臂在这个入口不可达；仍走 safeParse 是为了不把采信判据抄第二份。 */
+    return parsed.success && !parsed.data.dropped ? parsed.data : undefined;
+  }
+  if (!ledgerCache.has(value)) {
+    const parsed = toolLedgerSchema.safeParse(value);
+    ledgerCache.set(value, parsed.success && !parsed.data.dropped ? parsed.data : undefined);
+  }
+  return ledgerCache.get(value);
 }
 
 /** 台账 → `scanToolEvents` 同形状的 calls（判定侧因此不必区分两条读法）。 */

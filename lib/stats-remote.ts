@@ -20,6 +20,8 @@ import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
+import { errorText } from "@jayyuen66/dsh-plugin-shared/lib/errors";
+
 import { statsSnapshot } from "./judge-stats.ts";
 import type { StatsSnapshot } from "./judge-stats.ts";
 
@@ -85,7 +87,19 @@ export function installStatsRemote(ctx: Context): boolean {
   if (!hasServiceRegistry(ctx)) {
     return false;
   }
-  // oxlint-disable-next-line eslint/no-new -- 见函数文档：构造即注册，返回值无意义
-  new DangerGuardStatsService(ctx);
+  try {
+    // oxlint-disable-next-line eslint/no-new -- 见函数文档：构造即注册，返回值无意义
+    new DangerGuardStatsService(ctx);
+  } catch (error) {
+    // 构造会在 `super(ctx, …)` 里真跑 `ctx.reflect.provide`：服务键被别的插件占了、
+    // 或者注册口本身坏了，异常就从这里穿出去。而调用点（host.ts 的 apply）是裸调用，
+    // 穿出去等于把整条门禁一起打掉 —— 可这条读面只是给设置卡多一栏。
+    // 所以在这里收口：说清楚少了哪一栏，然后把闸门交回调用方。
+    console.warn(
+      `[danger-guard] 判定统计读面没能注册（${STATS_SERVICE_KEY}）：${errorText(error)}。` +
+        "设置卡会少一栏判定统计，门禁本身不受影响。",
+    );
+    return false;
+  }
   return true;
 }

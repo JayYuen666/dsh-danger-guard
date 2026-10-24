@@ -54,6 +54,36 @@
 因此本包以 MIT 发布、未按上游许可分发其代码，是**基于上述比对结论**的判断。若你认为该
 结论有误，请以 issue 反馈，届时按上游许可条款补齐随包分发。
 
+### 上游 MIT 原文（防御性随附）
+
+不论上述比对结论是否成立，上游的版权与许可声明原文都随本包分发：附上它只是一段文本，
+而「比对结论被推翻时发布物里没有上游许可文本」是实质性合规缺口。以下为上游仓库 LICENSE
+的逐字原文：
+
+```
+MIT License
+
+Copyright (c) 2026 Affaan Mustafa
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### A/B 数据的出处
 
 本包多处注释与本文档引用「A/B 实测 +2.25 分」「平均 9.0 vs 6.75」。该数据来自上游

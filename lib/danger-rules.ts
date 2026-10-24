@@ -2267,6 +2267,27 @@ function isPosixDisasterTarget(value: string): boolean {
   return expanded.some((word) => isPosixDisasterTargetWord(word));
 }
 
+/** 重定向词：`>out`、`2>err`、`>>log`、`<in`、`2>&1` 这类**操作符与操作数粘连**的整枚词。
+ *  操作数从来不是命令的参数：`rm -rf ./build > /dev/null` 里 `/dev/null` 不是要删的东西，
+ *  把它收进目标面会让这条最常见的平静命令被判成灾难删除（实测的确如此）。
+ *  单独的 `>` / `<` 不在此列——它要等下一词才知道操作数是谁，而 `<( … )` 过程替换在词法层
+ *  正好产出孤立的 `<`，那枚必须留给结构判据（`sh <(curl …)` 靠它认「取回即执行」）。 */
+const RM_REDIRECT_WORD_RE = /^(?:\d*|&)(?:>>?|<<?)(?!\()\S*$/u;
+/** 重定向操作符**自身**是独立词的那一枚（`rm -rf a > b` 里的 `>`、`2> b` 里的 `2>`）。 */
+const RM_REDIRECT_OPERATOR_RE = /^(?:\d*|&)(?:>>?|<<?)(?!\()$/u;
+/**
+ * 这一枚词要跳几格：0 = 普通参数，1 = 重定向整枚（操作数与操作符粘连），
+ * 2 = 独立操作符连带它的操作数（操作数从来不是命令的实参）。
+ *  先判独立操作符：含粘连形态的那条正则带 `\S*`，孤立操作符也能被它匹配上。
+ *  段尾落单的操作符（`rm -rf a <`）没有操作数可跳，返回 2 会直接落到表尾。
+ */
+const redirectSkipOf = (value: string): number => {
+  if (RM_REDIRECT_OPERATOR_RE.test(value)) {
+    return 2;
+  }
+  return RM_REDIRECT_WORD_RE.test(value) ? 1 : 0;
+};
+
 /** rm 一系参数走查的可变状态。 */
 interface RmWalk {
   args: readonly ShellToken[];
@@ -2303,6 +2324,41 @@ function rmValueArg(walk: RmWalk, pos: number, token: ShellToken): RmValueArg | 
   return out;
 }
 
+/**
+ * rm 参数分区走一步：按这一枚词的形状决定它归旗标面、目标面，还是根本不该进这两个面。
+ *  重定向（含粘连操作数与独立操作符两种形态）两者都不进——它的操作数是文件描述符的落点，
+ *  从来不是命令实参；`rm -rf ./build > /dev/null` 里 `/dev/null` 不是要删的东西。
+ */
+function advanceRmWalk(walk: RmWalk): void {
+  const word = walk.args[walk.pos];
+  /* v8 ignore next 3 —— partitionRmArgs 的 while 条件已保证下标在界内 */
+  if (word === undefined) {
+    return;
+  }
+  const skip = redirectSkipOf(word.value);
+  if (skip > 0) {
+    walk.pos += skip;
+    return;
+  }
+  const valueArg = walk.literal ? undefined : rmValueArg(walk, walk.pos, word);
+  if (!walk.literal && word.value === "--") {
+    walk.literal = true;
+    walk.pos += 1;
+  } else if (valueArg !== undefined) {
+    if (valueArg.target !== undefined) {
+      walk.targets.push(valueArg.target);
+    }
+    walk.pos += valueArg.consumed;
+  } else if (!walk.literal && isRmFlagWord(walk, word)) {
+    walk.flags.push(word.value);
+    walk.pos += 1;
+  } else {
+    // `--` 之后一律目标：这里不再按旗标形状过滤（`rm -rf ~ -- -weird` 的 `-weird` 是文件名）
+    walk.targets.push(word);
+    walk.pos += 1;
+  }
+}
+
 /** rm 的参数分区（`hasForceRecursive` 与目标判定的输入）：旗标面与目标面各取其一。
  *  `--` 之后一律目标（POSIX/pwsh 同规则），不再按旗标形状过滤——两侧口径此前不一致，
  *  `rm -rf ~ -- -weird` 里那枚 `-weird` 被当旗标丢了，而它其实是文件名。
@@ -2313,28 +2369,8 @@ function partitionRmArgs(
   cmdDialect: boolean,
 ): { flags: string[]; targets: ShellToken[] } {
   const walk: RmWalk = { args, cmdDialect, pos: 0, flags: [], targets: [], literal: false };
-  for (;;) {
-    const word = args[walk.pos];
-    if (word === undefined) {
-      break;
-    }
-    const valueArg = walk.literal ? undefined : rmValueArg(walk, walk.pos, word);
-    if (!walk.literal && word.value === "--") {
-      walk.literal = true;
-      walk.pos += 1;
-    } else if (valueArg !== undefined) {
-      if (valueArg.target !== undefined) {
-        walk.targets.push(valueArg.target);
-      }
-      walk.pos += valueArg.consumed;
-    } else if (!walk.literal && isRmFlagWord(walk, word)) {
-      walk.flags.push(word.value);
-      walk.pos += 1;
-    } else {
-      // `--` 之后一律目标：这里不再按旗标形状过滤（`rm -rf ~ -- -weird` 的 `-weird` 是文件名）
-      walk.targets.push(word);
-      walk.pos += 1;
-    }
+  while (walk.pos < args.length) {
+    advanceRmWalk(walk);
   }
   return { flags: walk.flags, targets: walk.targets };
 }
@@ -2830,7 +2866,7 @@ function normalizeIfs(command: string): string {
   // 先做一次廉价的存在性判定再替换：`String#replace` 在 2 万字符 × 2 万层的输入上是
   // 每层一次全串扫描，实测把一条 20000 层的词法套娃从个位数毫秒推到 2.6 秒（测试因此超时）。
   // 判据只看"有没有那个子串"，与替换用的是同一个前缀，所以这里不会漏掉该归一的情形。
-  return command.includes("IFS") ? command.replace(IFS_EXPANSION_RE, " ") : command;
+  return command.includes("IFS") ? command.replaceAll(IFS_EXPANSION_RE, " ") : command;
 }
 
 /** shell 系段头的 `-c` 体：只取紧跟该旗标的**那一枚**参数；段头不是 shell 则 undefined。 */
@@ -3247,6 +3283,27 @@ export interface SecretPatternPartition {
 const MAX_SECRET_PATTERN_LENGTH = 512;
 
 /**
+ * 是不是被写成了 JS 正则**字面量**（`/…/` 或 `/…/gi`）。
+ *
+ * 判据刻意窄到"只认整串被一对斜杠包住"这一种形状：模式本身常含斜杠（`secrets/prod\.env$`），
+ * 所以不能只看到斜杠就拒。这里要求「首字符是 `/`、末字符是 `/`」——那是把路径分隔符写在
+ * 两端的写法（如 `/etc/shadow`），而用户要的语义正是"匹配这个片段"，
+ * 此时该写 `^/etc/shadow$` 而不是用斜杠当定界符。真正带 flags 的形状（`/x/i`）与
+ * 「首尾都是斜杠」两种都拒，且都给出同一条可读理由。
+ */
+function looksLikeRegexLiteral(pattern: string): boolean {
+  const first = pattern.at(0);
+  const last = pattern.at(-1);
+  if (first !== "/") {
+    return false;
+  }
+  if (last === "/") {
+    return true;
+  }
+  return /^\/(?:[^/\\]|\\.)+\/[dgimsuvy]*$/u.test(pattern);
+}
+
+/**
  * 逐条试编译用户给的密钥模式：`new RegExp(pat, "u")` 抛错、或长度超限的进 `rejected`。
  * 这是**加载期校验**的谓词（host 侧读配置时调用并把 rejected 报出来）；判定链里
  * `secretRegexes` 也走同一个函数，两侧不可能给出不一致的模式集合。
@@ -3256,6 +3313,11 @@ export function partitionSecretPatterns(patterns: readonly string[]): SecretPatt
   const rejected: string[] = [];
   for (const pattern of patterns) {
     if (pattern.length === 0 || pattern.length > MAX_SECRET_PATTERN_LENGTH) {
+      rejected.push(pattern);
+    } else if (looksLikeRegexLiteral(pattern)) {
+      // 写成 `/…/i` 的形状**编得过**（首尾的斜杠只是普通字符、尾部 `i` 也是普通字符），
+      // 于是它不会进 rejected、界面上看不到「本条未生效」，却永远匹配不到任何路径 ——
+      // 用户以为开了保护，密钥面静默失效。这类输入必须点名拒掉，不能靠编译期抛错。
       rejected.push(pattern);
     } else {
       try {
@@ -3302,9 +3364,32 @@ function targetForms(target: string, cwd: string | undefined): string[] {
   return [...forms];
 }
 
+/** 宿主给这枚目标记下的解析形（缺席 / 形状不对 ⇒ 空清单）。
+ *
+ *  为什么不直接 `opts?.resolvedPaths?.[targetPath] ?? []`：这张表的键是**模型给的目标
+ *  路径**，而查表走的是原型链。目标写成 `constructor` / `toString` / `valueOf` 时读到的是
+ *  `Object.prototype` 上那几个函数，既不是数组、也不是 `undefined`，`?? []` 接不住它，
+ *  随后 `[...resolved]` 直接抛 `resolved is not iterable`——一次本该是「放行或拒绝」的判定
+ *  变成异常，而异常发生在写类调用的谓词里。判据只认自有属性，且必须是数组。 */
+function resolvedFormsFor(
+  targetPath: string,
+  opts: EditDangerOptions | undefined,
+): readonly string[] {
+  const table = opts?.resolvedPaths;
+  if (table === undefined || !Object.hasOwn(table, targetPath)) {
+    return [];
+  }
+  const value: unknown = table[targetPath];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  // 元素也要是字符串：形状坏了（数字、对象）时把它当「没有解析形」，而不是把非字符串喂给路径判据。
+  return value.filter((item): item is string => typeof item === "string");
+}
+
 /** 一枚目标的全部待判形态：声明形与宿主给的每一枚解析形（缺席时只有声明形），各自再过一遍词法形态。 */
 function formsToJudge(targetPath: string, opts: EditDangerOptions | undefined): string[] {
-  const resolved = opts?.resolvedPaths?.[targetPath] ?? [];
+  const resolved = resolvedFormsFor(targetPath, opts);
   return [targetPath, ...resolved].flatMap((candidate) => targetForms(candidate, opts?.cwd));
 }
 
@@ -3316,7 +3401,7 @@ function formsToJudge(targetPath: string, opts: EditDangerOptions | undefined): 
  * 返回的是文案键（`secretPath` / `opaqueTarget`），拒绝理由由宿主按当前语言从消息表取。
  */
 function secretPathDeny(targetPath: string, opts?: EditDangerOptions): EditDenialKey | undefined {
-  const resolved = opts?.resolvedPaths?.[targetPath] ?? [];
+  const resolved = resolvedFormsFor(targetPath, opts);
   let result: EditDenialKey | undefined;
   if (targetPath.length > MAX_JUDGED_PATH_LENGTH || resolved.length > MAX_RESOLVED_PATHS) {
     result = "opaqueTarget";

@@ -113,6 +113,10 @@ export interface RefScan {
    *  那几份完全可能写着引用，只是没进结果。`complete` 只能说明遍历没被预算截断，
    *  说明不了这件事（见 layerConclusionsOf 的判据）。 */
   readonly unread: readonly string[];
+  /** `unread` 里**不是**因凭据面规则被跳过的那些（超大 / 读不动 / 二进制）。
+   *  与 `quarantined` 分开报，是因为两者的零命中语气不同：隔离是「这层我们不看」，
+   *  这一档是「这层我们看了但没读到」——后者连"按规则排除"这个说法都不成立。 */
+  readonly unreadNotQuarantined: readonly string[];
 }
 
 /** 一枚层的结论：目录（相对起点）、该目录内的命中数，以及这次扫描是否覆盖它。 */
@@ -155,14 +159,22 @@ interface ScanItem {
  *  被预算截断，`quarantined` 记按凭据面规则**没读**的份数——三者决定这份结果能不能当凭证、
  *  以及结论能说到多大，见 RefScan 的注释）。 */
 interface ScanState {
+  /** 真正读过正文的文件数（`RefScan.scanned` 的口径）。 */
   scanned: number;
+  /** 走到过的**文件**数：读过的、隔离的、超大跳过的、读不动的都算。
+   *  文件预算挂在它上面——挂在 `scanned` 上时，隔离分支在预算检查之前就 return，
+   *  命中隔离词表的文件可以任意多，`unread` 跟着无界增长。 */
+  candidates: number;
   dirs: number;
   capped: boolean;
   quarantined: number;
   /** 真展开过的目录（相对起点），随结果交回用于层覆盖判定。 */
   readonly walked: string[];
-  /** 走到了但没读正文的文件（相对起点）：见 RefScan.unread。 */
+  /** 走到了但没读正文的文件（相对起点）：见 RefScan.unread。隔离与超限/读不动都进这里。 */
   readonly unread: string[];
+  /** `unread` 里**非隔离**的那部分：它们没被任何规则排除，只是这次没读到，
+   *  零命中结论必须因此降级（隔离那一支有自己的文案，见 renderRefsBlock）。 */
+  readonly unreadNotQuarantined: string[];
   readonly findings: RefFinding[];
 }
 
@@ -319,6 +331,14 @@ async function scannableText(ctx: ScanCtx, item: ScanItem): Promise<string | und
  *  拆出来而不是inline在走循环里：那三条分支（隔离 / 预算 / 读取）各有一个"停"的去向，
  *  叠在同一个循环体里既顶爆认知复杂度，也把"这一份到底为什么没读"揉成一团。 */
 async function scanOneFile(ctx: ScanCtx, item: ScanItem): Promise<boolean> {
+  // 预算检查必须排在**所有"这一份不读"的判断之前**：隔离、超大、读不动这三种都不消耗
+  // `scanned`，挂在 `scanned` 上的预算拦不住它们（实测：400 个隔离文件走进来，`scanned`
+  // 仍是 1，`unread` 却已经长了 400 条）。预算真正的口径是"走到过多少份文件"。
+  if (ctx.state.candidates >= PREFLIGHT_MAX_FILES) {
+    ctx.state.capped = true;
+    return false;
+  }
+  ctx.state.candidates += 1;
   // 凭据面文件整个跳过：一条引用命中会把那行**原文**抄进模型上下文，而"凭据正文不外泄"
   // 正是本包存在的理由之一。跳过而不是脱敏：脱敏等于在证据里留一份"这里有内容"的形状。
   if (ctx.quarantined(item.path)) {
@@ -327,15 +347,12 @@ async function scanOneFile(ctx: ScanCtx, item: ScanItem): Promise<boolean> {
     ctx.state.unread.push(item.rel);
     return true;
   }
-  if (ctx.state.scanned >= PREFLIGHT_MAX_FILES) {
-    ctx.state.capped = true;
-    return false;
-  }
   ctx.state.scanned += 1;
   // 超大文件跳过而不是读前半（与迁移前同一条取舍）：半份内容给出的命中面更不完整，
   // 而"读到一半"会多出第二种语义（这份扫描结果到底覆盖了什么）。
   if (item.size !== undefined && item.size > PREFLIGHT_MAX_BYTES) {
     ctx.state.unread.push(item.rel);
+    ctx.state.unreadNotQuarantined.push(item.rel);
     return true;
   }
   const text = await scannableText(ctx, item);
@@ -343,6 +360,7 @@ async function scanOneFile(ctx: ScanCtx, item: ScanItem): Promise<boolean> {
     // 读不动 / 二进制：这一份也没进结果。抛错那支已由 scannableText 置位 capped，
     // 这里记进 unread 是为了让"这一层里还有没读的"在层结论里说得出来。
     ctx.state.unread.push(item.rel);
+    ctx.state.unreadNotQuarantined.push(item.rel);
     return true;
   }
   collectFindings(item.rel, text, ctx);
@@ -543,12 +561,14 @@ export async function scanReferences(request: ScanRequest): Promise<RefScan | un
     quarantined: isQuarantined ?? NEVER_QUARANTINED,
     state: {
       scanned: 0,
+      candidates: 0,
       dirs: 0,
       findings: [],
       capped: false,
       quarantined: 0,
       walked: [],
       unread: [],
+      unreadNotQuarantined: [],
     },
   };
   await walkForRefs(ctx, rootTarget);
@@ -563,6 +583,7 @@ export async function scanReferences(request: ScanRequest): Promise<RefScan | un
         quarantined: ctx.state.quarantined,
         dirs: ctx.state.walked,
         unread: ctx.state.unread,
+        unreadNotQuarantined: ctx.state.unreadNotQuarantined,
       };
 }
 
@@ -660,11 +681,18 @@ export function renderRefsBlock(messages: DangerGuardMessages, scan: RefScan): s
       limit: String(PREFLIGHT_MAX_FILES),
       count: String(scan.quarantined),
     };
-    // 三句零命中说的是三件事：扫完了没引用 / 没扫完 / 扫完了但有几份不许读
+    // 零命中说的是四件事：扫完了没引用 / 没扫完 / 扫完了但有几份不许读 / 扫完了但有几份没读到。
+    // 后两者都不能给全称结论：`complete` 只说明遍历没被预算截断，说明不了「都读过了」。
     let line = messages.preflightRefsNonePartial;
     if (scan.complete) {
-      line =
-        scan.quarantined === 0 ? messages.preflightRefsNone : messages.preflightRefsNoneQuarantined;
+      if (scan.unreadNotQuarantined.length > 0) {
+        line = messages.preflightRefsNoneUnread;
+        slots.count = String(scan.unreadNotQuarantined.length);
+      } else if (scan.quarantined > 0) {
+        line = messages.preflightRefsNoneQuarantined;
+      } else {
+        line = messages.preflightRefsNone;
+      }
     }
     return fillTemplate(line, slots);
   }

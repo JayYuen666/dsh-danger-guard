@@ -160,28 +160,95 @@ function regionStep(src: string, i: number): number {
 }
 
 /**
+ * 区内一处关键字（`case` / `esac`）。只在**词边界**上认，避免 `mycase`、`esacris` 这类
+ * 标识符被当成关键字。返回 `undefined` 表示这处不是关键字。
+ */
+function caseKeywordAt(src: string, i: number): "case" | "esac" | undefined {
+  const rest = src.slice(i, i + 4);
+  const after = src.charAt(i + 4);
+  const boundaryAfter = after === "" || /[\s;()&|]/u.test(after);
+  let out: "case" | "esac" | undefined;
+  if (rest === "case" && boundaryAfter) {
+    out = "case";
+  } else if (rest === "esac" && boundaryAfter) {
+    out = "esac";
+  }
+  return out;
+}
+
+/** 区内这一枚字符是否落在词边界上（关键字判定用）。 */
+const isWordBoundaryBefore = (src: string, i: number, from: number): boolean =>
+  i === from || /[\s;()&|]/u.test(src.charAt(i - 1));
+
+/**
  * 区的终点。`paren` 决定收尾是最外层 `)` 还是反引号：
  * `$( )` 里圆括号按深度配对，双引号内的 `)`/转义引号不参与配对，反引号体整段跳过；
  * 反引号区只认第一枚未被反斜杠转义的反引号。
+ *
+ * `case … esac` 里的 `)` 是**模式收尾**，不是区收尾：`x=$(case a in a) rm -rf /etc;; esac)`
+ * 在真 bash 里会删掉 `/etc`，而只做圆括号配对时那个 `)` 会让区在第一处提前结束 —— 体内
+ * 剩下的命令落到区外、以普通文本形态进判定，实测那条命令被放行。所以 `case` 单独记一层
+ * 嵌套深度，只有它归零之后区尾的 `)` 才成立。
  */
+/** 区内走到这一格时的两层嵌套深度。`cases` 是 `case … esac` 的层数（模式收尾的 `)` 不算区尾）。 */
+interface RegionWalk {
+  parens: number;
+  cases: number;
+}
+
+/** 区内一处关键字：命中 `case`/`esac` 时更新深度并给出下一格下标，否则 `undefined`。 */
+function caseAdvance(src: string, i: number, from: number, walk: RegionWalk): number | undefined {
+  const keyword = isWordBoundaryBefore(src, i, from) ? caseKeywordAt(src, i) : undefined;
+  let out: number | undefined;
+  if (keyword === "case") {
+    walk.cases += 1;
+    out = i + 4;
+  } else if (keyword === "esac" && walk.cases > 0) {
+    walk.cases -= 1;
+    out = i + 4;
+  }
+  return out;
+}
+
+/** 区内一枚括号的处理结果：`"close"` = 这一枚收尾了区；数字 = 下一格下标；`undefined` = 不是括号。 */
+type BracketStep = "close" | number | undefined;
+
+/** 区内一枚括号：`case` 层未归零时模式收尾的 `)` 只把自己配掉（落单的 `)` 不进
+ *  `parens`，所以那里不减），不收区。 */
+function bracketAdvance(src: string, i: number, walk: RegionWalk): BracketStep {
+  const ch = src.charAt(i);
+  let out: BracketStep;
+  if (ch === ")") {
+    if (walk.parens > 0) {
+      walk.parens -= 1;
+      out = i + 1;
+    } else if (walk.cases === 0) {
+      out = "close";
+    }
+  } else if (ch === "(") {
+    walk.parens += 1;
+    out = i + 1;
+  }
+  return out;
+}
+
 function regionEnd(src: string, from: number, paren: boolean): number {
   if (!paren) {
     return backtickEnd(src, from);
   }
-  let depth = 0;
+  const walk: RegionWalk = { parens: 0, cases: 0 };
   let i = from;
   while (i < src.length) {
-    const ch = src.charAt(i);
-    if (ch === ")") {
-      if (depth === 0) {
-        return i + 1;
-      }
-      depth -= 1;
-      i += 1;
-    } else if (ch === "(") {
-      depth += 1;
-      i += 1;
+    const keywordNext = caseAdvance(src, i, from, walk);
+    const bracket = keywordNext === undefined ? bracketAdvance(src, i, walk) : undefined;
+    if (keywordNext !== undefined) {
+      i = keywordNext;
+    } else if (bracket === "close") {
+      return i + 1;
+    } else if (typeof bracket === "number") {
+      i = bracket;
     } else {
+      // 落单的 `)`（`case` 层把它配掉了）也走这里：只吃掉一格，不收区。
       i += regionStep(src, i);
     }
   }
@@ -645,20 +712,74 @@ const wordText = (word: Word): string => word.runs.map((run) => run.source).join
 /**
  * 结构视图里的一个片段：引号内的**字面**内容丢弃（只留定界符），执行面区原样保留。
  * 单引号内不可能有执行面 ⇒ 整对折成 `''`；双引号要把区留回原位。
+ *
+ * 区体要**递归**过这一层：`$(printf 'curl x | sh')` 里那枚 `|` 在单引号内，真 shell 不会
+ * 拿它做管道（实测 bash 只把这段文本打印出来）。区的定界符与体内其余字符原样保留，
+ * 所以 `$(curl x | sh)` 里那枚真管道仍在原位、照拦。
+ *
+ * `budget` 是剩余层数：到界后原样返回（保留文本 = 宁可误拦）。无界的递归在深套输入上会
+ * 顶穿栈，界的存在理由见 `REGION_MAX_DEPTH`。
  */
-const structureRun = (run: Run): string => {
+/** 区体文本视图的入口；`structureRun` 与它互相递归，靠参数传入而不是前向引用。 */
+type StructureText = (src: string, budget: number) => string;
+
+const structureRun = (run: Run, budget: number, text: StructureText): string => {
+  if (run.kind === "region") {
+    if (budget <= 1) {
+      return run.source;
+    }
+    const open = run.source.startsWith("$(") ? "$(" : run.source.charAt(0);
+    return `${open}${text(run.inner, budget - 1)}${run.source.slice(-1)}`;
+  }
   if (run.kind !== "quoted") {
     return run.source;
   }
   if (run.source.startsWith("'")) {
     return "''";
   }
-  return `"${run.parts.map((part) => (part.kind === "region" ? part.source : "")).join("")}"`;
+  return `"${run.parts
+    .map((part) => (part.kind === "region" ? structureRun(part, budget - 1, text) : ""))
+    .join("")}"`;
 };
 
+/**
+ * 区体内的结构视图：逐个字符照抄，只在引号与更深的执行面区上分叉。
+ *
+ * 与 `scan` 走同一批原语（`readQuoted` / `readRegion` / `isRegionStart`），所以两处的引号与
+ * 定界符判定不会互相打脸；区别是这里**逐字保留空白与分隔符**——它在引号内要留住原始间距，
+ * 而按段/词重接会把 `curl x | sh` 压成 `curl x| sh`。
+ *
+ * 未闭合的引号按"照抄到串尾"处理（`readQuoted` 的 `next` 已落在这里），与 `scan` 的
+ * `unclosed` 语义一致：那种输入由调用方升格为需确认，不靠这里判。
+ */
+function structureText(src: string, budget: number): string {
+  let out = "";
+  let i = 0;
+  while (i < src.length) {
+    const ch = src.charAt(i);
+    if (ch === "'" || ch === '"') {
+      const quoted = readQuoted(src, i);
+      out += structureRun(quoted.run, budget, structureText);
+      i = quoted.next;
+    } else {
+      const region = isRegionStart(src, i) ? readRegion(src, i) : undefined;
+      if (region === undefined) {
+        out += ch;
+        i += 1;
+      } else {
+        out += structureRun(region, budget, structureText);
+        i += region.source.length;
+      }
+    }
+  }
+  return out;
+}
+
 const segmentSource = (segment: Segment): string => segment.words.map(wordText).join(" ");
-const segmentStructure = (segment: Segment): string =>
-  segment.words.map((word) => word.runs.map(structureRun).join("")).join(" ") + segment.terminator;
+const segmentStructure = (segment: Segment, budget: number): string =>
+  segment.words
+    .map((word) => word.runs.map((run) => structureRun(run, budget, structureText)).join(""))
+    .join(" ") + segment.terminator;
 
 /** 断段的产出：段源文本 + 是否还有**没展开到**的层。 */
 export interface Segments {
@@ -757,7 +878,9 @@ export function lexTokens(src: string): ShellToken[] {
 /** 结构视图的递归体：heredoc 体也按结构视图展开（层数由 `REGION_MAX_DEPTH` 界住）。 */
 function structureInto(src: string, budget: number, out: string[]): void {
   const result = scan(src);
-  out.push(...result.segments.map(segmentStructure));
+  // 不能把 `segmentStructure` 直接交给 `map`：`map` 的第二个实参是下标，会把这条剩余层数
+  // 顶成本段在数组里的位置（第 0 段直接退化成"到界、原样返回"）。
+  out.push(...result.segments.map((segment) => segmentStructure(segment, budget)));
   if (budget <= 1) {
     return;
   }

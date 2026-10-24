@@ -19,7 +19,13 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { PREFLIGHT_MAX_BYTES, scanReferences } from "../lib/preflight-scan.ts";
+import { MESSAGES } from "../lib/messages.ts";
+import {
+  PREFLIGHT_MAX_BYTES,
+  PREFLIGHT_MAX_FILES,
+  renderRefsBlock,
+  scanReferences,
+} from "../lib/preflight-scan.ts";
 import type { RefScan } from "../lib/preflight-scan.ts";
 import { localFsFace } from "./fixtures/local-fs-face.ts";
 import type { LocalFsFailures } from "./fixtures/local-fs-face.ts";
@@ -164,5 +170,65 @@ describe("引用扫描的降级与跳过", () => {
       rm(hidden, { recursive: true, force: true }),
       rm(modules, { recursive: true, force: true }),
     ]);
+  });
+
+  it("隔离文件也吃文件预算：不走预算检查的那一支能无限长大", async () => {
+    // 隔离与超大/读不动一样都不消耗 `scanned`。预算若挂在 `scanned` 上，这一支就在
+    // 预算检查**之前** return，命中隔离词表的文件可以任意多，`unread` 跟着无界增长——
+    // 而 `unread` 每次 push 都带一条相对路径字符串，实测 400 个就长了 400 条。
+    const secrets = path.join(root, "secrets");
+    await mkdir(secrets, { recursive: true });
+    const count = PREFLIGHT_MAX_FILES + 40;
+    await Promise.all(
+      Array.from({ length: count }, (_unused, index) =>
+        writeFile(path.join(secrets, `k${String(index)}.env`), "widget\n"),
+      ),
+    );
+    const scan = await scanReferences({
+      targetN: target,
+      root,
+      needles: ["widget"],
+      signal: new AbortController().signal,
+      fs: localFsFace(),
+      isQuarantined: (candidate: string) => candidate.startsWith(secrets),
+    });
+    assert.ok(scan !== undefined, "这一趟该跑成");
+    assert.equal(scan.complete, false, "预算用尽就是没扫完，不能报「扫完了」");
+    assert.ok(
+      scan.unread.length <= PREFLIGHT_MAX_FILES,
+      `unread 不得超过文件预算（实测 ${String(scan.unread.length)} 条，上限 ${String(PREFLIGHT_MAX_FILES)}）`,
+    );
+    await rm(secrets, { recursive: true, force: true });
+  });
+
+  it("走到了但没读到的那几份也让零命中降级（隔离与超限是两件事）", async () => {
+    // `complete` 只说明遍历没被预算截断，说明不了「这一层的正文都看过了」。
+    // 超大文件按口径跳过、不进 `quarantined`，但它完全可能写着引用——那一句
+    // 「即目标没有任何引用者」在这一态下是假话，模型会据此删掉仍有引用者的文件。
+    const huge = path.join(root, "huge-only.ts");
+    await writeFile(huge, "x".repeat(PREFLIGHT_MAX_BYTES + 10));
+    const cleanTarget = path.join(root, "src", "lonely.ts");
+    await writeFile(cleanTarget, "export const lonely = 1;\n");
+    // 用一枚整棵树里都不存在的词：这一支要的是**零命中**，而夹具根里已有
+    // `caller.ts` 引用着 `widget`——拿它当搜索词会走进"有命中"那一支，测不到这里。
+    const scan = await scanReferences({
+      targetN: cleanTarget,
+      root,
+      needles: ["zzznotpresent"],
+      signal: new AbortController().signal,
+      fs: localFsFace(),
+    });
+    assert.ok(scan !== undefined, "这一趟该跑成");
+    assert.equal(scan.complete, true, "跳过超大文件不算「没扫完」");
+    assert.equal(scan.quarantined, 0, "它不是凭据面文件，别记到隔离那一档去");
+    assert.deepEqual(scan.unreadNotQuarantined, ["huge-only.ts"], "但它确实没被读到");
+    const rendered = renderRefsBlock(MESSAGES.zh, scan);
+    assert.equal(
+      rendered.includes("即目标没有任何引用者"),
+      false,
+      "有没读到的文件时不能说全称结论",
+    );
+    assert.ok(rendered.includes("没能读正文"), `文案要点名「没读到」这一类：${rendered}`);
+    await rm(huge);
   });
 });

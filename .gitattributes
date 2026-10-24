@@ -1,4 +1,24 @@
 # 钉住行尾，不让 checkout 跟着平台走：Windows runner 上 Git for Windows 的机器级
 # core.autocrlf=true 会把工作树换成 CRLF，而 oxfmt 的 endOfLine 默认是 lf —— 于是
 # fmt:check 只在 windows 那一格把每个文件都判成未格式化（内容一字不差）。
+# 这个"默认是 lf"是 oxfmt 自身的约定：本仓与 oxfmt 配置里都没有显式写 endOfLine，
+# 若将来在格式化配置里改成别的值，这里必须一起改，否则两边再次失配。
 * text=auto eol=lf
+# 二进制面显式声明：text=auto 靠"首 8KB 是否含 NUL"猜文本/二进制，猜不中的
+# 压缩/字体/图片格式会被当成文本做换行转换，内容就此损坏。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.zip binary
+*.gz binary
+*.tgz binary
+# Windows 脚本依赖 CRLF：cmd.exe 对 goto/label 与多行括号块的解析在 LF 下不可靠。
+*.bat text eol=crlf
+*.cmd text eol=crlf

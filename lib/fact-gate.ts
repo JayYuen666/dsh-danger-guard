@@ -407,8 +407,8 @@ export class FactGate {
 
   /**
    * 只读查询：该目标此刻是否处于**配额放行**态（防死锁承诺）。
-   * 与 `tryRelease` 同一条严格判据（外部改动水位**严格早于**放行水位），但**一个状态都不改**：
-   * 不建分片、不 touch、不删过期项——那些留给真正的 `check()`。
+   * 判据与 `tryRelease` 单源（`releaseValid`），但**一个状态都不改**：不建分片、不 touch、
+   * 不删过期项——那些留给真正的 `check()`。
    * 当前**可判定地**仍缺 `read` 时一律返回 false：配额只免上层探查，不能让预检在
    * "模型还没看过当前版本"时替门禁让路。不可判定态沿用旧配额（交互确认是那条路的出口）。
    * 存在的理由：预检的「带证据拦一次」（host.ts 的 B 面）跑在 `tools/pre-execute`，而
@@ -417,11 +417,10 @@ export class FactGate {
    * 命中就整趟让路。
    */
   public releasedFor(sessionId: unknown, filePath: string, input: FactEvidenceInput): boolean {
-    if (input.determinate && input.gaps.some((gap) => gap.need === "read")) {
-      return false;
-    }
-    const releaseSeq = this.sessions.get(FactGate.keyOf(sessionId))?.released.get(filePath);
-    return releaseSeq !== undefined && input.externalChangeSeq < releaseSeq;
+    return FactGate.releaseValid(
+      this.sessions.get(FactGate.keyOf(sessionId))?.released.get(filePath),
+      input,
+    );
   }
 
   /** 清空全部记忆（插件停用时）。 */
@@ -430,28 +429,40 @@ export class FactGate {
   }
 
   /**
-   * 配额放行判定：命中且外部改动水位**严格早于**放行水位才放行；否则记入过期并回到正常过门。
+   * 放行判据的**单源**（`releasedFor` 与 `tryRelease` 共用，两处各写一遍迟早漂成
+   * "预检让路、门禁仍拒"或反过来的两张皮）：条目在、可判定态不缺 `read`、
+   * 外部改动水位**严格早于**放行水位。只读，不做任何状态更新。
+   */
+  private static releaseValid(releaseSeq: number | undefined, input: FactEvidenceInput): boolean {
+    if (releaseSeq === undefined) {
+      return false;
+    }
+    if (input.determinate && input.gaps.some((gap) => gap.need === "read")) {
+      // 配额只免上层探查：可判定的 read 缺项不能让旧配额替它开门；不可判定态沿用旧配额，
+      // 因为"历史读不到"本身不证明模型没读过这一版（交互确认是那条路的出口）。
+      return false;
+    }
+    return input.externalChangeSeq < releaseSeq;
+  }
+
+  /**
+   * 配额放行判定：命中判据才放行；否则记入过期并回到正常过门。
    * 「外部改动水位」由 host 提供，host 只在确属外部改动时抬升它（见 SessionState.released
    * 的不变式说明）——这里不做任何 fs/会话推断。命中时刷新 released 的 LRU 位次；
    * `releasedFor` 的只读查询不走这里，因此不会 touch。
    */
   private tryRelease(st: SessionState, filePath: string, input: FactEvidenceInput): boolean {
     const releaseSeq = st.released.get(filePath);
-    let released = false;
-    if (releaseSeq !== undefined) {
-      if (input.determinate && input.gaps.some((gap) => gap.need === "read")) {
-        // 配额只免上层探查：可判定的 read 缺项不能让旧配额替它开门；不可判定态沿用旧配额，
-        // 因为"历史读不到"本身不证明模型没读过这一版（交互确认是那条路的出口）。
-        st.released.delete(filePath);
-      } else if (input.externalChangeSeq < releaseSeq) {
-        this.lruSet(st.released, filePath, releaseSeq);
-        released = true;
-      } else {
-        // 外部改动水位到达或越过放行位 → 配额过期，回到正常过门。
-        st.released.delete(filePath);
-      }
+    if (releaseSeq === undefined) {
+      return false;
     }
-    return released;
+    if (FactGate.releaseValid(releaseSeq, input)) {
+      this.lruSet(st.released, filePath, releaseSeq);
+      return true;
+    }
+    // 缺 read / 外部改动水位到达或越过放行位 → 配额过期，回到正常过门。
+    st.released.delete(filePath);
+    return false;
   }
 
   /** 首拒之后的收敛/配额判定（步骤 4-5，独立出来降 check 复杂度）。 */

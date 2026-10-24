@@ -18,7 +18,7 @@ import { test } from "vitest";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** 指纹门禁：磁盘 client.js 必须与最新构建逐字节一致。 */
 export async function declareClientFreshness(testFileUrl: string): Promise<void> {
@@ -29,7 +29,9 @@ export async function declareClientFreshness(testFileUrl: string): Promise<void>
   const pkgName = nameMatch?.groups?.["name"] ?? "unknown";
 
   test(`${pkgName}: client.js 与最新构建逐字节一致（改 src 后必须 node build-client.mjs）`, async () => {
-    const buildMod = (await import(path.resolve(pkgDir, "build-client.mjs"))) as {
+    const buildMod = (await import(
+      pathToFileURL(path.resolve(pkgDir, "build-client.mjs")).href
+    )) as {
       buildClient: () => Promise<string>;
     };
     const expected = await buildMod.buildClient();

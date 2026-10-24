@@ -18,22 +18,42 @@
 import { fillTemplate } from "./messages.ts";
 import type { DangerGuardMessages, MessageSlots } from "./messages.ts";
 import { DEFAULT_REF_SEARCH_POLICY } from "./ref-search-policy.ts";
-import type { RefSearchPolicy } from "./ref-search-policy.ts";
+import type { RefSearchCriterion, RefSearchPolicy } from "./ref-search-policy.ts";
 import type { FactGap, FactGapContext, FactNeed, NeedWhy } from "./fact-gate.ts";
 
 /** 缺项的规范顺序（固定枚举，不依赖 Array#sort/toSorted——后者需 ES2024 lib）。
  *  消费方是 lib/fact-gate.ts 的 `needsKey`（收敛键归一）；它须覆盖 `FactNeed` 全部字面量，
- *  否则收敛键会静默丢项——这一条由自检用例钉住。 */
-export const NEED_ORDER: readonly FactNeed[] = ["read", "refs", "test", "e2e", "docs"];
+ *  否则收敛键会静默丢项——这一条由下面的编译期闸门与自检用例双保险。 */
+const NEED_ORDER_TUPLE = [
+  "read",
+  "refs",
+  "test",
+  "e2e",
+  "docs",
+] as const satisfies readonly FactNeed[];
+/** 编译期闸门：新增 `FactNeed` 字面量而不补进 `NEED_ORDER_TUPLE` 时，本类型不再是
+ *  `true`、赋值当场红——漏项 = `needsKey` 的收敛比对静默丢项，模型补了也不收敛。 */
+export type NeedOrderCoversFactNeed = [
+  Exclude<FactNeed, (typeof NEED_ORDER_TUPLE)[number]>,
+] extends [never]
+  ? true
+  : never;
+/** 编译期闸门的落点：新增 `FactNeed` 字面量而不补进 `NEED_ORDER_TUPLE` 时，上面的条件
+ *  类型不再是 `true`、这一行赋值当场红。导出是为了不留"未使用声明"的 lint 债。 */
+export const NEED_ORDER_COMPLETE: NeedOrderCoversFactNeed = true;
+export const NEED_ORDER: readonly FactNeed[] = NEED_ORDER_TUPLE;
 
-/** 层探查类（test/e2e/docs）的指令与成因基本无关（都是"去那层目录搜本文件"），
- *  唯一例外是 test 的 narrow——它要指出"落点不对"。两侧文案已由宿主的消息表给出。 */
-const needLines = (base: string, narrow: string): Record<NeedWhy, string> => ({
-  never: base,
-  external: base,
-  failed: base,
-  narrow,
-});
+/** 按判据口径分区的工具名（从 `criteria` 单源派生，不用 `patternTools`/`strictTools` 两份
+ *  数组——`RefSearchPolicy` 是可手写的导出接口，两份数据一旦不一致，never 指令说
+ *  "没有任何计入取证的检索工具"、narrow 指令却点名具体工具。Map 的键序 = 插入序
+ *  （`refSearchPolicyOf` 按配置序插入），派生顺序与那两份数组一致）。 */
+const toolsByCriterion = (policy: RefSearchPolicy): Record<RefSearchCriterion, string[]> => {
+  const out: Record<RefSearchCriterion, string[]> = { pattern: [], "strict-relative": [] };
+  for (const [name, criterion] of policy.criteria) {
+    out[criterion].push(name);
+  }
+  return out;
+};
 
 /** 每种口径一句"用什么工具、起点参数叫什么、签名放什么"——与实际记账判据同形。 */
 const probeClauses = (
@@ -42,20 +62,21 @@ const probeClauses = (
   root: string,
   messages: DangerGuardMessages,
 ): string[] => {
+  const names = toolsByCriterion(policy);
   const clauses: string[] = [];
-  if (policy.patternTools.length > 0) {
+  if (names["pattern"].length > 0) {
     clauses.push(
       fillTemplate(messages.probePattern, {
-        tools: policy.patternTools.join(messages.listSeparator),
+        tools: names["pattern"].join(messages.listSeparator),
         root,
         name,
       }),
     );
   }
-  if (policy.strictTools.length > 0) {
+  if (names["strict-relative"].length > 0) {
     clauses.push(
       fillTemplate(messages.probeStrict, {
-        tools: policy.strictTools.join(messages.listSeparator),
+        tools: names["strict-relative"].join(messages.listSeparator),
         root,
         name,
       }),
@@ -84,43 +105,60 @@ const refsNeverLine = (
     : fillTemplate(messages.gapRefsNever, { clauses: clauses.join(messages.clauseSeparator) });
 };
 
-/** 全部 `need × why` 的行动指令文案表（一次性插值 name/root/hint/检索判据）。
+/** 全部 `need × why` 的行动指令文案表（惰性：只插值真正被取用的那一格）。
  *  **查表而不是 switch + default 兜底**：新增 `NeedWhy` 字面量会在编译期要求补齐
  *  每一格；兜底分支则是"永远不可达的运行时保险"——既测不到（覆盖率负债），
- *  又会在真正漏写时静默给出一条不相关的指令。 */
+ *  又会在真正漏写时静默给出一条不相关的指令。
+ *  每格是**工厂**而不是成品：`renderDenyMessage` 对每个缺项调一次 `gapLine`，
+ *  成品表会让每次调用都插值 5×4 全部条目，实际只用到一格。 */
 const gapLines = (
   name: string,
   root: string,
   hint: string,
   policy: RefSearchPolicy,
   messages: DangerGuardMessages,
-): Record<FactNeed, Record<NeedWhy, string>> => {
+): Record<FactNeed, Record<NeedWhy, () => string>> => {
   const slots: MessageSlots = { name, root, hint };
   const noHint: MessageSlots = { name, root };
   return {
     read: {
-      never: fillTemplate(messages.gapReadNever, slots),
-      external: fillTemplate(messages.gapReadExternal, slots),
-      failed: fillTemplate(messages.gapReadFailed, slots),
+      never: () => fillTemplate(messages.gapReadNever, slots),
+      external: () => fillTemplate(messages.gapReadExternal, slots),
+      failed: () => fillTemplate(messages.gapReadFailed, slots),
       // read 的检索命中文件自身属正常取证，scope 不影响 read 指令 → 与默认文案同形
-      narrow: fillTemplate(messages.gapReadNarrow, slots),
+      narrow: () => fillTemplate(messages.gapReadNarrow, slots),
     },
     refs: {
-      never: `${refsNeverLine(policy, name, root, messages)}${hint}`,
-      narrow: fillTemplate(messages.gapRefsNarrow, {
-        ...slots,
-        tools: countedToolNames(policy, messages),
-      }),
-      failed: fillTemplate(messages.gapRefsFailed, slots),
+      never: () => `${refsNeverLine(policy, name, root, messages)}${hint}`,
+      narrow: () =>
+        fillTemplate(messages.gapRefsNarrow, {
+          ...slots,
+          tools: countedToolNames(policy, messages),
+        }),
+      failed: () => fillTemplate(messages.gapRefsFailed, slots),
       // refs 的引用面不由本文件内容决定，外部改动不影响引用探查动作 → 与默认文案同形
-      external: fillTemplate(messages.gapRefsExternal, slots),
+      external: () => fillTemplate(messages.gapRefsExternal, slots),
     },
-    test: needLines(
-      fillTemplate(messages.gapTestBase, slots),
-      fillTemplate(messages.gapTestNarrow, noHint),
-    ),
-    e2e: needLines(fillTemplate(messages.gapE2e, slots), fillTemplate(messages.gapE2e, slots)),
-    docs: needLines(fillTemplate(messages.gapDocs, slots), fillTemplate(messages.gapDocs, slots)),
+    test: {
+      never: () => fillTemplate(messages.gapTestBase, slots),
+      external: () => fillTemplate(messages.gapTestBase, slots),
+      failed: () => fillTemplate(messages.gapTestBase, slots),
+      // test 的 narrow 要指出"落点不对"（层探查类里唯一的例外），且不带 hint。
+      narrow: () => fillTemplate(messages.gapTestNarrow, noHint),
+    },
+    // e2e / docs 的指令与成因基本无关（都是"去那层目录搜本文件"）。
+    e2e: {
+      never: () => fillTemplate(messages.gapE2e, slots),
+      external: () => fillTemplate(messages.gapE2e, slots),
+      failed: () => fillTemplate(messages.gapE2e, slots),
+      narrow: () => fillTemplate(messages.gapE2e, slots),
+    },
+    docs: {
+      never: () => fillTemplate(messages.gapDocs, slots),
+      external: () => fillTemplate(messages.gapDocs, slots),
+      failed: () => fillTemplate(messages.gapDocs, slots),
+      narrow: () => fillTemplate(messages.gapDocs, slots),
+    },
   };
 };
 
@@ -142,5 +180,5 @@ export function gapLine(
     gap.hint === undefined ? "" : fillTemplate(messages.hintWrap, { hint: gap.hint }),
     ctx?.searchPolicy ?? DEFAULT_REF_SEARCH_POLICY,
     messages,
-  )[gap.need][gap.why];
+  )[gap.need][gap.why]();
 }

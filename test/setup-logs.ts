@@ -8,6 +8,7 @@
 // 用例要看日志内容时用 logged()/loggedText() 取，断言写在用例里。
 import { afterEach, beforeEach } from "vitest";
 import assert from "node:assert/strict";
+import { format } from "node:util";
 
 import { LOG_TEMPLATES } from "./log-templates.ts";
 
@@ -28,12 +29,18 @@ export interface LogRecord {
 let records: LogRecord[] = [];
 const originals = new Map<LogLevel, (...args: unknown[]) => void>();
 
+/** 把一次 console 调用拼成一行文本：`util.format` 与 Node 真实输出同源（`%s`/`%d`/对象都能如实展开），
+ *  且对 `Object.create(null)` 这类没有 `toString` 的原始负载不会抛（`String()` 会抛 TypeError）。 */
+function formatArgs(args: readonly unknown[]): string {
+  return format(...args).replaceAll(/\s+/gu, " ");
+}
+
 /** 接管一个级别：处理器单独成函数，别在 for 里现造闭包（no-loop-func 拦的就是这个）。 */
 function spyLevel(level: LogLevel): void {
   originals.set(level, console[level]);
   console[level] = (...args: unknown[]) => {
-    const [first, ...rest] = args;
-    records.push({ level, text: String(first).replaceAll(/\s+/gu, " "), extra: rest });
+    // extra 留的是「首参之外的其余实参」：堆栈通常就藏在其中，用例要能单独取出来断言。
+    records.push({ level, text: formatArgs(args), extra: args.slice(1) });
   };
 }
 

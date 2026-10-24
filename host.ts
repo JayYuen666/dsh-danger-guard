@@ -70,14 +70,14 @@ import { askRequestOf, AskDeduper, dedupKeyOf } from "./lib/confirm.ts";
 // 爆炸半径预演：常量表与渲染是纯函数（可脱离宿主单测），跑子进程那一趟在本文件。
 import { BLAST_COMMANDS, measureBlastOf, withBlast } from "./lib/blast-radius.ts";
 // 设置值面的防御性读取（`strArray`）与两个判定入口共用的词表装配（`bashOptsOf`）。
-import { bashOptsOf, strArray } from "./lib/settings-read.ts";
+import { bashOptsOf, editThresholdsOf, strArray } from "./lib/settings-read.ts";
 // 宿主沙箱的管辖面（哪些灾难目标该让给它拦）。规范化折法由本文件注入 —— lib 不 import
 // `node:fs`，而 `realpathOf` 是同步判定链唯一付得起的那种解析。
 import { sandboxModeOf } from "./lib/sandbox-scope.ts";
 import { effectiveDispositionFactory } from "./lib/effective-disposition.ts";
 import type { DispositionFactory } from "./lib/effective-disposition.ts";
 import { presenceOfAttempt } from "./lib/fs-errors.ts";
-import type { Presence } from "./lib/fs-errors.ts";
+import type { StatAttempt } from "./lib/fs-errors.ts";
 // 「模型读到的是哪一版」的记账（观测/失效点同一条记录、只在成功结果后提交）。
 import {
   attributeExternalChange,
@@ -91,7 +91,7 @@ import {
   stageReadObservation,
 } from "./lib/read-basis.ts";
 // 按权限档位分叉的处置表：同一枚规则键在不同预设下的结论不同，判据本体全在这一层。
-import { decideRule } from "./lib/mode-policy.ts";
+// （`decideRule` 不再直调：收口走 effective-disposition 的 `verdictOf`，排序与收口同源。）
 import type { PolicyFacts, RuleVerdict } from "./lib/mode-policy.ts";
 // 档位事实的折法（宿主三个只读服务面 → PolicyFacts），纯形状守卫、可脱离宿主单测。
 import { policyFactsOf as policyFactsOfIn } from "./lib/policy-facts.ts";
@@ -104,8 +104,6 @@ import {
   // 迟早会漂，漂了就是"门禁不判、预检却代跑一次扫描"或反过来。
   SKIP_EXT_RE,
   DEFAULT_MAX_DENIES,
-  DEFAULT_SMALL_EDIT_CHARS,
-  DEFAULT_BIG_EDIT_CHARS,
   NO_DELIVERY,
   undeterminable,
 } from "./lib/fact-gate.ts";
@@ -725,7 +723,7 @@ function syncReadText(targetPath: string): string {
  *   不必依赖真实 fs 在该平台上恰好抛哪个码（那是平台行为，不是本包判据）。
  * @returns 三态结论与 mtime（unknown/absent 时 mtime 为 -1）。
  */
-function presenceOf(targetPath: string): { presence: Presence; mtimeMs: number } {
+function presenceOf(targetPath: string): StatAttempt {
   // 三态分类本身在 `lib/fs-errors.ts`（纯函数，可注入错误形状验证）；这里只负责"真的去 stat"。
   return presenceOfAttempt(() => syncStat(targetPath).mtimeMs);
 }
@@ -2044,7 +2042,7 @@ function evidenceFor(
   });
   // 观测到的版本与"这一版还欠不欠一次重读"写回**同一条记录**：下一次评估读的就是它，
   // 淘汰与会话回收也按它整条走（见 lib/read-basis.ts 的文件头第 1 条）。
-  settleVersion(lenKey, mtimeMs, staleBase);
+  settleVersion(lenKey, ctx.targetN, mtimeMs, staleBase);
   // 新建豁免：目标**确凿不存在**（ENOENT）**且**本次调用有能力创建它（write/create）。
   // 两个条件都不能少：① 对已存在文件执行 write 是全量覆盖，恰恰最需要先 read（否则会
   // 无声清掉没看过的内容）；② presence 为 "unknown"（EACCES/ENOTDIR/ELOOP，或会话目录
@@ -2148,8 +2146,8 @@ function bashJudgeOf(
   severityOf: (verdict: BashVerdict) => RuleVerdict,
 ): BashJudge {
   let denial: BashDenial | undefined;
-  // 非 bash/pwsh 的调用在这一面没有判定发生 ⇒ 零长度样本（采样处据此不发）。
-  const cost: JudgeCost = { face: "bash", ms: 0, length: 0 };
+  // 非 bash/pwsh 的调用在这一面没有判定发生 ⇒ `judged: false`（采样处据此不发）。
+  const cost: JudgeCost = { face: "bash", ms: 0, length: 0, judged: false };
   const startedAt = performance.now();
   // **调用点入口**（工具名 + 参数 + 配置）：方言、命令原文读取、后台执行的让路
   // 都在 lib 那一层收好了（见 `bashVerdictOf`）—— guard 与需确认档走同一个入口，
@@ -2158,6 +2156,8 @@ function bashJudgeOf(
   if (hit !== undefined) {
     cost.ms = performance.now() - startedAt;
     cost.length = hit.command.length;
+    // 判定真的发生了（哪怕命令原文为空）——发不发样本以这一位为准，不以长度为准。
+    cost.judged = true;
     denial = { command: hit.command, key: hit.verdict.key, fix: hit.verdict.fix };
   }
   return { denial, cost };
@@ -2298,8 +2298,7 @@ function factEvidenceOf(
     tierOf({
       ...facts,
       strictMode: readings.cfg.strictMode,
-      smallChars: numOf(readings.cfg.smallEditChars, DEFAULT_SMALL_EDIT_CHARS),
-      bigChars: numOf(readings.cfg.bigEditChars, DEFAULT_BIG_EDIT_CHARS),
+      ...editThresholdsOf(readings.cfg),
     });
   const input = evidenceFor(session, target, facts.creatable, {
     tier,
@@ -3273,7 +3272,7 @@ function secretJudgeOf(
   }
   const built = secretOptsOf(args, cfg, cwd);
   let reason: string | undefined;
-  const cost: JudgeCost = { face: "secret", ms: 0, length: 0 };
+  const cost: JudgeCost = { face: "secret", ms: 0, length: 0, judged: false };
   if (built !== undefined) {
     // 判定走 lib 的单一谓词 editDanger（"取目标 → 判密钥面"就是它的本体），本函数不再抄第二份；
     // 它回给的 `target` 同时是**上报签名**，判定与上报仍是同一个键。
@@ -3281,6 +3280,8 @@ function secretJudgeOf(
     const denial = editDanger(args, built.opts);
     cost.ms = performance.now() - startedAt;
     cost.length = built.targets.join("|").length;
+    // 判定真的发生了（哪怕目标串因形状原因折成空）——发不发样本以这一位为准。
+    cost.judged = true;
     if (denial !== undefined) {
       // 规则键 → 当前语言的拒绝理由；`messages[key]` 的取值类型让"加了规则没写文案"
       // 停在编译期，而不是运行时把 undefined 回给模型。
@@ -3521,12 +3522,13 @@ export function apply(ctx: Context): void {
         // 处置由**档位表**与**逐命中实际处置**共同给（`lib/mode-policy.ts` + 沙箱覆盖）：
         // 同一枚规则键在不同权限预设下结论不同，而 `ask` 档由 `tools/pre-execute` 的审批
         // 通道收口 —— 两条路用同一个工厂、同一份实际处置规则，所以同一枚命中不会在两处得到
-        // 不同结论，也不会被"排序时 deny、处置时 allow"的空档吞掉。
+        // 不同结论，也不会被"排序时 deny、处置时 allow"的空档吞掉。收口走 `verdictOf`：
+        // "排序与收口同一处置"由结构保证，手写 `decideRule(facts, key)`（漏掉覆盖）的
+        // 写法在这里没有成员可调。
         const { command, key, fix } = bashDenial;
-        const covered = effective.coveredFactsOf(key, fix);
+        const { verdict, facts: covered } = effective.verdictOf(key, fix);
         // 三档收口：allow 只记读数（沙箱让路不算"放过"——那是交给宿主拦），
         // deny 交给下面的工厂出文案与上报，ask 什么都不做。
-        const verdict = decideRule(covered, key);
         if (verdict === "allow") {
           // 沙箱让路那格交给宿主收口，不计入"本档放过了什么"，也不算规则被遵守。
           if (!(key === "rmrf" && covered.sandboxCovers)) {

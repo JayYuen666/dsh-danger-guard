@@ -6,6 +6,9 @@
 
 import type { BashDenialKey } from "./danger-rules.ts";
 
+/** 选项终止符：之后的词一律按位置参数读，不再当旗标。 */
+const OPTION_TERMINATOR = "--";
+
 /** kubectl 的 dry-run 值：只有 `client`/`server` 是预演；`none`/缺失/未知都会执行。 */
 const KUBECTL_DRY_RUN_FLAG = "--dry-run";
 const KUBECTL_DRY_RUN_VALUES: ReadonlySet<string> = new Set(["client", "server"]);
@@ -13,6 +16,12 @@ const KUBECTL_DRY_RUN_VALUES: ReadonlySet<string> = new Set(["client", "server"]
 function kubectlDryRun(words: readonly string[]): boolean {
   let dryRun = false;
   for (const word of words) {
+    // `--` 之后全是传给子命令的位置参数：`kubectl delete pod foo -- --dry-run=client`
+    // 里那个 `--dry-run=client` 是给 foo 的参数，不是 kubectl 自己的旗标，把它读成
+    // 预演会让一次真实删除被判成 dry-run。
+    if (word === OPTION_TERMINATOR) {
+      break;
+    }
     if (word === KUBECTL_DRY_RUN_FLAG) {
       dryRun = false;
     } else if (word.startsWith(`${KUBECTL_DRY_RUN_FLAG}=`)) {
@@ -37,6 +46,15 @@ const KUBECTL_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "--cluster",
   "--as",
   "--as-group",
+  "--as-uid",
+  "-v",
+  "--v",
+  "--vmodule",
+  "--username",
+  "--password",
+  "--profile",
+  "--profile-output",
+  "--log-flush-frequency",
   "--request-timeout",
   "--cache-dir",
   "--certificate-authority",
@@ -58,9 +76,16 @@ const DOCKER_VALUE_FLAGS: ReadonlySet<string> = new Set([
 function commandWordsOf(words: readonly string[], valueFlags: ReadonlySet<string>): string[] {
   const out: string[] = [];
   let skipValue = false;
+  let afterTerminator = false;
   for (const word of words.slice(1)) {
-    if (skipValue) {
+    if (afterTerminator) {
+      // 终止符之后的词都是位置参数：继续按旗标读会把「值是子命令」的形态读反
+      // （`kubectl -- delete` 与 `kubectl delete` 在子命令位置上等价）。
+      out.push(word);
+    } else if (skipValue) {
       skipValue = false;
+    } else if (word === OPTION_TERMINATOR) {
+      afterTerminator = true;
     } else if (word.startsWith("-")) {
       const equals = word.indexOf("=");
       const flag = equals === -1 ? word : word.slice(0, equals);

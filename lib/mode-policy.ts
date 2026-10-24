@@ -143,8 +143,11 @@ const BASE: Readonly<Record<Exclude<GuardMode, typeof FULL_ACCESS_MODE>, ModeTab
  * 为什么只有这两枚：reviewer 是一个 LLM，它的 allow 不等于用户批准，而这一档的沙箱什么都
  * 不拦；灾难删除与"下载即执行"是两条它可能被话术说服放过的形态，也是唯一值得留一道
  * 不可绕过的确定性命中的地方。其余全部交给 reviewer——我们再问一次就是同一个动作两张卡。
+ *
+ * 导出：档位说明文案（lib/policy-deny.ts）要按**同一份集合**决定"哪几条拒绝接硬拦成因"，
+ * 两处各写一遍时增删规则键会静默漂移。
  */
-const AUTO_REVIEW_HARD_STOPS: ReadonlySet<BashDenialKey> = new Set<BashDenialKey>([
+export const AUTO_REVIEW_HARD_STOPS: ReadonlySet<BashDenialKey> = new Set<BashDenialKey>([
   "rmrf",
   "pipeShell",
 ]);
@@ -163,7 +166,10 @@ export function decideRule(facts: PolicyFacts, key: BashDenialKey): RuleVerdict 
     // 或没装预设服务时的默认 `ask`），那一档沙箱什么都不拦、却**还能问** —— 按零兵底处理
     // 等于把本该问的动作静默放行，方向正好与"问不了才降级"相反。
     if (!facts.askable) {
-      return "allow";
+      // 例外只有 `noVerify`：绕 git 钩子与沙箱无关，`BASE` 表里它每一列都是 `deny`
+      // （见上方那张表的说明）。整档 allow 会把它一起放行，与那张表自相矛盾，
+      // 也会让"完全权限档"成为钩子绕过的唯一开口。
+      return key === "noVerify" ? "deny" : "allow";
     }
     // 自动审查档：只留两条 reviewer 盖不住的确定性硬拦，其余交给它，避免一次动作两张卡。
     if (facts.autoReview) {

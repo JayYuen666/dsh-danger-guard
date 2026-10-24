@@ -31,9 +31,15 @@ import {
   DEFAULT_BIG_EDIT_CHARS,
 } from "../lib/fact-gate.ts";
 // 名单默认值与 host 的取证判据、指令文案兜底同源（lib/ref-search-policy.ts），卡片只是回退显示它。
-import { DEFAULT_REF_SEARCH_TOOLS } from "../lib/ref-search-policy.ts";
+import {
+  DEFAULT_REF_SEARCH_STRICT_TOOLS,
+  DEFAULT_REF_SEARCH_TOOLS,
+} from "../lib/ref-search-policy.ts";
 import { createStatsReader, topLines } from "./stats-reader.ts";
 import type { StatsLine } from "./stats-reader.ts";
+// 槽位键 = bundle 包名，单源在 src/bundle-pkg.ts（本包刻意有三个串：locale 命名空间 /
+// settings 命名空间 / slot key；slot key 的派发证据链也随那份单源住在一起）。
+import { BUNDLE_PKG } from "./bundle-pkg.ts";
 // 形状从**叶子**模块取（见 src/stats-reader.ts 的说明：judge-stats 带 node:os/node:path）。
 import type { StatsSnapshot } from "../lib/stats-shape.ts";
 import { UI_MESSAGES } from "./ui-messages.ts";
@@ -54,27 +60,10 @@ const NS: LocaleNs = "danger-guard";
  */
 const SETTINGS_NS = "danger-guard-settings";
 /**
- * `plugins.bundle.config` 的 key = **bundle 的 npm 包名**，与上面两个串互不相干
- * （本包刻意有三个串：locale 命名空间 / settings 命名空间 / slot key）。
- * 派发证据（installed dsh 0.1.7）：
- *   · dsh-client-ui-plugin-manager/lib/client.js:1821 `renderSlot("plugins.bundle.config",
- *     { view: "page" }, { entryKey: pkg.name })`——pkg.name 由 :306/:320 的
- *     `packageView()` 取 `bundle.name`（= bundle 包名）；:2698
- *     `configured: ledger.bundles.has(openPkg.name)` 决定页面**要不要**开这个槽位；
- *   · 同包 lib/types/client/slot-contract.d.ts:96-100「A bundle's own configuration,
- *     **keyed by the bundle's package name**」，kind `keyed` → `key` 必填；
- *   · dsh-client-ui-renderer/lib/client.js:1154 逐字相等匹配 `options.key === entryKey`，
- *     写错不是回落而是**整张卡不渲染**；
- *   · 官方占位者 dsh-experimental-client-ui-voice-input/lib/client.js:5659-5661 亦用包名。
- * 行槽（本包未用）写成 `<pkg>#<rowId>`（plugin-manager/lib/client.js:27-28 `rowConfigKey`）。
- * bulkhead 的第二行 `danger-guard-settings` 只是同一个 bundle 里的**行**（name 是
- * `@jayyuen66/dsh-danger-guard/settings`，导出子路径而非 bundle），profile 的 bundles
- * 清单里只有本包名这一条，所以 key 不能是 `-settings` 那条。
- * 值必须与 package.json 的 name 一致并出现在 `~/.dsh/profiles/web/package.json` 的
- * `dsh.profile.bundles` 里——test/client-card.test.ts 从该文件解析校验，不抄硬编码。
+ * `plugins.bundle.config` 的 key = **bundle 的 npm 包名**，单源在 src/bundle-pkg.ts
+ * （本包刻意有三个串：locale 命名空间 / settings 命名空间 / slot key；slot key 的派发
+ * 证据链也随那份单源住在一起）。
  */
-const BUNDLE_PKG = "@jayyuen66/dsh-danger-guard";
-
 const CARD_CSS = [
   ".dgc-card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;list-style:none;transition:border-color .16s,background .16s}",
   ".dgc-card:hover{border-color:var(--dsw-alias-label-dimmed)}",
@@ -298,7 +287,6 @@ function NumberInputRow(props: {
       "data-field": props.field,
       value: text,
       disabled: props.disabled === true ? true : undefined,
-      style: { width: "64px", textAlign: "center" },
       onFocus: () => {
         setFocused(true);
       },
@@ -533,7 +521,10 @@ function gateRows(rc: RowCtx): ReactNode[] {
   return [rowEnabled, rowFactGate, rowJudgeStats, rowMaxDenies, rowStrict, rowSmall, rowBig];
 }
 
-/** 名单/词表族（引用取证两份名单、测试目录、两份 dev 词表、密钥路径正则）。 */
+/** 名单/词表族（引用取证两份名单、测试目录、两份 dev 词表、密钥路径正则）。
+ *  引用取证两行吃**回退显示**：值缺失/非数组（快照未受理、持久段被手改坏）时显示内置
+ *  默认名单——host 的 `strArray(...) ?? DEFAULT_*` 在同一形状下按默认名单判定，卡片若
+ *  显示"空"，说明与判定就是两张皮；显式 `[]` 照实显示（那是用户的显式选择）。 */
 function vocabRows(rc: RowCtx): ReactNode[] {
   const { t, writable, eff, setField } = rc;
   const refToolsHint = t("refToolsHint", { tools: DEFAULT_REF_SEARCH_TOOLS.join("/") });
@@ -542,7 +533,7 @@ function vocabRows(rc: RowCtx): ReactNode[] {
     label: t("refToolsLabel"),
     hint: refToolsHint,
     field: "refSearchTools",
-    value: eff("refSearchTools"),
+    value: nameListOf(eff("refSearchTools"), DEFAULT_REF_SEARCH_TOOLS),
     disabled: !writable,
     onChange: (field, list) => {
       setField(field, list);
@@ -553,7 +544,7 @@ function vocabRows(rc: RowCtx): ReactNode[] {
     label: t("refStrictLabel"),
     hint: t("refStrictHint"),
     field: "refSearchStrictTools",
-    value: eff("refSearchStrictTools"),
+    value: nameListOf(eff("refSearchStrictTools"), DEFAULT_REF_SEARCH_STRICT_TOOLS),
     disabled: !writable,
     onChange: (field, list) => {
       setField(field, list);
@@ -795,15 +786,37 @@ function DgCard(props: DgCardProps): ReactNode {
       const val = touched[key];
       return val === undefined ? props.unset(key) : props.set(key, val);
     });
-    try {
-      await Promise.all(ops);
-      setBusy(false);
-      setTouched({});
-    } catch (error) {
-      setBusy(false);
-      setSaveError(`${t("saveFailed")}${String(error instanceof Error ? error.message : error)}`);
-      console.error("[danger-guard] save failed:", error);
+    // allSettled 而不是 all：批量保存里一枚字段传输失败，其余字段**已经落盘**——
+    // 只把失败的那几个留在草稿里（重试只写它们），成功的不再重复写，也不会出现
+    // "界面回滚但磁盘已部分生效"的分叉。
+    const results = await Promise.allSettled(ops);
+    const failed: string[] = [];
+    let firstReason: unknown;
+    for (const [index, key] of keys.entries()) {
+      const outcome = results[index];
+      if (outcome?.status === "rejected") {
+        failed.push(key);
+        if (firstReason === undefined) {
+          firstReason = outcome.reason;
+        }
+      }
     }
+    setBusy(false);
+    if (failed.length === 0) {
+      setTouched({});
+      return;
+    }
+    setTouched((prev) => {
+      const remaining: Record<string, unknown> = {};
+      for (const key of failed) {
+        remaining[key] = prev[key];
+      }
+      return remaining;
+    });
+    setSaveError(
+      `${t("saveFailed")}${String(firstReason instanceof Error ? firstReason.message : firstReason)}`,
+    );
+    console.error("[danger-guard] save failed:", failed, firstReason);
   };
   const discard = (): void => {
     setTouched({});

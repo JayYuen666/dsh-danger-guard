@@ -10,7 +10,12 @@
 
 import type { BashDenialKey } from "./danger-rules.ts";
 import type { Fix } from "./fix.ts";
-import { decideRule, deniedByPolicy, modeNoteKeyOf } from "./mode-policy.ts";
+import {
+  AUTO_REVIEW_HARD_STOPS,
+  decideRule,
+  deniedByPolicy,
+  modeNoteKeyOf,
+} from "./mode-policy.ts";
 import type { GuardMode, PolicyFacts, RuleVerdict } from "./mode-policy.ts";
 import { renderFix } from "./messages.ts";
 import type { DangerGuardMessages } from "./messages.ts";
@@ -37,7 +42,9 @@ const NOTE_APPLIES: Readonly<Record<GuardMode, (rule: BashDenialKey) => boolean>
   "read-only": () => true,
   unknown: () => true,
   "workspace-write": (rule) => rule === "rmrf",
-  "danger-full-access": (rule) => rule === "rmrf" || rule === "pipeShell",
+  // 与 mode-policy 的硬拦集合同源（从那里导入）：档位表改硬拦清单时，这段文案的
+  // 适用范围自动跟上，不会静默漂移。
+  "danger-full-access": (rule) => AUTO_REVIEW_HARD_STOPS.has(rule),
 };
 
 /** 这段档位说明对这条规则成不成立。 */
@@ -64,19 +71,6 @@ export function policyDenyText(input: PolicyDenyTextInput): string {
     ? `${base}${tail}\n${messages.askBlockedGeneric}`
     : `${base}${tail}`;
 }
-
-/**
- * 这次命中该不该由 guard 出面拒绝（`ask` 归审批通道、`allow` 归下游）。
- *
- * 单独导出是因为 guard 与需确认档两个调用点都要问同一个问题，而"同一张表"这件事
- * 必须由**代码结构**保证，不能靠两处各写一遍同一个比较。
- *
- * @param facts 档位事实。
- * @param key   命中的规则键。
- * @returns 是不是 `deny`。
- */
-export const isDenied = (facts: PolicyFacts, key: BashDenialKey): boolean =>
-  decideRule(facts, key) === "deny";
 
 /** 供上报面用的判别结果（与文案同一份判据，避免第二处比较）。 */
 export interface PolicyDenyFlags {

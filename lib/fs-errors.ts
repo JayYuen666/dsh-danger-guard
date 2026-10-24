@@ -13,7 +13,8 @@
  * 可能被读成"不存在"，于是新建豁免把 read 免掉 —— 方向正是这道豁免最不该失守的那一侧。
  *
  * @param error `statSync` 抛出的东西（未知名）。
- * @returns 仅当 errno 明确是 ENOENT 时为 true。
+ * @returns 仅当 errno 明确是 ENOENT 时为 true。`code` 缺席时回落到 message 前缀——
+ *          那时并没有 errno 可依据，判据比"有 code"那一支松，只作为旧宿主/自定义 fs 的兜底。
  */
 export function isNotFoundError(error: unknown): boolean {
   if (typeof error !== "object" || error === null) {
@@ -23,12 +24,24 @@ export function isNotFoundError(error: unknown): boolean {
   if (typeof code === "string") {
     return code === "ENOENT";
   }
-  return typeof message === "string" && message.startsWith("ENOENT");
+  // 前缀匹配带词边界：libuv 的措辞是 "ENOENT: …"，"ENOENTX" 一类拼接串不得误判成缺失。
+  return typeof message === "string" && /^ENOENT(?::|$|\s)/u.test(message);
 }
 
 /** stat 的三态结论：**不存在**（ENOENT）/ **存在**（拿到 stat）/ **不可知**（其它错误）。
  *  独立成类型是为了让调用方在"不可知"上必须显式选择方向（本包一律保守）。 */
 export type Presence = "absent" | "present" | "unknown";
+
+/** 一次 stat 尝试的结果形状（三态结论 + mtime）。单源导出：host.ts 的调用点复用同一份，
+ *  哨兵语义改起来只动一处。 */
+export interface StatAttempt {
+  readonly presence: Presence;
+  readonly mtimeMs: number;
+}
+
+/** "取不到 mtime"的哨兵值。真实 mtimeMs 理论上可为负（1970 年前的时间戳），与之撞值时
+ *  下游的比较只会把那次读当作"从未见过"——方向是多要求一次取证，不是放行。 */
+export const MTIME_UNKNOWN = -1;
 
 /**
  * 把一次 stat 尝试折成三态之一。
@@ -39,12 +52,17 @@ export type Presence = "absent" | "present" | "unknown";
  *  覆盖率门红在 99.81%）。
  *
  * @param attempt 取 mtime 的同步函数（真实调用方传 `statSync` 包装）。
- * @returns 三态结论；`unknown` / `absent` 时 `mtimeMs` 为 -1。
+ * @returns 三态结论；`unknown` / `absent` 时 `mtimeMs` 为 `MTIME_UNKNOWN`。
  */
-export function presenceOfAttempt(attempt: () => number): { presence: Presence; mtimeMs: number } {
+export function presenceOfAttempt(attempt: () => number): StatAttempt {
   try {
-    return { presence: "present", mtimeMs: attempt() };
+    const mtimeMs = attempt();
+    // 非有限值（注入的假 stat / 上游封装的异常返回）不得以 present 向外传播：下游拿它做
+    // `mtimeMs > seenMtime` 的跳变判定，NaN 恒假会让外部改动检测**静默失效**。
+    return Number.isFinite(mtimeMs)
+      ? { presence: "present", mtimeMs }
+      : { presence: "unknown", mtimeMs: MTIME_UNKNOWN };
   } catch (error: unknown) {
-    return { presence: isNotFoundError(error) ? "absent" : "unknown", mtimeMs: -1 };
+    return { presence: isNotFoundError(error) ? "absent" : "unknown", mtimeMs: MTIME_UNKNOWN };
   }
 }

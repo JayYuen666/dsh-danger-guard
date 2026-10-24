@@ -287,6 +287,20 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       );
     });
 
+    it("非空但一项都不是字符串 → 也回落内置默认名单（不能读成「显式清空」）", () => {
+      const ctx = createMockCtx();
+      applyPlugin(ctx);
+      // 与下面「显式空数组」那组的分界：`[]` 是"一个都不要"（收紧），而 [1,{}] 是"配坏了"
+      // （回落默认）。把后者读成前者会让名单从默认全量静默缩到零，方向与"配坏了应当回落"相反。
+      poke(ctx.value, "refSearchTools", [1, { nope: true }, null]);
+      const log = searchLog("glob", { path: root, pattern: TARGET_BASENAME });
+      assert.equal(
+        fire(ctx, "all-junk", log, MID_ARGS),
+        undefined,
+        "脏项全被丢弃 ≠ 名单为空：仍按内置默认名单认 glob",
+      );
+    });
+
     it("运行时值不合型（值面绕过 schema 被写坏）→ 回落内置默认名单，既不静默收紧也不静默免检", () => {
       const ctx = createMockCtx();
       applyPlugin(ctx);
@@ -362,6 +376,17 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       assert.equal(policy.criteria.get("semgrep_scan"), undefined);
       assert.deepEqual([...policy.strictTools], ["grep"], "同时在严格名单里 → 口径随之切换");
       assert.deepEqual([...policy.patternTools], []);
+    });
+
+    it("重复项只记一次、空串整条丢弃（两份名单与 criteria 永远同源）", () => {
+      const policy = refSearchPolicyOf(["grep", "", "grep", "glob"], ["grep"]);
+      assert.deepEqual([...policy.criteria.keys()], ["grep", "glob"], "重复的名字不重复进映射");
+      assert.deepEqual([...policy.strictTools], ["grep"]);
+      assert.deepEqual([...policy.patternTools], ["glob"], "口径名单与映射同步去重");
+      assert.equal(policy.criteria.has(""), false, "空串不是工具名，不进判据也不进指令");
+      // 冻结是运行期防线：记账与指令文案共用这份策略，就地 push 会永久改写两处。
+      assert.equal(Object.isFrozen(policy.patternTools), true);
+      assert.equal(Object.isFrozen(policy.strictTools), true);
     });
   });
 });

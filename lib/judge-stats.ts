@@ -24,10 +24,14 @@ export interface JudgeCost {
   face: string;
   ms: number;
   length: number;
+  /** 这次调用**真的跑过判定**。缺省时按 `length > 0` 折算——bash 面的零长度样本在 host
+   *  侧本来的含义就是"这一面没跑判定"；显式置位让"判定过但输入为空"不再被吞
+   *  （`length` 是输入规模，不是判定标志，拿它当哨兵会把空输入的判定整个丢掉）。 */
+  judged?: boolean;
 }
 
-/** 单次判定的耗时告警线：超过就立刻出声。参照点是实测数据——1MB 命令最坏 ~336ms、
- *  30 万字符深套 ~64ms、正常输入在 µs~ms 级。 */
+/** 单次判定的耗时告警线：**达到或超过**就立刻出声（与 `MS_EDGES` 的末档分界同一条线）。
+ *  参照点是实测数据——1MB 命令最坏 ~336ms、30 万字符深套 ~64ms、正常输入在 µs~ms 级。 */
 export const SLOW_JUDGE_MS = 100;
 /** 滚动摘要的窗口：攒够这么多次判定就发一条摘要并清零（看的是"最近这一段"的分布）。 */
 export const STATS_WINDOW_CALLS = 200;
@@ -47,6 +51,11 @@ const slowByFace = new Map<string, number>();
  *  而"直接拒了"与"问过用户"是两种不同的结论。 */
 const hitsByKey = new Map<string, number>();
 const askByKey = new Map<string, number>();
+/** 档位 → 计数表（`noteRuleHit` 单源；新档位加入 `RuleTier` 时这里必须补格）。 */
+const HIT_TABLE: Readonly<Record<RuleTier, Map<string, number>>> = {
+  ask: askByKey,
+  deny: hitsByKey,
+};
 /** 按档位"看见了但没拦"的命中（规则键 / 档位各一格）。 */
 const allowedByKey = new Map<string, number>();
 const allowedByMode = new Map<string, number>();
@@ -81,20 +90,35 @@ function bucketText(
   return parts.join(" ");
 }
 
+/** 没跑过判定 = 零长度样本（非 bash 调用的 bash 面、无路径键调用的密钥面）不发；
+ *  调用方显式置位 `judged` 时以它为准。 */
+export const isJudged = (cost: JudgeCost): boolean => cost.judged ?? cost.length > 0;
+
 /** 记一次判定的成本：慢判定立刻出声，其余进滚动窗口，攒满一窗发一条摘要并清零。
+ *  未判定的样本在这里就被拒收（与 `isJudged` 同一条判据）——"发不发样本"不取决于
+ *  调用方记不记得先问 `isJudged`，直调方喂进来的零长度样本不会污染 `calls` 与直方图。
  *  阈值与窗口撞的是计数与墙钟，用"造一条真要跑 100ms 的输入 / 跑满 200 次真实判定"去测
  *  会让 CI 随时钟与调用顺序抖动，而这两条判断本身与输入内容无关——所以两枚常量导出，
  *  用例按字面喂边界样本。 */
 export function noteJudgeCost(cost: JudgeCost): void {
+  if (!isJudged(cost)) {
+    return;
+  }
   const { face, ms, length } = cost;
   bump(callsByFace, face);
   if (ms >= SLOW_JUDGE_MS) {
     bump(slowByFace, face);
     console.warn(`[danger-guard] slow judge (${face}): ${ms.toFixed(1)}ms, input ${length} chars`);
   }
-  const window = [...(samplesByFace.get(face) ?? []), cost];
+  // 直接在原数组上推进、只在窗口攒满时换新数组：每次判定整份复制（最多 200 条）会让
+  // 这条每个工具调用都走的热路径在攒窗期付出 O(n²) 的分配。
+  const window = samplesByFace.get(face);
+  if (window === undefined) {
+    samplesByFace.set(face, [cost]);
+    return;
+  }
+  window.push(cost);
   if (window.length < STATS_WINDOW_CALLS) {
-    samplesByFace.set(face, window);
     return;
   }
   samplesByFace.set(face, []);
@@ -108,14 +132,13 @@ export function noteJudgeCost(cost: JudgeCost): void {
   );
 }
 
-/** 没跑过判定 = 零长度样本（非 bash 调用的 bash 面、无路径键调用的密钥面）不发。 */
-export const isJudged = (cost: JudgeCost): boolean => cost.length > 0;
-
 /** 记一次**规则键命中**。`ask` 档另记一格：它表示"问过用户"而不是"拒了"。
  *  由 guard 的 deny 分支与 `tools/pre-execute` 的需确认分支各自调用——两处都调，
  *  所以"拦了什么"这件事在统计里是完整的。 */
 export function noteRuleHit(key: BashDenialKey, tier: RuleTier): void {
-  bump(tier === "ask" ? askByKey : hitsByKey, key);
+  // 查表而不是三元分流：`Record<RuleTier, …>` 让以后扩出 allow/sandbox 之类新档位时
+  // 这里编译期就红——三元会把"非 ask"一律折进 hits，快照里那栏读数被静默污染。
+  bump(HIT_TABLE[tier], key);
 }
 
 /** 记一次"看见了但本档选择不动手"。

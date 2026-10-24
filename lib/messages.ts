@@ -189,6 +189,10 @@ export interface DangerGuardMessages {
   /** 引用块·零命中但有凭据面文件被隔离未读（槽位 root/scanned/count）：
    *  这时"没有任何引用者"仍然不成立——结论的范围不包括被隔离的那几份。 */
   readonly preflightRefsNoneQuarantined: string;
+  /** 引用块·零命中但**有走到了却没能读正文的文件**（超大 / 读不动；槽位 root/scanned/count）：
+   *  这与隔离是两件事——那几份没被规则排除，只是这次没读到，里面完全可能写着引用。
+   *  `complete` 只说明遍历没被预算截断，说明不了这件事。 */
+  readonly preflightRefsNoneUnread: string;
   /** 引用块·有命中且有凭据面文件被隔离的说明行（槽位 count）：命中面可能不止这些。 */
   readonly preflightRefsQuarantined: string;
   /** 层探查一行（槽位 layer/dir/hits）：与引用面**同一次**扫描派生，不另花 I/O。 */
@@ -386,6 +390,9 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
     preflightRefsNoneQuarantined:
       "[引用探查] 起点 `{root}`，扫过 {scanned} 个文件，另有 {count} 个凭据面文件按本包规则未读，" +
       "已读范围内零命中——这不等于「目标没有任何引用者」。",
+    preflightRefsNoneUnread:
+      "[引用探查] 起点 `{root}`，扫过 {scanned} 个文件，另有 {count} 个文件走到了但没能读正文" +
+      "（超大 / 读不动），已读范围内零命中——这不等于「目标没有任何引用者」。",
     preflightRefsQuarantined:
       "注意：本次扫描按本包规则未读 {count} 个凭据面文件，命中面可能不止以上这些。",
     preflightLayerLine:
@@ -400,9 +407,9 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "[档位] 当前是「工作区内修改」：沙箱允许改工作区，但它是路径白名单、**不提供原子性**" +
       "——先落下的删除不会因为后面的越界被拒而回滚，所以「包住可写根」的删除由我们提前拦。",
     noteFullAccess:
-      "[档位] 当前是「自动审查」：本档沙箱不拦文件效应，逐调用 reviewer 已负责判定其余动作。" +
-      "这一层只保留少数几条 reviewer 盖不住的确定性硬拦（如灾难删除、下载即执行），" +
-      "避免同一动作问你两次。",
+      "[档位] 当前是「完全访问」：本档沙箱不拦文件效应，所以写面要靠别处兜。" +
+      "这一层只保留少数几条与沙箱无关的确定性硬拦（如灾难删除、下载即执行、绕过 git 钩子），" +
+      "其余动作交给下游——本档不逐条问，问了也不会有人答。",
     noteUnknown:
       "[档位] 认不出宿主的沙箱模式：这个部署没有可约束的执行器、服务形状不符，" +
       "或模式名不在本包认识的集合里（宿主新增了模式）。按最保守口径处置，不假设有沙箱兜底。",
@@ -626,6 +633,10 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "[reference probe] root `{root}`, {scanned} file(s) scanned; {count} credential-path " +
       "file(s) were deliberately not read, and there were zero hits among what was read — which " +
       "does not mean nothing references the target.",
+    preflightRefsNoneUnread:
+      "[reference probe] root `{root}`, {scanned} file(s) scanned; {count} file(s) were reached " +
+      "but their text could not be read (too large / unreadable), and there were zero hits among " +
+      "what was read — which does not mean nothing references the target.",
     preflightRefsQuarantined:
       "Note: this scan skipped {count} credential-path file(s) by design, so the surface above " +
       "may not list every reference.",
@@ -647,10 +658,11 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "rolled back because a later part was refused outside the boundary. So a deletion that " +
       "encloses a writable root is stopped here first.",
     noteFullAccess:
-      "[mode] This is the Auto-review preset: this mode's sandbox does not restrict file effects, " +
-      "and the per-call reviewer already decides everything else. This layer keeps only a few " +
-      "deterministic hard stops the reviewer cannot be trusted with (catastrophic deletion, " +
-      "download-and-execute) so that one action is never asked about twice.",
+      "[mode] This is full access: this mode's sandbox does not restrict file effects, so the " +
+      "write surface has to be caught elsewhere. This layer keeps only a few deterministic hard " +
+      "stops that have nothing to do with the sandbox (catastrophic deletion, " +
+      "download-and-execute, bypassing git hooks); everything else is left to the downstream " +
+      "sandbox - this preset does not ask per action, and asking would reach nobody.",
     noteUnknown:
       "[mode] The host's sandbox mode is unrecognised: this deployment has no confining executor, " +
       "the service shape differs, or the mode name is outside the set this package knows (the host " +

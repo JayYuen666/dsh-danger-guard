@@ -42,13 +42,20 @@ export interface LessonLoopReporter {
   }) => unknown;
 }
 
-/** 总线最小面类型守卫：report/pass 都按函数判（象限守卫）。 */
+/** 总线最小面类型守卫：只判 deny 通道要用的 `report`。`pass` 是度量增强，由 `reportPass`
+ *  自己判——两件能力绑在同一个判定里时，pass 面的形状漂移（`pass: null` 一类的部分装配）
+ *  会连带关掉 deny 上报，而 deny 才是拦截信号的主要出口。 */
 export function isLessonLoopReporter(value: unknown): value is LessonLoopReporter {
-  if (!isRecord(value)) {
-    return false;
-  }
-  const { report, pass } = value;
-  return typeof report === "function" && (pass === undefined || typeof pass === "function");
+  return isRecord(value) && typeof value["report"] === "function";
+}
+
+/** 总线服务名（`ctx.get` 的键）。 */
+const LESSON_LOOP_SERVICE = "lessonLoop";
+
+/** 取教训总线：可选读 + 形状守卫收成一处，两条上报吃同一个口径，服务名字面量只此一份。 */
+function lessonLoopOf(context: ReportContext): LessonLoopReporter | undefined {
+  const busRaw: unknown = context.get?.(LESSON_LOOP_SERVICE);
+  return isLessonLoopReporter(busRaw) ? busRaw : undefined;
 }
 
 /** 一条上报要的三枚上下文字段（与判定链同源：可选读数口、会话 cwd、会话 id）。 */
@@ -71,8 +78,7 @@ export interface DenyReportInput {
 /** 总线上报（fire-and-forget）：拦截是可学习信号——全量 detail，不截断。
  *  总线缺失直接跳过（见文件头第 1 条纪律）。 */
 export function reportDeny(context: ReportContext, input: DenyReportInput): void {
-  const busRaw: unknown = context.get?.("lessonLoop");
-  const bus = isLessonLoopReporter(busRaw) ? busRaw : undefined;
+  const bus = lessonLoopOf(context);
   if (bus === undefined) {
     return;
   }
@@ -101,9 +107,8 @@ export function reportPass(
   signature: string,
   cost?: JudgeCost,
 ): void {
-  const busRaw: unknown = context.get?.("lessonLoop");
-  const bus = isLessonLoopReporter(busRaw) ? busRaw : undefined;
-  if (bus?.pass === undefined) {
+  const bus = lessonLoopOf(context);
+  if (typeof bus?.pass !== "function") {
     return;
   }
   settleLessonCall(
@@ -131,6 +136,7 @@ export function reportPass(
  * @param contextOf **惰性**取上下文：绝大多数工具调用根本没跑判定（`isJudged` 为假），
  *   而构造上下文要读两个宿主服务加会话 header —— 那是守卫热路径上白付的开销。
  *   只有真要出域时（`collect` 且确实判过）才求值。
+ * @param category 上报类别。
  */
 export function sampleJudge(
   contextOf: () => ReportContext,
@@ -141,6 +147,9 @@ export function sampleJudge(
   if (isJudged(cost)) {
     noteJudgeCost(cost);
     if (collect) {
+      // judge-cost 没有规则/命令级的稳定键，判定面名就是它最细的稳定键——signature 与
+      // face 同值是**刻意**的：总线侧按 signature 聚合时，judge-cost 与命令签名分属不同
+      // category，不会混桶；另造一套签名反而多出一种键形要维护。
       reportPass(contextOf(), category, cost.face, cost);
     }
   }

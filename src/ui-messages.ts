@@ -209,7 +209,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     statsQuota:
       "⚠ 配额放行 {count} 次：连续未收敛拒绝达上限后的出口，用到它说明有目标一直凑不齐证据。",
     statsSlow: "慢判定（≥{ms}ms）：{summary}",
-    secretPlaceholder: "/id_dsa$|\\.p12$/i（每行一条，可含逗号）",
+    secretPlaceholder: String.raw`id_dsa$|\.p12$（裸片段，不要定界符与 flags；每行一条，可含逗号）`,
   },
   en: {
     cardTitle: "danger-guard danger block",
@@ -279,6 +279,6 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     statsQuota:
       "⚠ {count} quota release(s): the exit after consecutive unconverged refusals — using it means some target never gathered its evidence.",
     statsSlow: "Slow judgements (≥{ms}ms): {summary}",
-    secretPlaceholder: "/id_dsa$|\\.p12$/i (one per line, commas allowed)",
+    secretPlaceholder: String.raw`id_dsa$|\.p12$ (bare fragment, no delimiters or flags; one per line, commas allowed)`,
   },
 };

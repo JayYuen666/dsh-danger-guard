@@ -28,7 +28,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** build-host.mjs 的导出返回形状：单文件正文，或「落盘绝对路径 → 正文」的产物清单。 */
 type BuiltArtifacts = string | Map<string, string>;
@@ -123,10 +123,11 @@ export async function hostFreshnessEvidence(
   const artifact = options.artifact ?? DEFAULT_ARTIFACT;
   const pkgName = packageNameOf(pkgDir);
   // 动态导入 .mjs 对 TS 为 any，先收窄到调用面再 await（避免 no-unsafe-*）。
-  const mod = (await import(path.resolve(pkgDir, "build-host.mjs"))) as unknown as Record<
-    string,
-    (() => Promise<BuiltArtifacts>) | undefined
-  >;
+  // `import()` 只接受 URL 或相对说明符：喂裸绝对路径在 POSIX 上能跑，在 Windows 上盘符会被
+  // 当成 URL scheme 解析并抛 ERR_UNSUPPORTED_ESM_URL_SCHEME。
+  const mod = (await import(
+    pathToFileURL(path.resolve(pkgDir, "build-host.mjs")).href
+  )) as unknown as Record<string, (() => Promise<BuiltArtifacts>) | undefined>;
   const build = mod[builder];
   if (typeof build !== "function") {
     throw new TypeError(

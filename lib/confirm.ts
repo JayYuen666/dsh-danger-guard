@@ -19,7 +19,8 @@ import { bashVerdictOf } from "./danger-rules.ts";
 import type { BashDenialKey, BashDangerOptions } from "./danger-rules.ts";
 import { modeNoteKeyOf, severityResolverOf } from "./mode-policy.ts";
 import type { PolicyFacts } from "./mode-policy.ts";
-import { displayReasonOf, MESSAGES } from "./messages.ts";
+import { lruPut } from "./lru.ts";
+import { MESSAGES } from "./messages.ts";
 import type { DangerGuardMessages } from "./messages.ts";
 
 /** 一次「需确认」请求的宿主无关形态（host 只把它包成官方 `{ kind: "ask", … }`）。 */
@@ -48,11 +49,9 @@ function displayReasonWithNote(
   key: BashDenialKey,
   facts: PolicyFacts,
 ): { en: string; [locale: string]: string } {
-  const base = displayReasonOf(key);
   const noteKey = modeNoteKeyOf(facts);
-  const out: { en: string; [locale: string]: string } = {
-    en: `${base.en}\n${MESSAGES.en[noteKey]}`,
-  };
+  // `en` 只是类型占位：循环覆盖 `MESSAGES` 的全部语言（含 en），逐语言映射只写一遍。
+  const out: { en: string; [locale: string]: string } = { en: "" };
   for (const [locale, table] of Object.entries(MESSAGES)) {
     out[locale] = `${table[key]}\n${table[noteKey]}`;
   }
@@ -68,6 +67,10 @@ function displayReasonWithNote(
  *                `severityOf` 若由宿主给，应包含沙箱覆盖等逐命中事实）。
  * @param facts   档位事实（宿主读好后传入；缺省处置与档位说明用）。
  * @param messages 当次语言的文案表（宿主在调用点现取，本模块不读设置也不自带语言）。
+ *   **调用契约**：弹窗那一面的逐语言文案取自本模块的全局 `MESSAGES`，而模型侧的
+ *   `reason` 取自这份参数——类型只约束内容形状、不带语言身份，所以两者同源这件事
+ *   由调用方兑现：`messages` 必须取自 `MESSAGES` 的某一语言项。传自造字典时，模型
+ *   看到的与用户弹窗里看到的会是两句不同的话。
  * @returns 需要审批时返回请求；`allow`/`deny` 两档返回 `undefined`（分别由下游与 guard 收口）。
  */
 export function askRequestOf(
@@ -114,26 +117,36 @@ export function askRequestOf(
  * 只会把那张卡炸成碎片。所以重复的那次不再上报（只在统计里记一格）——**判定与弹卡不变**，
  * 这一层不承担"少问用户一次"的职责。
  *
- * 容量口径：按会话分片、每会话固定上限；外层规模跟着活跃会话数走，宿主进程退出即消失，
- * 不落盘。会话结束由宿主调 `drop` 回收分片。
+ * 容量口径：按会话分片、每会话固定上限；分片数也有上限（超出的按插入序淘汰），宿主进程
+ * 退出即消失，不落盘。会话结束由宿主调 `drop` 回收分片——那只是提前回收，不是有界的前提。
  */
 export class AskDeduper {
-  /** 每会话一张键表。 */
+  /** 每会话一张键表；分片数由 `maxSessions` 按插入序淘汰兜底。 */
   private readonly seen = new Map<string, Set<string>>();
 
   /** 每会话记住的去重键上限：键是摘要而不是命令原文，所以这一格就是内存上界。 */
   private readonly perSession: number;
 
+  /** 分片数上限：`session/disposed` 是否必然触发不由本类保证，漏调 drop 时靠它兜底，
+   *  外层 Map 才真正有界（否则会话标识按请求生成时，分片数随请求数无界增长）。 */
+  private readonly maxSessions: number;
+
   /**
    * @param perSession 每会话最多记住的键数，必须是正安全整数。非法值直接拒绝：
    *                   `NaN`/`Infinity` 会让分片永不清空，`0`/负数会让容量语义失真，
    *                   而"有界"正是这张表在长驻宿主里成立的前提。
+   * @param maxSessions 最多同时记几个会话的分片，必须是正安全整数；超出的按插入序淘汰
+   *                   最旧的分片（丢历史只会让某条命令被再上报一次，可接受的退化）。
    */
-  public constructor(perSession = 64) {
+  public constructor(perSession = 64, maxSessions = 256) {
     if (!Number.isSafeInteger(perSession) || perSession <= 0) {
       throw new RangeError("perSession 必须是正安全整数");
     }
+    if (!Number.isSafeInteger(maxSessions) || maxSessions <= 0) {
+      throw new RangeError("maxSessions 必须是正安全整数");
+    }
     this.perSession = perSession;
+    this.maxSessions = maxSessions;
   }
 
   /**
@@ -151,7 +164,8 @@ export class AskDeduper {
     let table = this.seen.get(key);
     if (table === undefined) {
       table = new Set();
-      this.seen.set(key, table);
+      // 分片也走容量口径：淘汰按插入序（命中不续命），最旧会话的丢法同上面那条退化理由。
+      lruPut(this.seen, key, table, this.maxSessions);
     }
     if (table.has(dedupKey)) {
       return false;
