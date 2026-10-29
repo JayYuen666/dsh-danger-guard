@@ -13,6 +13,7 @@ export const LOG_TEMPLATES: readonly string[] = [
   "[danger-guard] 设置面（条目 danger-guard-settings）不可用，本轮回落内置默认底座；",
   "[danger-guard] extraSecretPatterns 无效，本条未生效:",
   "[danger-guard] 预检失败，本轮不递证据、交回下游决定:",
+  "[danger-guard] sessionProjections register failed, falling back to log scan:",
   "[danger-guard] 判定统计读面没能注册（",
   "个非字符串项，已忽略",
   "连续无证据拒绝达上限，配额放行（maxDenies）",

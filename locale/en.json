@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Danger guard",
+    "description": "Blocks destructive commands before they run and requires reading and reference search before the first edit of a file.",
+    "detail": "docs/DETAIL.md"
+  }
+}

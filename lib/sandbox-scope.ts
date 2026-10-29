@@ -128,19 +128,45 @@ function confiningShellModeOf(shellRaw: unknown): string | undefined {
 }
 
 /**
+ * 显式授予的额外可写根（`SandboxExecutionPolicy.additionalWritableRoots`）。
+ *
+ * **读不出来就整份不留 scope**，而不是丢掉那一枚：根表不完整时 `sandboxDropsOf` 会把
+ * 落在被丢根之下的目标判成"谁都没包住"⇒ 沙箱完全覆盖 ⇒ 让路，而那段删除其实会真实
+ * 执行完。缺席（旧宿主没有这一位）与"给了但读不出"是两个方向，前者按没有额外 grant 处理。
+ *
+ * @returns 可参与包含性判定的根；形状不可信时 `undefined`。
+ */
+function additionalRootsOf(value: unknown): readonly string[] | undefined {
+  let out: readonly string[] | undefined;
+  if (value === undefined) {
+    out = [];
+  } else if (Array.isArray(value)) {
+    const readable = value.filter(
+      (item): item is string => typeof item === "string" && item.length > 0,
+    );
+    // 有项读不出来 ⇒ 整份不可信（理由见函数头）。真的给了 `[]` 时两侧长度相等，
+    // 走的仍是 `[]`（显式没有额外 grant），与"没配"同义。
+    out = readable.length === value.length ? readable : undefined;
+  }
+  return out;
+}
+
+/**
  * 该 mode 下的可写根（**规范形**、去重）。
  *
- * `workspace-write` = 工作区根 + `/tmp` + 平台临时区（官方 `writableRoots` 的语义）。
+ * `workspace-write` = 工作区根 + 显式授予的额外目录 + `/tmp` + 平台临时区
+ *（官方 `writableRoots` 的语义）。
  * 规范化失败的口径与官方一致：**解析不出来就不算可写**
  *（官方原话 "a missing root matches nothing until it exists — the conservative outcome"）。
  */
 function writableRootsOf(
   workspaceRoot: unknown,
+  additionalWritableRoots: readonly string[],
   canonicalize: Canonicalize,
   tempDir: string,
 ): OsPath[] {
   const roots: OsPath[] = [];
-  for (const candidate of [workspaceRoot, "/tmp", tempDir]) {
+  for (const candidate of [workspaceRoot, ...additionalWritableRoots, "/tmp", tempDir]) {
     // 非字符串/空串不算一枚根（`workspaceRoot` 来自宿主服务的原始值）。
     // 解析不出来时按 `path.resolve` 形保留，**不丢这一枚**：宿主的 `realpathOf` 在整条
     // 前缀都不存在时才回 `undefined`，而灾难目标那一侧同样出自 `path.resolve` 的世界，
@@ -160,7 +186,8 @@ function writableRootsOf(
 }
 
 /**
- * 策略解析出来的管辖面；mode 不在拦、解析不全、或一枚可写根都拿不到时 `undefined`。
+ * 策略解析出来的管辖面；mode 不在拦、解析不全、根表不可信、或一枚可写根都拿不到时
+ * `undefined`。
  *
  * 入参形状照官方 `tool-bash` 自己的读法（`sandboxPolicy.resolve(exec.agent === undefined
  * ? {} : { session })`）：官方在"执行器自报在拦"时**要求** `sandboxPolicy` 在场
@@ -175,12 +202,19 @@ function scopeOfResolvedPolicy(
   let scope: SandboxScope | undefined;
   const resolved: unknown = policyRaw.resolve(session === undefined ? {} : { session });
   if (typeof resolved === "object" && resolved !== null) {
-    const { mode, workspaceRoot } = resolved as { mode?: unknown; workspaceRoot?: unknown };
+    const { mode, workspaceRoot, additionalWritableRoots } = resolved as {
+      mode?: unknown;
+      workspaceRoot?: unknown;
+      additionalWritableRoots?: unknown;
+    };
     if (typeof mode === "string" && CONFINING_MODES.has(mode)) {
+      const additional = additionalRootsOf(additionalWritableRoots);
       // 根表**至少一枚**：`/tmp` 与 `tempDir` 是模块自己的常量，即使宿主给的
       // `workspaceRoot` 形状不对，这两枚仍会进表（规范化失败时退 `path.resolve` 形）。
       // 所以这里不再判空——那条判据在实现上一格都走不到，留着只会让覆盖率门禁永远差一分支。
-      scope = { mode, roots: writableRootsOf(workspaceRoot, canonicalize, tempDir) };
+      if (additional !== undefined) {
+        scope = { mode, roots: writableRootsOf(workspaceRoot, additional, canonicalize, tempDir) };
+      }
     }
   }
   return scope;

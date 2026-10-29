@@ -40,7 +40,7 @@ export const LEDGER_KEY = "danger-guard.toolLedger";
  *  （见 test/tool-ledger.test.ts 的窗口组）——改这个数字就必须同时过那条用例。 */
 const LEDGER_WINDOW = 2000;
 
-const intSchema = z.number().int().nonnegative();
+const intSchema = z.int().nonnegative();
 
 /**
  * 状态里的台账行 = `ToolCallRecord` / `ToolResultRecord` 的同字段 JSON 形态：

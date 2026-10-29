@@ -25,6 +25,7 @@ import type { InvocationDescriptor, RemoteResult } from "@deepseek-ai/dsh-typert
 // 改名漏一处没有任何编译期信号，表现是"读不到"而不是报错。
 import { BUNDLE_PKG } from "./bundle-pkg.ts";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
+import { z } from "zod";
 
 // 形状从**叶子**模块取，不从 lib/judge-stats.ts：后者带 node:os/node:path，
 // 那会把它们拖进客户端类型程序（实测 TS2591）。
@@ -81,42 +82,24 @@ const isRemoteMounter = (value: unknown): value is RemoteMounter =>
 const isStatsNamespace = (value: unknown): value is StatsNamespace =>
   isRecord(value) && typeof value["stats"] === "function";
 
-/** 快照读数块的必要字段（对象表七枚 + 数字三枚）。跨进程返回值不经运行时校验就交给
- *  卡片的话，形状漂移会拖到渲染期才以 `Object.entries(undefined)` 一类的方式炸。 */
-const TABLE_FIELDS = [
-  "calls",
-  "slow",
-  "hits",
-  "asks",
-  "allowed",
-  "allowedByMode",
-  "skipped",
-] as const;
-const NUMBER_FIELDS = ["quotaReleases", "slowMs", "window"] as const;
-
 /** 跨进程返回值的形状守卫：字段齐、表是对象、计数是有限数字。多出来的键不拦——
- *  这是消费侧的下限校验，不是对宿主实现的穷举。 */
-const isStatsSnapshot = (value: unknown): value is StatsSnapshot => {
-  if (!isRecord(value)) {
-    return false;
-  }
-  for (const field of TABLE_FIELDS) {
-    const table: unknown = value[field];
-    if (
-      !isRecord(table) ||
-      !Object.values(table).every((count) => typeof count === "number" && Number.isFinite(count))
-    ) {
-      return false;
-    }
-  }
-  for (const field of NUMBER_FIELDS) {
-    const num: unknown = value[field];
-    if (typeof num !== "number" || !Number.isFinite(num)) {
-      return false;
-    }
-  }
-  return true;
-};
+ *  这是消费侧的下限校验，不是对宿主实现的穷举。zod 只做校验，不把原对象换成解析产物：
+ *  宿主多写的键仍照原样交给上层。 */
+const STATS_SNAPSHOT_SCHEMA: z.ZodType<StatsSnapshot> = z.object({
+  calls: z.record(z.string(), z.number()),
+  slow: z.record(z.string(), z.number()),
+  hits: z.record(z.string(), z.number()),
+  asks: z.record(z.string(), z.number()),
+  allowed: z.record(z.string(), z.number()),
+  allowedByMode: z.record(z.string(), z.number()),
+  skipped: z.record(z.string(), z.number()),
+  quotaReleases: z.number(),
+  slowMs: z.number(),
+  window: z.number(),
+});
+
+const isStatsSnapshot = (value: unknown): value is StatsSnapshot =>
+  STATS_SNAPSHOT_SCHEMA.validate(value);
 
 /**
  * 造出真正的读取器（挂载一次 + 每次读命名空间服务）。

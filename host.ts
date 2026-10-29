@@ -33,7 +33,7 @@
 
 import os from "node:os";
 import path from "node:path";
-import { statSync, readFileSync, realpathSync } from "node:fs";
+import { statSync, realpathSync } from "node:fs";
 import type { Stats } from "node:fs";
 import type { Context, Events } from "@deepseek-ai/cordis";
 // 官方工具契约（type-only）：`ctx.tools` 的服务面与 guard 谓词收到的执行面都直接从
@@ -78,6 +78,9 @@ import { effectiveDispositionFactory } from "./lib/effective-disposition.ts";
 import type { DispositionFactory } from "./lib/effective-disposition.ts";
 import { presenceOfAttempt } from "./lib/fs-errors.ts";
 import type { StatAttempt } from "./lib/fs-errors.ts";
+import { mountLedgerReader } from "./lib/projection-reader.ts";
+import type { ProjectionsRegistry } from "./lib/projection-reader.ts";
+import { selfWritesStillPresent } from "./lib/self-write-proof.ts";
 // 「模型读到的是哪一版」的记账（观测/失效点同一条记录、只在成功结果后提交）。
 import {
   attributeExternalChange,
@@ -185,13 +188,7 @@ import type {
   ToolResultRecord,
 } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 // 取证台账投影：单元 + 读侧换算 + 采信门（台账不可信 ⇒ undefined ⇒ 回退全量扫描）。
-import {
-  LEDGER_KEY,
-  asLedger,
-  callsOf,
-  resultsOf,
-  toolLedgerProjection,
-} from "./lib/tool-ledger.ts";
+import { asLedger, callsOf, resultsOf } from "./lib/tool-ledger.ts";
 import type { ToolLedger } from "./lib/tool-ledger.ts";
 // 会话只读面（SessionLogFace）与日志偏移品牌都钉到官方声明：`Session` 是
 // @deepseek-ai/dsh-session 的类面（名义比较，故只 Pick 成员而不取整类），
@@ -591,20 +588,7 @@ export { noteJudgeCost } from "./lib/judge-stats.ts";
  * 形参是官方品牌数 `SessionLogOffset`（types.d.ts:21）而**不是** `number`：读日志首必须
  * 经 `brandNumber<SessionLogOffset>(0)` 送出（见文件头列出的 dsh-brand 值导入）。
  */
-type SessionLogFace = Partial<Pick<Session, "id" | "header" | "snapshotEvents">>;
-
-/**
- * `ctx.sessionProjections` 的本包读面 = 官方 `SessionProjectionRegistry` 的成员投影
- * （installed @deepseek-ai/dsh-session-projection/lib/types/index.d.ts：host-only 的
- * `register(definition)` 第二重载、`stateOf(session, key)` :167-175）。
- * `stateOf` 的第一参官方钉名义类 `Session`，本包的替身会话永远满足不了 ⇒ 这里按
- * `unknown` 收，返回值再经 `asLedger` 过一次 `stateSchema`
- * （wukil-plugins/wukil-dev-tools.ts 与 session-rescue 的 ProjectionsRegistry 同形）。
- */
-interface ProjectionsRegistry {
-  register: (definition: typeof toolLedgerProjection) => () => void;
-  stateOf: (session: unknown, key: typeof LEDGER_KEY) => unknown;
-}
+type SessionLogFace = Partial<Pick<Session, "id" | "header" | "snapshotEvents" | "seq">>;
 
 /** 可信台账读口：注册表在位时由 inject 回调装上；缺席 ⇒ 整条判定走回退扫描。 */
 type LedgerReader = (session: SessionLogFace) => ToolLedger | undefined;
@@ -702,11 +686,6 @@ function dropSessionLedgers(sessionId: string): void {
  *  *（同步契约下异步 fs 会破坏守卫热路径，此处必须同步。名称入 node/no-sync ignores。） */
 function syncStat(targetPath: string): Stats {
   return statSync(targetPath);
-}
-
-/** tools.guard 同步契约下读取文件全文（mtime 归因的内容自证）。同样必须同步。 */
-function syncReadText(targetPath: string): string {
-  return readFileSync(targetPath, "utf8");
 }
 
 /**
@@ -943,7 +922,7 @@ const SIG_KEYWORD_RE =
 // 只认 `(?:^|\/)` 时 `package.json` 前面是 `\\` ⇒ 恒不匹配 ⇒ 改版本号不再升档
 //（实测 Windows runner 上该用例红：`denied` 为 undefined，落到了最低档）。
 const RISKY_PATH_RE =
-  /(?:^|[/\\])(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|npm-shrinkwrap\.json|bun\.lockb?|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|pyproject\.toml|poetry\.lock|uv\.lock|requirements\.txt|setup\.py|tsconfig[^/]*\.json|vite\.config\.[cm]?[jt]s|webpack\.config\.[cm]?js|cordis\.(?:ya?ml|json)|Makefile|Dockerfile|docker-compose\.ya?ml|\.env(?:\.[\w-]+)?$|schema\.sql)$/u;
+  /(?:^|[/\\])(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|npm-shrinkwrap\.json|bun\.lockb?|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|pyproject\.toml|poetry\.lock|uv\.lock|requirements\.txt|setup\.py|tsconfig[^/]*\.json|vite\.config\.[cm]?[jt]s|webpack\.config\.[cm]?js|cordis\.(?:ya?ml|json)|Makefile|Dockerfile|docker-compose\.ya?ml|\.env(?:\.[\w-]+)?|schema\.sql)$/u;
 
 /**
  * 取证档位（定稿：按写面风险分档，配 strictMode 回到"每文件全探查"）。
@@ -1364,13 +1343,16 @@ function ledgerRows(
   return evs === undefined ? undefined : { ...scanToolEvents(evs), logSeq: evs.length };
 }
 
-/** 投递位次：读**当下**的会话事件数（投影优先、快照回落，与 guard 判定同一条读法）；
- *  读不到（两者皆不可得）时回落本轮 `evidenceFor` 已经算出的 `logSeq`——两者同源同值，
- *  而 `assembleGaps` 的比对正是拿它跟 `staleBase` 比。
+/** 投递位次：只读会话日志长度，取官方 `Session.seq`——不需要事件内容，就不该为此把
+ *  台账折叠一遍（那条路径要给 calls/results 分配数组）。自定义会话没有这一位时回落本轮
+ *  `evidenceFor` 已经算出的 `logSeq`：两者同源同值，`assembleGaps` 的比对正是拿它跟
+ *  `staleBase` 比。
  *  A 面不必等这条消息落进日志：additionalContexts 随本次结果一起被 loop 收下
  *  （`agent-loop/src/tool-calls.ts:157`「for the next step boundary」），位次取当刻即可。 */
-const deliverySeqOf = (req: PreflightRequest, input: FactEvidenceInput): number =>
-  ledgerRows(req.session, req.ledger)?.logSeq ?? input.logSeq;
+const deliverySeqOf = (req: PreflightRequest, input: FactEvidenceInput): number => {
+  const { seq } = req.session;
+  return typeof seq === "number" ? seq : input.logSeq;
+};
 
 /** 把这次覆盖到的层盖上投递位次（其余沿用旧值）。写成函数而不是 `Array#reduce` 累积展开：
  *  后者是本仓 lint 明令避免的形状（oxc/no-accumulating-spread），而这里要的只是"逐层赋值"。 */
@@ -1782,18 +1764,6 @@ function resolveResultLedger(ctx: EvalCtx, ledger: CallLedger): ResultLedger {
     readFailed: state.readFailed,
     refsFailed: state.refsFailed,
   };
-}
-
-/** 内容自证：那次成功编辑写进去的文本此刻是否仍在文件里。 */
-function selfWritesStillPresent(targetPath: string, written: string): boolean {
-  let current: string | undefined;
-  try {
-    current = syncReadText(targetPath);
-  } catch {
-    current = undefined;
-  }
-  // 读不到（不存在/无权限）⇒ 谈不上"写进去的文本还在"，`?.` 的落空支交回 false。
-  return current?.includes(written) ?? false;
 }
 
 /** 缺项组装的输入（由 evidenceFor 结算好，assembleGaps 只做产出）。 */
@@ -3326,9 +3296,12 @@ function wireReadFaces(
   askDeduper: AskDeduper,
 ): void {
   svc.inject?.(["sessionProjections"], (child) => {
-    const registry = child.sessionProjections;
-    registry.register(toolLedgerProjection);
-    ledgerBox.value = (session) => asLedger(registry.stateOf(session, LEDGER_KEY));
+    void mountLedgerReader(child.sessionProjections, {
+      publish: (reader) => {
+        ledgerBox.value = reader === undefined ? undefined : (session) => asLedger(reader(session));
+      },
+      effect: (factory) => svc.effect(factory),
+    });
   });
 
   svc.inject?.(["fs"], (child) => {

@@ -83,8 +83,14 @@ export function policyFactsOf(input: PolicyFactsInput): PolicyFacts {
   let askable = true;
   if (isApprovalFace(approvalRaw)) {
     const { overrideOf } = approvalRaw;
+    // `.call` 不是风格：真实 `ApprovalService.overrideOf` 的第一句是
+    // `this.approvalStateOf(session)`。拆下来当裸函数调，`this` 就是 undefined，
+    // 于是每一次工具判定的策略面都会抛 "Cannot read properties of undefined
+    // (reading 'approvalStateOf')" —— 宿主里表现为所有工具全线失败。
     const overridden =
-      session === undefined || !isOverrideOf(overrideOf) ? undefined : overrideOf(session);
+      session === undefined || !isOverrideOf(overrideOf)
+        ? undefined
+        : overrideOf.call(approvalRaw, session);
     askable = (overridden ?? approvalRaw.config?.policy) !== "never";
   }
   const presetsRaw: unknown = get?.("permissionPresets");

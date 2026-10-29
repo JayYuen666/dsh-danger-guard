@@ -68,20 +68,24 @@ const pkgDir = path.resolve(import.meta.dirname, "..");
  *   第 14 次（审计收口：收口走 `verdictOf`、写面阈值的交叉校验与告警、判定成本样本带
  *      `judged` 位、事实门放行判据单源化）：增量全是判据本体与一处告警文案，不是查表；
  *      实测 115,711 B。
+ *   第 15 次（会话投影的注册改成双协议：旧宿主同步交回 disposer、新宿主等待后交回 handle，
+ *      判别放在 `await` 之后，另加卸载先撤读口再释放）：增量是分流那一处判据与两个形状守卫，
+ *      不是查表；实测 116,602 B。
  *  预算按同一条规矩取实测上浮 ~0.7%。 */
-const HOST_BUDGET_BYTES = 116_500;
+const HOST_BUDGET_BYTES = 117_400;
 /** 设置半产物体积预算（实测 3,380 B；开 minify 前 7,293 B）。与拦截半分属两个 bulkhead
  *  条目，各自记账。增量：apply 阶段的值面形状守卫（plain 值当场点名，不拖到第一次读）
  *  与服务面守卫的报错收窄；预算按 ~3% 上浮。 */
 const SETTINGS_BUDGET_BYTES = 3500;
-/** 客户端半产物体积预算（实测 25,549 B；开 minify 前 38,782 B）。浏览器侧加载，按平台计账。
+/** 客户端半产物体积预算（实测 34,671 B；设置卡迁到 shared card-ui 后组件与样式表随 bundle 打入）。
+ *  浏览器侧加载，按平台计账。
  *  本轮增量：名单行的回退显示、批量保存的逐字段结算（部分失败只留失败项）、
  *  bundle 包名抽成单源模块；预算按 ~1% 上浮。
  *
  *  ⚠ 更早的一笔补记（24,500 → 25,000）：超出来自 `src/ui-messages.ts` 里两处
  *  `secretPlaceholder` 的文案加长（写清"别写成 /…/i 形状"），HEAD 那一版就已顶穿旧预算，
  *  构建脚本的改动一个字节都没影响体积（A/B 过三份 `build-client.mjs`）。 */
-const CLIENT_BUDGET_BYTES = 25_800;
+const CLIENT_BUDGET_BYTES = 40_000;
 /** 声明入口层体积预算。types/ 整目录进 files，体积会计入 tarball。 */
 const DECLARATION_ENTRY_BUDGET_BYTES = 120_000;
 

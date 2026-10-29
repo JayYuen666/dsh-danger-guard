@@ -113,4 +113,6 @@ SOFTWARE.
 **结构性**断言钉住"依赖表里的包一个都没被内联"（看 chunk 的 `moduleIds`，不看函数名 —— 产物开了
 minify，内联体里的标识符会被 mangle）。
 
-`zod` 由 `lib/tool-ledger.ts` 以值引入（其 `stateSchema`），同样只能是运行期依赖。
+`zod` 由 `lib/tool-ledger.ts`（其 `stateSchema`）与设置卡的 `src/stats-reader.ts`（快照形状守卫）
+以值引入，同样只能是运行期依赖；client 产物按宿主的 `PLATFORM_MODULES` 保持 `require("zod")`
+外部化，不内联。

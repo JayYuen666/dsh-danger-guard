@@ -4,6 +4,9 @@
 // 这道豁免给不给。方向不对称：把"不可知"读成"不存在"是**放宽**（免掉 read），
 // 而那正是这道豁免最不该失守的一侧。所以这条判据要有自己的用例，而它只有抽出来才测得动
 //（`host.ts` 里的调用点绑着真实的 `statSync`）。
+/** libuv 的 message 前缀：`ENOENT: …`，`ENOENTX` 一类拼接串不算。 */
+const ENOENT_MESSAGE_PREFIX = /^ENOENT(?::|$|\s)/u;
+
 /**
  * 这个 fs 错误是不是"确实不存在"。
  *
@@ -25,7 +28,7 @@ export function isNotFoundError(error: unknown): boolean {
     return code === "ENOENT";
   }
   // 前缀匹配带词边界：libuv 的措辞是 "ENOENT: …"，"ENOENTX" 一类拼接串不得误判成缺失。
-  return typeof message === "string" && /^ENOENT(?::|$|\s)/u.test(message);
+  return typeof message === "string" && ENOENT_MESSAGE_PREFIX.test(message);
 }
 
 /** stat 的三态结论：**不存在**（ENOENT）/ **存在**（拿到 stat）/ **不可知**（其它错误）。

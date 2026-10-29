@@ -34,6 +34,12 @@
 /** 顶层段边界字符：传统分隔符之外，`(`、`)`、反引号**同样**是边界。 */
 const SEG_SEPARATORS = new Set([";", "\n", "\r", "&", "|", "(", ")", "`"]);
 
+/** 关键字判定用的词边界字符（换行/空白与 shell 元字符）。 */
+const KEYWORD_BOUNDARY = /[\s;()&|]/u;
+/** heredoc 行尾 CR 与前导制表符。 */
+const TRAILING_CR = /\r$/u;
+const LEADING_TABS = /^\t+/u;
+
 /** 双引号内只有这几枚字符能被反斜杠转义（POSIX 口径，其余反斜杠是字面量）。
  *  `\`+换行单独按续行处理（整对删除），不在这张表里。 */
 const DQ_ESCAPABLE = new Set(["$", "`", '"', "\\"]);
@@ -166,7 +172,7 @@ function regionStep(src: string, i: number): number {
 function caseKeywordAt(src: string, i: number): "case" | "esac" | undefined {
   const rest = src.slice(i, i + 4);
   const after = src.charAt(i + 4);
-  const boundaryAfter = after === "" || /[\s;()&|]/u.test(after);
+  const boundaryAfter = after === "" || KEYWORD_BOUNDARY.test(after);
   let out: "case" | "esac" | undefined;
   if (rest === "case" && boundaryAfter) {
     out = "case";
@@ -178,7 +184,7 @@ function caseKeywordAt(src: string, i: number): "case" | "esac" | undefined {
 
 /** 区内这一枚字符是否落在词边界上（关键字判定用）。 */
 const isWordBoundaryBefore = (src: string, i: number, from: number): boolean =>
-  i === from || /[\s;()&|]/u.test(src.charAt(i - 1));
+  i === from || KEYWORD_BOUNDARY.test(src.charAt(i - 1));
 
 /**
  * 区的终点。`paren` 决定收尾是最外层 `)` 还是反引号：
@@ -580,8 +586,8 @@ function heredocBodyEnd(src: string, start: number, spec: HeredocSpec): HeredocB
   while (lineStart <= src.length) {
     const lineEnd = src.indexOf("\n", lineStart);
     const stop = lineEnd === -1 ? src.length : lineEnd;
-    const rawLine = src.slice(lineStart, stop).replace(/\r$/u, "");
-    const line = spec.stripTabs ? rawLine.replace(/^\t+/u, "") : rawLine;
+    const rawLine = src.slice(lineStart, stop).replace(TRAILING_CR, "");
+    const line = spec.stripTabs ? rawLine.replace(LEADING_TABS, "") : rawLine;
     if (line === spec.delimiter) {
       bodyEnd = lineStart;
       next = lineEnd === -1 ? src.length : lineEnd + 1;

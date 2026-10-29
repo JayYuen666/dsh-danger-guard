@@ -29,8 +29,13 @@ import {
   mountAgentLoopTestHarness,
 } from "@deepseek-ai/dsh-agent-loop-testkit";
 import type { AgentLoopTestHarness } from "@deepseek-ai/dsh-agent-loop-testkit";
-import { defineContentToolFixture } from "@deepseek-ai/dsh-tools";
-import type { ToolExecutionResult } from "@deepseek-ai/dsh-tools";
+import { defineTool } from "@deepseek-ai/dsh-tools";
+import type {
+  InferArgs,
+  ParameterSchemaSpec,
+  ToolDefinition,
+  ToolExecutionResult,
+} from "@deepseek-ai/dsh-tools";
 import { LlmAdapter, createUserMessage } from "@deepseek-ai/dsh-llm";
 import type {
   ContentBlock,
@@ -172,12 +177,37 @@ export async function capTree(spine: Spine): Promise<void> {
   await Promise.all(dirs);
 }
 
+/**
+ * 官方 `defineTool` 的一层薄包装：把「返回一段文本」这个最常见形状收成 `Promise<string>`。
+ *
+ * 为什么不用官方的 `defineContentToolFixture`：它在支持窗口内**换过宿主包**（最新一版把它
+ * 从 `@deepseek-ai/dsh-tools` 移到了 tool-testkit），而 `defineTool` 三版都在、签名逐字相同。
+ * 这层包装只做 schema 填充与渲染，参数校验与执行链仍由官方那套给出。
+ */
+function contentTool<Spec extends ParameterSchemaSpec>(options: {
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: Spec;
+  readonly execute: (args: InferArgs<Spec>) => Promise<string>;
+}): ToolDefinition {
+  return defineTool({
+    name: options.name,
+    description: options.description,
+    parameters: options.parameters,
+    output: {
+      schema: { type: "string" },
+      render: (_args, value) => [{ type: TEXT_BLOCK, text: value }],
+    },
+    execute: (args) => options.execute(args),
+  });
+}
+
 /** 官方参数面里"路径键"的真实出处（docs/tool-catalog.md + packages/fs/tool-fs/src/*.ts）：
  *  `dsh-tool-fs` 的 read/write/edit **只认 `file_path`**；`path` 只属于 opt-in 的
  *  `str_replace_editor`（且要求绝对路径）。本包额外认 `path` 是为那一条，不是为 stock 工具。 */
 function registerFileTools(ctx: Context): void {
   ctx.tools.register(
-    defineContentToolFixture({
+    contentTool({
       name: TOOL_READ,
       description: "read a file",
       // 真件参数：file_path 必填，offset/limit 可只读一段（src/read.ts:78-84）
@@ -191,12 +221,12 @@ function registerFileTools(ctx: Context): void {
         const lines = body.split("\n");
         const from = args.offset ?? 0;
         const count = args.limit ?? lines.length;
-        return [{ type: TEXT_BLOCK, text: lines.slice(from, from + count).join("\n") }];
+        return lines.slice(from, from + count).join("\n");
       },
     }),
   );
   ctx.tools.register(
-    defineContentToolFixture({
+    contentTool({
       name: TOOL_EDIT,
       description: "replace within a file",
       // 真件参数：只有一对 old/new（src/edit.ts:86-97），宿主没有 edits 数组那种形态
@@ -213,12 +243,12 @@ function registerFileTools(ctx: Context): void {
             ? before.split(args.old_string).join(args.new_string)
             : before.replace(args.old_string, args.new_string);
         await writeFile(args.file_path, after);
-        return [{ type: TEXT_BLOCK, text: `edited ${args.file_path}` }];
+        return `edited ${args.file_path}`;
       },
     }),
   );
   ctx.tools.register(
-    defineContentToolFixture({
+    contentTool({
       name: "write",
       description: "create or overwrite a file",
       parameters: {
@@ -227,14 +257,14 @@ function registerFileTools(ctx: Context): void {
       },
       async execute(args) {
         await writeFile(args.file_path, args.content);
-        return [{ type: TEXT_BLOCK, text: `wrote ${args.file_path}` }];
+        return `wrote ${args.file_path}`;
       },
     }),
   );
   // 真 bash 的必填面里还有 description，超时叫 timeoutMs、目录叫 workdir（不是 cwd）：
   // packages/shell/tool-bash/src/index.ts:368 起。本包只从里面取 `command`。
   ctx.tools.register(
-    defineContentToolFixture({
+    contentTool({
       name: TOOL_BASH,
       description: "run a shell command",
       parameters: {
@@ -244,7 +274,7 @@ function registerFileTools(ctx: Context): void {
         workdir: { type: "string" },
       },
       async execute(args) {
-        return [{ type: TEXT_BLOCK, text: `ran ${args.command}` }];
+        return `ran ${args.command}`;
       },
     }),
   );
@@ -265,12 +295,12 @@ function registerSearchTools(ctx: Context): void {
   } as const;
   for (const name of ["grep", "glob"]) {
     ctx.tools.register(
-      defineContentToolFixture({
+      contentTool({
         name,
         description: `search (${name})`,
         parameters: searchParameters,
         async execute() {
-          return [{ type: TEXT_BLOCK, text: "no matches" }];
+          return "no matches";
         },
       }),
     );
@@ -278,7 +308,7 @@ function registerSearchTools(ctx: Context): void {
   // opt-in 的第二条编辑器（tool-str-replace-editor/src/index.ts:429-467）：键名换成 path。
   // 单独开一台，才能证明本包对"另一种键形"确实接得住。
   ctx.tools.register(
-    defineContentToolFixture({
+    contentTool({
       name: "str_replace_editor",
       description: "edit via path",
       parameters: {
@@ -291,7 +321,7 @@ function registerSearchTools(ctx: Context): void {
       async execute(args) {
         const { command } = args;
         if (command === "view") {
-          return [{ type: TEXT_BLOCK, text: await readFile(args.path, "utf8") }];
+          return readFile(args.path, "utf8");
         }
         const before = command === "create" ? "" : await readFile(args.path, "utf8");
         const after =
@@ -299,7 +329,7 @@ function registerSearchTools(ctx: Context): void {
             ? before.replace(args.old_str ?? "", args.new_str ?? "")
             : before + (args.file_text ?? "");
         await writeFile(args.path, after);
-        return [{ type: TEXT_BLOCK, text: `${command} ${args.path}` }];
+        return `${command} ${args.path}`;
       },
     }),
   );
@@ -433,13 +463,25 @@ export async function dispatch(
   name: string,
   args: Record<string, unknown>,
 ): Promise<ToolExecutionResult> {
-  return spine.ctx.tools.execute({
-    callId: callIdOf(callId),
-    name,
-    arguments: args,
+  // 官方已把 `tools.execute` 收成**批次**入口：单发也要包成一条 `calls`，再把唯一那条结果
+  // 拆回来。`arguments` 按模型产出的原形给——它是原始 JSON 串，不是已解析对象。
+  const batch = await spine.ctx.tools.execute({
+    calls: [
+      {
+        type: "tool-call",
+        id: callIdOf(callId),
+        name,
+        arguments: JSON.stringify(args),
+      },
+    ],
     agent,
     signal: new AbortController().signal,
   });
+  const [only] = batch.results;
+  if (only === undefined) {
+    throw new Error(`tools.execute 对单发调用没有交回结果：${name}`);
+  }
+  return only.result;
 }
 
 /** 若干枚调用 → 一串官方 chunk（每条占一个 block index，与官方适配器契约同形）。 */

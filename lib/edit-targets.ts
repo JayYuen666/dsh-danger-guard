@@ -61,6 +61,8 @@ const WRITE_PAYLOAD_KEYS = [
 
 /** 键名本身像写载荷（`*_text`/`*_content`/`*_string`）时也算写：新 provider 换了字段名不失效。 */
 const WRITE_PAYLOAD_SUFFIX = /(?:^|_)(?:text|content|string|str|patch|diff)$/u;
+/** 插入写的行号键（两种拼法都认）。 */
+const INSERT_LINE_KEY = /^(?:insert_line|insertLine)$/u;
 
 const WRITE_PAYLOAD_SET: ReadonlySet<string> = new Set(WRITE_PAYLOAD_KEYS);
 
@@ -77,7 +79,7 @@ function isWriteValue(key: string, value: unknown): boolean {
   if (Array.isArray(value)) {
     return value.length > 0;
   }
-  return typeof value === "number" && /^(?:insert_line|insertLine)$/u.test(key);
+  return typeof value === "number" && INSERT_LINE_KEY.test(key);
 }
 
 function hasWritePayload(args: Record<string, unknown>): boolean {

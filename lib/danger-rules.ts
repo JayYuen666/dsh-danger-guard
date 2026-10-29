@@ -33,6 +33,7 @@ import path from "node:path";
 // 同一个模块也负责切词与结构视图——三处读法必须同源，否则"这一段里有哪些词"会随判据而变。
 import { hasUnclosedQuote, lexTokens, splitSegments, structureView } from "./command-segments.ts";
 import { dockerDanger, kubectlDanger } from "./container-rules.ts";
+import { DANGER_RE } from "./danger-regexes.ts";
 import { declaredTargets } from "./edit-targets.ts";
 import type { ShellToken } from "./command-segments.ts";
 import type { Fix } from "./fix.ts";
@@ -163,10 +164,8 @@ export const SANDBOX_COVERED: ReadonlySet<BashDenialKey> = new Set(["rmrf"]);
 
 /** 只读**自有**属性查找。对象字面量会继承 `Object.prototype`，而这里的 key 来自命令输入；
  *  `table["hasOwnProperty"]` 和 `table["__proto__"]` 不是规则，不能当函数或规则键使用。 */
-const ownLookup = <Value>(
-  table: Readonly<Record<string, Value>>,
-  key: string,
-): Value | undefined => (Object.hasOwn(table, key) ? table[key] : undefined);
+const ownLookup = <Value>(table: Readonly<Record<string, Value>>, key: string): Value | undefined =>
+  Object.hasOwn(table, key) ? table[key] : undefined;
 
 export const RULE_TIER: Readonly<Record<BashDenialKey, RuleTier>> = {
   // 已确认危险：命令形态本身就是错的，出路是改写命令（各有 `Fix` 或文案里的静态指示）。
@@ -412,10 +411,10 @@ const PREFIX_POSITIONAL_VALUE = new Set([
 /** 时长词：`5` / `10s` / `5m` / `1h` / `2d`，以及 GNU timeout 承认的**小数与 MM:SS**
  *  形态（`timeout --signal TERM 1.5 npm run dev` 实测漏拦——只认整数就把 `1.5` 留成了命令头）。
  *  这一形只在"已经吃过旗标取值"时用于认位置取值，纯整数走 isPositionalValue 的另一支。 */
-const DURATION_WORD_RE = /^(?:\d+(?:[.]\d+)?[smhd]?|\d+[:][0-5]?\d(?:[.]\d+)?)$/u;
+const DURATION_WORD_RE = /^(?:\d+(?:\.\d+)?[smhd]?|\d+:[0-5]?\d(?:\.\d+)?)$/u;
 
 /** 前导环境赋值（VAR=x），同样不改变命令实部。 */
-const ENV_ASSIGN_RE = /^[A-Za-z_][A-Za-z0-9_]*=/u;
+const ENV_ASSIGN_RE = /^[A-Za-z_]\w*=/u;
 
 /**
  * 该词是不是**纯**环境赋值：`FOO=x rm -rf /` 的 rm 是命令实部（照剥）。
@@ -443,9 +442,9 @@ const isPlainEnvAssign = (word: string): boolean =>
  * @param word - 剥过路径的 bin 名
  * @returns 去掉引号前缀后的词
  */
-const stripQuotePrefix = (word: string): string => word.replace(/^\$/u, "");
+const stripQuotePrefix = (word: string): string => word.replace(DANGER_RE.leadingDollar, "");
 
-const binNameOf = (word: string): string => word.replace(/^.*[\\/]/u, "");
+const binNameOf = (word: string): string => word.replace(DANGER_RE.pathSeparatorPrefix, "");
 
 /** 一个词的两种读法各自剥出的 bin 名。
  *  反斜杠在这两形里意思不同：POSIX 读法当它是转义（`my\rm` 的值是 `myrm`），
@@ -511,7 +510,7 @@ function chrtSkip(words: readonly string[], i: number): number {
 function isPositionalValue(bin: string, flags: number, positional: string | undefined): boolean {
   // `nice` 的裸位置取值是 niceness；`nice rm -rf ~` 里的 rm 是命令，不是取值。
   if (bin === "nice") {
-    return flags === 0 && positional !== undefined && /^[+-]?\d+$/u.test(positional);
+    return flags === 0 && positional !== undefined && DANGER_RE.signedInteger.test(positional);
   }
   return (
     PREFIX_POSITIONAL_VALUE.has(bin) &&
@@ -755,7 +754,7 @@ function psValueRole(word: string): "path" | "skip" | undefined {
 /** `-Recurse:$false` / `-Force:0` 这类**显式假值**：参数名对得上但开关是关的。
  *  实测旧判据只看参数名前缀，于是 `Remove-Item -Recurse:$false -Force ~` 被当递归删除拦下——
  *  pwsh 对这条根本不会递归。分隔符 `:` 是 pwsh 的写法，`=` 是同族变体，都要认。 */
-const PS_SWITCH_VALUE_RE = /^-(?<name>[A-Za-z]+)[:=](?<value>.*)$/u;
+const PS_SWITCH_VALUE_RE = /^-[A-Za-z]+[:=](?<value>.*)$/u;
 const PS_FALSE_VALUES = new Set(["$false", "false", "0"]);
 
 /** 该选项词是否把一枚开关显式置为假（`-Recurse:$false`）？ */
@@ -989,7 +988,7 @@ function toolSubcommand(rest: readonly string[]): string | undefined {
  *  版本/标签只是选择器，不改变命令性质（实测 `npx vite@5 dev` 起 dev server，此前放行）。
  *  作用域包（`@vue/cli-service`）**不**剥尾段猜 bin 名——包名与 bin 名不同名是常态，
  *  猜了就是把误判面写进判据；这一形留作登记的洞。 */
-const pkgBinName = (pkg: string): string => pkg.replace(/@[^/]*$/u, "");
+const pkgBinName = (pkg: string): string => pkg.replace(DANGER_RE.packageVersionSuffix, "");
 
 /**
  * 判定"命令头/包名 pkg + 参数 rest"是否为长驻 dev server。
@@ -1369,7 +1368,7 @@ const checkoutDiscards = (facts: GitFacts): boolean =>
   facts.sawSeparator ||
   hasShort(facts, "f") ||
   hasLong(facts, "--force") ||
-  facts.positionals.some((word) => /^\.{1,2}$/u.test(word)) ||
+  facts.positionals.some((word) => DANGER_RE.dotSegment.test(word)) ||
   (facts.positionals.length >= 2 && !hasShort(facts, "b") && !hasShort(facts, "B"));
 
 /** git 接受无歧义的长旗标缩写（`git reset --har` 实测会丢工作区改动）；只在
@@ -1741,13 +1740,13 @@ function isWindowsHost(): boolean {
  *  `${HOME%/*}`、`${HOME/new/old}` 一律先取 $HOME 的值（默认值/修饰只在缺值或做
  *  字符串运算时生效）。bash 展开后删的就是家目录，故与 `$HOME` 同判。
  *  下一字符必须非词字符，否则 `${HOMEBACKUP}` 这类自定义变量会被误当家目录。 */
-const HOME_EXPANSION_RE = /^\$\{HOME(?![A-Za-z0-9_])/u;
+const HOME_EXPANSION_RE = /^\$\{HOME\b/u;
 
 /** 裸变量形态的家目录 `$HOME`、`$HOME/…`。尾闸与上面那条 `${…}` 形**同一条纪律**：
  *  少了它就是 `startsWith("$HOME")` 那个漏网的写法——实测 `rm -rf "$HOME_BACKUP"`、
  *  `"$HOMEBACKUP"` 全被当家目录拦下，而仓内测试早已裁定 `${HOMEBACKUP}` 这类
  *  "以 HOME 起头的别的变量"属纯误拦。两形现在同判。 */
-const HOME_VAR_RE = /^\$HOME(?![A-Za-z0-9_])/u;
+const HOME_VAR_RE = /^\$HOME\b/u;
 
 /**
  * `~user/…` 与 `~user`：**别人**的家目录（本机实测 `/bin/bash` —— `~someone/x` 展开成
@@ -1770,7 +1769,7 @@ const HOME_VAR_RE = /^\$HOME(?![A-Za-z0-9_])/u;
  * 挂归一值上等于一边修洞一边开洞（与 `WINDOWS_TILDE_HOME_PREFIX` 那条同一理由）。
  * 与既有 `~`/`~/` 两条一样**不随方言退出**：pwsh 里 `~bob/x` 也拦，见测试「方言不放松 POSIX 判据」。
  */
-const USER_HOME_RE = /^~[A-Za-z_][A-Za-z0-9_-]*\//u;
+const USER_HOME_RE = /^~[A-Za-z_][\w-]*\//u;
 
 /** 把一枚字面串转成可嵌进正则的形式（家目录里可能有 `.` 或 `+` 这类字符）。 */
 const escapeRegExp = (value: string): string =>
@@ -1789,8 +1788,8 @@ function isDeepHomeDescendant(target: string, home: string): boolean {
   if (!new RegExp(`^${escapeRegExp(home)}${separator}`, "u").test(target)) {
     return false;
   }
-  const rest = target.slice(home.length).replaceAll(/^[/\\]+/gu, "");
-  const segments = rest.split(/[/\\]+/u).filter((part) => part.length > 0);
+  const rest = target.slice(home.length).replaceAll(DANGER_RE.leadingSeparators, "");
+  const segments = rest.split(DANGER_RE.separatorRuns).filter((part) => part.length > 0);
   return segments.length >= 2 && !segments.includes("..");
 }
 
@@ -1966,7 +1965,7 @@ function globRegExp(pattern: string): RegExp {
  */
 function globCouldHitProtected(pattern: string, home: string): boolean {
   // 尾斜杠不改变展开结果（`/e*/` 与 `/e*` 都展开成 `/etc`），但会让同段正则多要一格。
-  const re = globRegExp(pattern.replace(/\/+$/u, ""));
+  const re = globRegExp(pattern.replace(DANGER_RE.trailingSlashes, ""));
   return [home, ...SYSTEM_PATH_PREFIXES].some((probe) => re.test(probe) || re.test(`${probe}/x`));
 }
 
@@ -2111,8 +2110,8 @@ function expandAlphaSequence(alpha: RegExpExecArray | null): string[] | null {
 
 /** `{1..3}` / `{a..c}` 序列；没有序列（含只有一组字面花括号）一律返回 null。 */
 function expandBraceSequence(inner: string): string[] | null {
-  const numeric = /^(?<start>-?\d+)\.\.(?<end>-?\d+)(?:\.\.(?<step>-?\d+))?$/u.exec(inner);
-  const alpha = /^(?<start>[A-Za-z])\.\.(?<end>[A-Za-z])$/u.exec(inner);
+  const numeric = DANGER_RE.braceNumeric.exec(inner);
+  const alpha = DANGER_RE.braceAlpha.exec(inner);
   let out: string[] | null;
   if (numeric === null) {
     out = expandAlphaSequence(alpha);
@@ -2214,7 +2213,7 @@ function isPosixDisasterTargetWord(value: string): boolean {
   // 绝对路径的 glob 形态等价于其目录本身（`/*` → `/`）。
   const posixTarget =
     posixNormalized.startsWith("/") && posixNormalized.includes("*")
-      ? path.posix.join(posixNormalized.replace(/\/?\*+$/u, ""), ".")
+      ? path.posix.join(posixNormalized.replace(DANGER_RE.trailingGlobStars, ""), ".")
       : posixNormalized;
   const home = os.homedir();
   // 家目录下的深层普通后代（`~/.cache/x/y`、`/Users/<user>/project/build`）是日常清理目标：
@@ -2274,7 +2273,7 @@ function isPosixDisasterTarget(value: string): boolean {
  *  正好产出孤立的 `<`，那枚必须留给结构判据（`sh <(curl …)` 靠它认「取回即执行」）。 */
 const RM_REDIRECT_WORD_RE = /^(?:\d*|&)(?:>>?|<<?)(?!\()\S*$/u;
 /** 重定向操作符**自身**是独立词的那一枚（`rm -rf a > b` 里的 `>`、`2> b` 里的 `2>`）。 */
-const RM_REDIRECT_OPERATOR_RE = /^(?:\d*|&)(?:>>?|<<?)(?!\()$/u;
+const RM_REDIRECT_OPERATOR_RE = /^(?:\d*|&)(?:>>?|<<?)$/u;
 /**
  * 这一枚词要跳几格：0 = 普通参数，1 = 重定向整枚（操作数与操作符粘连），
  * 2 = 独立操作符连带它的操作数（操作数从来不是命令的实参）。
@@ -2492,10 +2491,7 @@ function peelBrace(src: string): string | undefined {
   let inner: string | undefined;
   if (body.startsWith("{")) {
     // 闭括号/分号可能是"下一个段"的内容（splitTopLevel 在 ; 处切开），故都按可选处理
-    inner = body
-      .slice(1)
-      .replace(/[;\s}]*$/u, "")
-      .trim();
+    inner = body.slice(1).replace(DANGER_RE.trailingSegmentSeparators, "").trim();
   }
   return inner;
 }
@@ -2506,7 +2502,7 @@ function peelBrace(src: string): string | undefined {
  * `(cd web && npm run dev)` 的内段本身就是独立段。
  */
 function peelSeg(seg: string): string {
-  let src = seg.trim().replace(/^!+\s*/u, "");
+  let src = seg.trim().replace(DANGER_RE.leadingBangs, "");
   for (;;) {
     const inner = peelBrace(src);
     if (inner === undefined) {
@@ -2685,7 +2681,7 @@ const SHELL_BIN_NAMES = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "cs
 const BODY_CARRYING_WRAPPERS = new Set(["su", "runuser"]);
 
 /** shell 的 `-c`，含与短选项的合写（`-lc` / `-ic` / `-xc`）：其后第一词是命令串。 */
-const SHELL_C_FLAG = /^-[A-Za-z]*c[A-Za-z]*$/u;
+const SHELL_C_FLAG = /^-[A-Zabd-z]*c[A-Za-z]*$/u;
 
 /** **PowerShell 家族**段头。`.exe` 形同判是本轮定的口径：`powershell.exe` 才是 Windows 上
  *  模型最常照抄的名字，而"`.exe` 算不算命令词"这条只在这一个家族上放宽——`cmd.exe` 仍
@@ -2851,7 +2847,7 @@ function substitutionMentionsDanger(command: string): boolean {
 }
 
 /** `${IFS}` 的展开值。POSIX 定义是「空格 / 制表符 / 换行」三个字符，这里按空白归一。 */
-const IFS_EXPANSION_RE = /\$\{IFS\}|\$IFS(?![A-Za-z0-9_])/gu;
+const IFS_EXPANSION_RE = /\$\{IFS\}|\$IFS\b/gu;
 
 /**
  * 把 `${IFS}` / `$IFS` 归一成空格。
@@ -3300,7 +3296,7 @@ function looksLikeRegexLiteral(pattern: string): boolean {
   if (last === "/") {
     return true;
   }
-  return /^\/(?:[^/\\]|\\.)+\/[dgimsuvy]*$/u.test(pattern);
+  return DANGER_RE.slashPatternLiteral.test(pattern);
 }
 
 /**

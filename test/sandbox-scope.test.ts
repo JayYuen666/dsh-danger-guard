@@ -21,7 +21,7 @@ import {
   sandboxModeOf,
   sandboxScopeOf,
 } from "../lib/sandbox-scope.ts";
-import type { SandboxScope } from "../lib/sandbox-scope.ts";
+import type { Canonicalize, SandboxScope } from "../lib/sandbox-scope.ts";
 import type { PolicyFacts } from "../lib/mode-policy.ts";
 import { disasterTargetPathOf } from "../lib/danger-rules.ts";
 
@@ -274,6 +274,23 @@ describe("注入 pathApi：同一份判据按 Windows 规则验证（不伪装�
     );
   });
 
+  it("windows 规则：额外可写根与工作区根同时在场 ⇒ 两者之下都不让路", () => {
+    const extraRoot = `D:${bs}granted`;
+    const scope = { mode: WS_MODE, roots: [asOsPath(winRoot), asOsPath(extraRoot)] };
+    assert.equal(
+      sandboxDropsOf(scope, [asOsPath(`${extraRoot}${bs}deep`)], path.win32),
+      false,
+      "额外根之下的删除会真实执行完",
+    );
+    assert.equal(sandboxDropsOf(scope, [asOsPath(`D:${bs}`)], path.win32), false, "盘根包住额外根");
+    assert.equal(
+      sandboxDropsOf(scope, [asOsPath(`${winRoot}${bs}build`)], path.win32),
+      false,
+      "工作区根一侧照旧",
+    );
+    assert.equal(sandboxDropsOf(scope, [asOsPath(`E:${bs}elsewhere`)], path.win32), true, "让路");
+  });
+
   it("两种规则对同一棵树给出一致的结论（避免「只在 Windows 上错」）", () => {
     // ⚠ 这里**必须**用 `path.posix` 自己拼 posix 形态的串，不能拿"平台根"去拼。
     // 我第一版写的是 `path.resolve(process.cwd().root, "w", "proj")` —— 在 Windows 上它
@@ -500,6 +517,102 @@ describe("writableRootsOf：规范化失败的那一枚按 path.resolve 形保�
     // 剩下的两枚候选（`/tmp` 与 TEMP_ROOT）同值且被 identity 桩原样成功，去重后一枚；
     // 期望用字面值而不是 path.resolve，理由同上组。
     assert.deepEqual(scope?.roots, [TEMP_ROOT]);
+  });
+});
+
+/** 额外可写根那一族的宿主面：工作区根 `/ws`，额外根由用例给。 */
+function scopeWithAdditional(
+  additionalWritableRoots: unknown,
+  canonicalize: Canonicalize = identity,
+): SandboxScope | undefined {
+  return sandboxScopeOf(
+    { sandboxMode: WRITABLE_MODE },
+    {
+      resolve: () => ({
+        mode: WRITABLE_MODE,
+        workspaceRoot: WS_ROOT,
+        additionalWritableRoots,
+      }),
+    },
+    undefined,
+    canonicalize,
+    TEMP_ROOT,
+  );
+}
+
+/** 额外可写根那一族的字面量（每枚在本节里出现多次，收常量）。 */
+const EXTRA_ROOT = "/extra/granted";
+const EXTRA_FIRST = "/extra/a";
+const EXTRA_SECOND = "/extra/b";
+const EXTRA_UNRESOLVED = "/extra/gone";
+const READ_ONLY_MODE = "read-only";
+
+describe("additionalWritableRoots：显式授予的目录也是可写根", () => {
+  it("旧宿主不给这一位 ⇒ 根表与只读工作区根时逐字相同", () => {
+    // rc.3 / rc.4 的 SandboxExecutionPolicy 没有此字段，`resolve()` 自然交回 undefined。
+    assert.deepEqual(scopeWithAdditional(undefined)?.roots, [WS_ROOT, TEMP_ROOT]);
+  });
+
+  it("额外根本身进表，排在工作区根之后、临时区之前", () => {
+    assert.deepEqual(scopeWithAdditional([EXTRA_ROOT])?.roots, [WS_ROOT, EXTRA_ROOT, TEMP_ROOT]);
+  });
+
+  it("多枚与重复枚：重复只留一枚", () => {
+    assert.deepEqual(
+      scopeWithAdditional([EXTRA_FIRST, EXTRA_SECOND, EXTRA_FIRST, WS_ROOT])?.roots,
+      [WS_ROOT, EXTRA_FIRST, EXTRA_SECOND, TEMP_ROOT],
+    );
+  });
+
+  it("非字符串条目与数组之外的形状 ⇒ 整份不留 scope", () => {
+    // 丢掉读不出的那一枚等于用不完整的根表推出"沙箱盖得住"，方向是放行。
+    assert.equal(scopeWithAdditional([EXTRA_FIRST, 42, "", null]), undefined);
+    assert.equal(scopeWithAdditional(EXTRA_FIRST), undefined);
+    assert.equal(scopeWithAdditional(null), undefined);
+  });
+
+  it("空数组与缺席同义：没有额外 grant", () => {
+    assert.deepEqual(scopeWithAdditional([])?.roots, [WS_ROOT, TEMP_ROOT]);
+  });
+
+  it("规范化失败的额外根按 path.resolve 形保留，不丢", () => {
+    // 与工作区根同一条口径：丢掉这一枚会让它底下的目标看起来"谁都没包住"。
+    const scope = scopeWithAdditional([EXTRA_UNRESOLVED], (absolute) =>
+      absolute === EXTRA_UNRESOLVED ? undefined : absolute,
+    );
+    assert.deepEqual(scope?.roots, [WS_ROOT, path.resolve(EXTRA_UNRESOLVED), TEMP_ROOT]);
+  });
+
+  it("额外根之下与其祖先的目标都不算被沙箱完全覆盖", () => {
+    const scope = scopeWithAdditional([EXTRA_ROOT]);
+    assert.ok(scope !== undefined);
+    // 目标就是额外根 ⇒ 目标自身可写。
+    assert.equal(sandboxDropsOf(scope, [asOsPath(EXTRA_ROOT)]), false);
+    // 目标在额外根之下 ⇒ 沙箱会真的执行完那段删除。
+    assert.equal(sandboxDropsOf(scope, [asOsPath(`${EXTRA_ROOT}/deep`)]), false);
+    // 目标包住额外根 ⇒ 白名单不提供原子性，边界内那部分先删光。
+    assert.equal(sandboxDropsOf(scope, [asOsPath("/extra")]), false);
+    // 与任何根都无关的目标照常让路。
+    assert.equal(sandboxDropsOf(scope, [asOsPath("/etc/foo")]), true);
+  });
+
+  it("read-only 档不受额外根影响：一切写都被禁，仍判完全覆盖", () => {
+    const scope = sandboxScopeOf(
+      { sandboxMode: WRITABLE_MODE },
+      {
+        resolve: () => ({
+          mode: READ_ONLY_MODE,
+          workspaceRoot: WS_ROOT,
+          additionalWritableRoots: [EXTRA_ROOT],
+        }),
+      },
+      undefined,
+      identity,
+      TEMP_ROOT,
+    );
+    assert.ok(scope !== undefined);
+    assert.equal(scope.mode, READ_ONLY_MODE);
+    assert.equal(sandboxDropsOf(scope, [asOsPath(EXTRA_ROOT)]), true);
   });
 });
 

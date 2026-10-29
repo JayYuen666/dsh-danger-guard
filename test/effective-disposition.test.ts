@@ -97,6 +97,26 @@ describe("effectiveDispositionOf：惰性与覆盖", () => {
     assert.equal(effective.dispositionOf(rmrfWith(["/ws"])), "deny");
     assert.equal(effective.dispositionOf(rmrfWith(["/"])), "deny");
   });
+
+  it("额外可写根不能被判成沙箱会完全阻止修改", () => {
+    const effective = effectiveDispositionOf({
+      facts: FACTS,
+      session: undefined,
+      cwd: undefined,
+      shellRaw: () => ({ sandboxMode: WORKSPACE_MODE }),
+      policyRaw: () => ({
+        resolve: () => ({
+          mode: WORKSPACE_MODE,
+          workspaceRoot: "/ws",
+          additionalWritableRoots: ["/extra/granted"],
+        }),
+      }),
+      canonicalize: (absolutePath) => absolutePath,
+      tempDir: "/tmp",
+    });
+    assert.equal(effective.dispositionOf(rmrfWith(["/extra/granted"])), "deny");
+    assert.equal(effective.dispositionOf(rmrfWith(["/etc/foo"])), "allow");
+  });
 });
 
 describe("effectiveDispositionOf：宿主服务面异常的保守兜底", () => {

@@ -42,9 +42,9 @@ const ALL_NEED_WHY = [
 const OPERABLE: Record<FactNeed, RegExp> = {
   read: /read/iu,
   refs: /grep|glob|zg_search|探查|引用/iu,
-  test: /搜|探查|触达/iu,
-  e2e: /搜|探查|触达/iu,
-  docs: /搜|探查|触达/iu,
+  test: /搜|探查|触达/u,
+  e2e: /搜|探查|触达/u,
+  docs: /搜|探查|触达/u,
 };
 
 // FactDecision 是判别联合（kind: allow|quota|deny|indeterminate）：放行 = allow/quota 两态。
@@ -203,7 +203,7 @@ describe("factGate：强校验状态机", () => {
     const withheld = quotaGate.check("edit", "/w/b.ts", undefined, lower);
     assert.equal(withheld.kind, "deny", "read 未补上，配额不得放行");
     const text = denyMessage(withheld);
-    assert.match(text, /配额放行只免/iu, "文案要说清配额免的是什么");
+    assert.match(text, /配额放行只免/u, "文案要说清配额免的是什么");
     assert.match(text, /read/iu, "文案要指向那一步");
     // 再试一次仍是拒（这条不放行的路不会因为重试次数变多而自行打开）
     assert.equal(quotaGate.check("edit", "/w/b.ts", undefined, lower).kind, "deny");

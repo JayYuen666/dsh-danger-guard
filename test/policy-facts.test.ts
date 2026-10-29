@@ -81,6 +81,20 @@ describe("policyFactsOf：能否询问的三条来源", () => {
     assert.equal(factsFrom(flipped).askable, true, "覆盖为 ask");
   });
 
+  it("overrideOf 必须成方法调用：真实 ApprovalService 的它就是读 this.approvalStateOf", () => {
+    // 假件故意写成依赖 this 的方法：拆下来当裸函数调，this 就是 undefined，
+    // 真实服务里那一句 `this.approvalStateOf(session)` 当场抛 —— 宿主上表现为
+    // 每一次工具调用都死在 "Cannot read properties of undefined (reading 'approvalStateOf')"。
+    const approval = {
+      config: { policy: "ask" },
+      lastOverride: "never",
+      overrideOf(_session: unknown): unknown {
+        return this.lastOverride;
+      },
+    };
+    assert.equal(factsFrom({ ...SANDBOX, approval }).askable, false);
+  });
+
   it("覆盖与配置都读不到 ⇒ 按能问处理（默认策略就是 ask）", () => {
     assert.equal(factsFrom({ ...SANDBOX, approval: {} }).askable, true);
   });

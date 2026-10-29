@@ -11,6 +11,9 @@ import path from "node:path";
 import { asOsPath } from "./path-format.ts";
 import type { OsPath } from "./path-format.ts";
 
+/** 行首是 `~` 或 `$` 的词面：落到哪棵树要展开后才知道。 */
+const LEADING_TILDE_OR_DOLLAR = /^[~$]/u;
+
 /** 落点不可判的词面：glob、brace、反斜杠/Windows 字形、反引号、引号、换行、变量与 `~user`。 */
 function isOpaqueDisasterTarget(word: string): boolean {
   return (
@@ -27,7 +30,7 @@ function isOpaqueDisasterTarget(word: string): boolean {
     word.includes("\n") ||
     word.includes("\r") ||
     word.includes("$") ||
-    /^[~$]/u.test(word)
+    LEADING_TILDE_OR_DOLLAR.test(word)
   );
 }
 

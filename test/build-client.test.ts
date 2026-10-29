@@ -163,9 +163,9 @@ describe("单文件产物的输出守卫", () => {
   });
 });
 
-describe("外部化判据：react 家族只放行宿主 seed 表真有的那四条", () => {
-  it("登记过的四条说明符外置", () => {
-    for (const id of ["react", "react/jsx-runtime", "react-dom", "react-dom/client"]) {
+describe("外部化判据：客户端运行时只放行宿主 seed 表真有的那些", () => {
+  it("登记过的说明符外置", () => {
+    for (const id of ["react", "react/jsx-runtime", "react-dom", "react-dom/client", "zod"]) {
       assert.equal(isExternalModule(id), true, `${id} 应外置`);
     }
   });
@@ -178,8 +178,8 @@ describe("外部化判据：react 家族只放行宿主 seed 表真有的那四�
     }
   });
 
-  it("非 react 家族的第三方模块走常规打包（不外置、不报错）", () => {
-    for (const id of ["zod", "@jayyuen66/dsh-plugin-shared", "./local.ts"]) {
+  it("宿主模块表之外的第三方模块走常规打包（不外置、不报错）", () => {
+    for (const id of ["@jayyuen66/dsh-plugin-shared", "./local.ts", "lodash"]) {
       assert.equal(isExternalModule(id), false, `${id} 应打包进产物`);
     }
   });

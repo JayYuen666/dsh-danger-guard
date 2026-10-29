@@ -6,6 +6,17 @@
 // 系统提供（rolldown external），只用 createElement。
 
 import { createElement, useEffect, useState } from "react";
+import { z } from "zod";
+import {
+  CARD_UI_CSS,
+  CardForm,
+  ListField,
+  NumberField,
+  SaveBar,
+  Section,
+  ToggleField,
+  splitHint,
+} from "@jayyuen66/dsh-plugin-shared/lib/card-ui";
 import type { ReactNode } from "react";
 import type { Context } from "@deepseek-ai/cordis";
 import type { BuiltInLocaleId } from "@deepseek-ai/dsh-client-locale/client";
@@ -64,45 +75,16 @@ const SETTINGS_NS = "danger-guard-settings";
  * （本包刻意有三个串：locale 命名空间 / settings 命名空间 / slot key；slot key 的派发
  * 证据链也随那份单源住在一起）。
  */
-const CARD_CSS = [
-  ".dgc-card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;list-style:none;transition:border-color .16s,background .16s}",
-  ".dgc-card:hover{border-color:var(--dsw-alias-label-dimmed)}",
-  ".dgc-card-open{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}",
-  ".dgc-header{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;background:transparent;border:0;border-radius:12px;align-items:center;gap:12px;padding:14px 16px;display:flex}",
-  ".dgc-head{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}",
-  ".dgc-name{color:var(--dsw-alias-label-primary);font-size:15px;font-weight:600;line-height:1.4}",
-  ".dgc-desc{color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}",
-  ".dgc-chevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}",
-  ".dgc-chevron-open{transform:rotate(180deg)}",
-  ".dgc-body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 16px;padding:8px 0 12px}",
-  ".dgc-row{display:flex;flex-direction:row;justify-content:space-between;align-items:center;gap:12px;padding:9px 0}",
-  ".dgc-label{font-size:13px;color:var(--dsw-alias-label-primary,inherit)}",
-  ".dgc-hint{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f99);line-height:1.5;margin-top:2px}",
-  ".dgc-switch{appearance:none;position:relative;width:34px;height:20px;border-radius:10px;background:var(--dsw-alias-fill-primary,#d8dbe2);transition:background .16s;cursor:pointer;border:0;flex:none}",
-  '.dgc-switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--dsw-alias-bg-layer-1,#fff);transition:left .16s}',
-  ".dgc-switch-on{background:var(--dsw-alias-brand-primary,#e07856)}",
-  ".dgc-switch-on::after{left:16px}",
-  ".dgc-switch:disabled{cursor:not-allowed;opacity:.6}",
-  ".dgc-input{width:100%;box-sizing:border-box;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:1px solid var(--dsw-alias-border-l2,transparent);border-radius:8px;padding:6px 8px;margin-top:4px}",
-  ".dgc-numinput{width:64px;box-sizing:border-box;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:1px solid var(--dsw-alias-border-l2,transparent);border-radius:8px;padding:6px 8px;margin-top:4px;text-align:center}",
-  ".dgc-textarea{width:100%;box-sizing:border-box;font:inherit;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:1px solid var(--dsw-alias-border-l2,transparent);border-radius:8px;padding:6px 8px;margin-top:4px;resize:vertical;font-family:ui-monospace,SFMono-Regular,monospace}",
-  // 保存条（改动先暂存，点「保存」才写入生效；「撤销」丢弃本地改动）
-  ".dgc-stats{border-top:1px dashed var(--dsw-alias-border-l2);margin-top:6px;padding-top:4px}",
-  ".dgc-savebar{display:flex;gap:8px;align-items:center;padding:10px 0 2px;border-top:1px dashed var(--dsw-alias-border-l2);margin-top:6px;flex-wrap:wrap}",
-  ".dgc-btn{appearance:none;font:inherit;font-size:12px;cursor:pointer;border-radius:6px;padding:4px 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1,transparent);color:var(--dsw-alias-label-primary,inherit)}",
-  ".dgc-btn:hover:not(:disabled){border-color:var(--dsw-alias-label-dimmed)}",
-  ".dgc-btn-primary{background:var(--dsw-alias-brand-primary,#e07856);border-color:var(--dsw-alias-brand-primary,#e07856);color:var(--dsw-alias-label-primary-foreground,#fff)}",
-  ".dgc-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#e07856);outline-offset:1px}",
-  ".dgc-btn:disabled{opacity:.5;cursor:not-allowed}",
-  ".dgc-dirty{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f99)}",
-  ".dgc-saveerr{font-size:12px;color:#c4483f}",
+/** 统计块保留自己的紧凑样式：它是只读领域内容，不是表单字段。颜色一律走主题令牌。 */
+const STATS_CSS = [
+  ".dgc-stats{padding:12px 0;border-top:.5px solid var(--dsw-alias-border-l2)}",
+  ".dgc-row{display:flex;align-items:center;justify-content:space-between;gap:12px}",
+  ".dgc-label{font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}",
+  ".dgc-hint{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary);margin-top:2px}",
 ].join("\n");
 
 /** 错误色那一格：保存失败与统计读取失败共用（`sonarjs/no-duplicate-string` 盯着重复字面量）。 */
 const ERROR_CLASS = "dgc-saveerr";
-
-/** SVG path 的 path-data 属性键（`d` 单字符过短被 id-length 拦截，用常量间接触达）。 */
-const SVG_PATH_KEY = "d";
 
 /**
  * 客户端配置面直接取官方声明：`@deepseek-ai/dsh-client-ui-settings/client` 交出的
@@ -144,466 +126,235 @@ interface CardSnapshot extends Pick<ConfigPageForm["state"], "status" | "writabl
   value: Record<string, unknown>;
 }
 
-interface ToggleRowProps {
-  label: string;
-  hint: string;
-  checked: boolean;
-  /** 稳定锚点（与 ListInputRow 同约定）：测试/样式按字段定位控件，不依赖行序与中文文案。 */
-  field: string;
-  /** 快照未 ready（loading/unavailable）时禁用——免得向未就绪的表单写。 */
-  disabled?: boolean;
-  onToggle: () => void;
-}
+/** 三个数值字段的 zod 形状：与 host schema 的 `natural().min/max` 同源；
+ *  UI 那侧的 `max` 只是输入框的展示上限，不反过来约束 host 接受的值。 */
+const MAX_DENIES_SCHEMA = z.int().min(1).max(5);
+const SMALL_EDIT_CHARS_SCHEMA = z.int().min(1);
+const BIG_EDIT_CHARS_SCHEMA = z.int().min(2);
 
-function ToggleRow(props: ToggleRowProps): ReactNode {
-  return createElement(
-    "div",
-    { className: "dgc-row" },
-    createElement(
-      "div",
-      null,
-      createElement("div", { className: "dgc-label" }, props.label),
-      createElement("div", { className: "dgc-hint" }, props.hint),
-    ),
-    createElement("button", {
-      type: "button",
-      className: `dgc-switch${props.checked ? " dgc-switch-on" : ""}`,
-      role: "switch",
-      "aria-checked": props.checked,
-      "data-field": props.field,
-      disabled: props.disabled === true ? true : undefined,
-      onClick: props.onToggle,
-    }),
-  );
-}
-
-interface ListInputRowProps {
-  label: string;
-  hint: string;
-  field: string;
-  value: unknown;
-  /** 取文案（未给 placeholder 的行用字典里的通用占位）。 */
-  t: Translate;
-  /** 条目分隔：'newline'（textarea，每行一条，适合含逗号的正则）| 'comma'（单行输入）。 */
-  separator?: "newline" | "comma";
-  placeholder?: string;
-  /** 快照未 ready 时禁用输入（与开关同理）。 */
-  disabled?: boolean;
-  onChange: (field: string, list: string[]) => void;
-}
-
-/** 词表/模式输入行：设置数组 ↔ UI 串（词表可配置）。
- *  保存条模式：本行只上报草稿（onChange），写入统一由「保存」触发——
- *  旧实现的 300ms 防抖直写 + 卸载 flush 整体移除。 */
-function ListInputRow(props: ListInputRowProps): ReactNode {
-  const multiline = props.separator === "newline";
-  const splitEntries = (raw: string): string[] =>
-    raw
-      .split(multiline ? "\n" : ",")
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0);
-  const list = Array.isArray(props.value)
-    ? (props.value as unknown[]).filter((x): x is string => typeof x === "string")
-    : [];
-  const external = list.join(multiline ? "\n" : ", ");
-  // 占位先取成变量：t() 嵌进 createElement 的对象字面量里会超 max-nested-calls 上限。
-  const inputPlaceholder = props.placeholder ?? props.t("listPlaceholder");
-  const [text, setText] = useState(external);
-  // 外部值变化（别处写入/快照刷新）时回同步——但正打字时不抢光标。
-  const [focused, setFocused] = useState(false);
-  useEffect(() => {
-    if (!focused) {
-      setText(external);
-    }
-  }, [external, focused]);
-  return createElement(
-    "div",
-    { className: "dgc-row" },
-    createElement(
-      "div",
-      null,
-      createElement("div", { className: "dgc-label" }, props.label),
-      createElement("div", { className: "dgc-hint" }, props.hint),
-      createElement(multiline ? "textarea" : "input", {
-        className: multiline ? "dgc-textarea" : "dgc-input",
-        // 稳定锚点：卡片新增/调整行序时，测试与样式都不必再依赖"第几个 .dgc-input"。
-        "data-field": props.field,
-        value: text,
-        disabled: props.disabled === true ? true : undefined,
-        placeholder: inputPlaceholder,
-        onFocus: () => {
-          setFocused(true);
-        },
-        onBlur: () => {
-          setFocused(false);
-        },
-        onChange: (event: { target: { value: string } }) => {
-          const next = event.target.value;
-          setText(next);
-          props.onChange(props.field, splitEntries(next));
-        },
-      }),
-    ),
-  );
-}
-
-/** 数字输入行：单个整数设置（强校验参数，如 maxDenies 放行次数）。
- *  未配置时显示 fallback（单源默认值），不是 min——min 只是合法下界。 */
-function NumberInputRow(props: {
-  label: string;
-  hint: string;
-  field: string;
-  value: unknown;
-  fallback: number;
-  min: number;
-  max: number;
-  disabled?: boolean;
-  onChange: (value: number) => void;
-}): ReactNode {
-  const num =
-    typeof props.value === "number" && Number.isFinite(props.value) ? props.value : props.fallback;
-  const [text, setText] = useState(String(num));
-  const [focused, setFocused] = useState(false);
-  // 外部值变化（设置卡写回/快照刷新）时回同步——正打字时不抢光标。
-  useEffect(() => {
-    if (!focused) {
-      setText(String(num));
-    }
-  }, [num, focused]);
-  return createElement(
-    "div",
-    { className: "dgc-row" },
-    createElement(
-      "div",
-      null,
-      createElement("div", { className: "dgc-label" }, props.label),
-      createElement("div", { className: "dgc-hint" }, props.hint),
-    ),
-    createElement("input", {
-      type: "number",
-      min: props.min,
-      max: props.max,
-      className: "dgc-numinput",
-      "data-field": props.field,
-      value: text,
-      disabled: props.disabled === true ? true : undefined,
-      onFocus: () => {
-        setFocused(true);
-      },
-      onBlur: () => {
-        setFocused(false);
-      },
-      onChange: (event: { target: { value: string } }) => {
-        const raw = event.target.value;
-        setText(raw);
-        const numValue = Number(raw);
-        if (Number.isFinite(numValue) && numValue >= props.min && numValue <= props.max) {
-          props.onChange(Math.trunc(numValue));
-        }
-      },
-    }),
-  );
-}
-
-/**
- * 快照值 → 字符串名单。非数组（字段未配置 / 持久段被手改成标量）回落 fallback 默认名单，
- * 与 host 的 `strArray(...) ?? DEFAULT_*` 读取口径**同形**——卡片显示"空"而门禁其实按默认
- * 判，就会把说明与判定分成两张皮；显式空数组则照实返回 []（用户的选择）。
- */
-const nameListOf = (value: unknown, fallback: readonly string[]): string[] =>
-  Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === "string")
-    : [...fallback];
-
-interface SaveBarProps {
-  dirty: boolean;
-  writable: boolean;
-  busy: boolean;
-  error: string | null;
-  t: Translate;
-  onSave: () => void;
-  onDiscard: () => void;
-}
-
-/** 保存条状态文案（可写 + 草稿状态四象限）。 */
-function dirtyText(t: Translate, writable: boolean, dirty: boolean): string {
-  if (!writable) {
-    return t("statusReadOnly");
+/** zod 4.6 的 `.minValue`/`.maxValue` 是折叠后的边界；null 表示该方向没声明。 */
+function boundsOf(schema: z.ZodNumber): { readonly min?: number; readonly max?: number } {
+  const bounds: { min?: number; max?: number } = {};
+  if (schema.minValue !== null) {
+    bounds.min = schema.minValue;
   }
-  return dirty ? t("statusDirty") : t("statusClean");
+  if (schema.maxValue !== null) {
+    bounds.max = schema.maxValue;
+  }
+  return bounds;
 }
 
-function SaveBar(props: SaveBarProps): ReactNode {
-  const { t } = props;
-  const dis = !props.writable || props.busy;
-  const statusText = props.error ?? dirtyText(t, props.writable, props.dirty);
-  const statusClass = props.error === null ? "dgc-dirty" : ERROR_CLASS;
-  return createElement(
-    "div",
-    { className: "dgc-savebar" },
-    createElement(
-      "button",
-      {
-        type: "button",
-        className: "dgc-btn dgc-btn-primary",
-        "data-field": "save",
-        disabled: dis || !props.dirty,
-        onClick: props.onSave,
-      },
-      props.busy ? t("saving") : t("save"),
-    ),
-    createElement(
-      "button",
-      {
-        type: "button",
-        className: "dgc-btn",
-        "data-field": "discard",
-        disabled: dis || !props.dirty,
-        onClick: props.onDiscard,
-      },
-      t("revert"),
-    ),
-    createElement("span", { className: statusClass }, statusText),
-  );
+const MAX_DENIES_BOUNDS = boundsOf(MAX_DENIES_SCHEMA);
+
+/** 数字字段的兜底显示：只有通过 zod 形状的值才交给输入框，其余展示 schema 默认值。 */
+function numberValue(value: unknown, fallback: number, schema: z.ZodNumber): number {
+  const parsed = schema.safeParse(value);
+  return parsed.success ? parsed.data : fallback;
 }
 
-interface DgCardProps {
-  /** 取文案（官方 ctx.locale.bind 的结果，见 apply）。 */
-  t: Translate;
-  /** 读一次宿主侧判定统计；`undefined` = 这个部署没装 Remote 面（那一段显示"读不到"）。 */
-  readStats?: () => Promise<StatsSnapshot>;
-  useCard: <Out>(selector: (snap: CardSnapshot) => Out) => Out;
-  set: (field: string, value: unknown) => Promise<void>;
-  unset: (field: string) => Promise<void>;
+/** 名单字段的取值：非数组按空表降级；refTools 两行另有内置默认名单兜底。 */
+function listValue(value: unknown, fallback: readonly string[] = []): readonly string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : fallback;
 }
 
-/** 一列设置行的渲染上下文：可写位 + 草稿优先的取值 + 写草稿 + 取文案。
- *  行族与表头原本长在 DgCard 体内，提到模块层后它们只要这一枚入参（各自也只有它）。 */
-interface RowCtx {
-  t: Translate;
-  writable: boolean;
-  /** 渲染取值：touched 优先，快照兜底（未触碰字段实时跟随外部快照）。 */
-  eff: (field: string) => unknown;
-  setField: (field: string, val: unknown) => void;
-}
-
-/** 表头（标题 + 说明 + 折叠箭头），拆成独立函数以压低 createElement 嵌套深度
- *  （t() 嵌进 createElement 里再叠上 className 模板就超 unicorn/max-nested-calls 上限）。 */
-function cardHeader(t: Translate, open: boolean, onToggleOpen: () => void): ReactNode {
-  const headTitle = t("cardTitle");
-  const headDesc = t("cardDescription");
-  return createElement(
-    "button",
-    {
-      type: "button",
-      className: "dgc-header",
-      "aria-expanded": open,
-      onClick: onToggleOpen,
-    },
-    createElement(
-      "div",
-      { className: "dgc-head" },
-      createElement("div", { className: "dgc-name" }, headTitle),
-      createElement("div", { className: "dgc-desc" }, headDesc),
-    ),
-    createElement(
-      "svg",
-      {
-        width: 14,
-        height: 14,
-        viewBox: "0 0 14 14",
-        "aria-hidden": true,
-        className: `dgc-chevron${open ? " dgc-chevron-open" : ""}`,
-      },
-      createElement("path", {
-        [SVG_PATH_KEY]: "M3 5l4 4 4-4",
-        fill: "none",
-        stroke: "currentColor",
-        strokeWidth: 1.5,
-        strokeLinecap: "round",
-        strokeLinejoin: "round",
-      }),
-    ),
-  );
-}
-
-/** 开关/阈值族（总开关、事实门、放行次数、严格模式、两份写面阈值）。 */
-function gateRows(rc: RowCtx): ReactNode[] {
-  const { t, writable, eff, setField } = rc;
-  // 事实门 hint 里点名的检索工具来自**生效名单**（草稿优先、快照兜底），与 host 的
-  // refSearchTools 读取口径同源：门禁认什么工具，说明里就只写什么工具。
-  const refTools = nameListOf(eff("refSearchTools"), DEFAULT_REF_SEARCH_TOOLS);
+/** 拦截小节：总开关 + 首次编辑事实门。 */
+function buildBlockSection(props: SectionInputs): ReactNode {
+  const { t, writable, eff, setField } = props;
+  const disabled = !writable;
+  const refTools = listValue(eff("refSearchTools"), DEFAULT_REF_SEARCH_TOOLS);
   const refToolsText = refTools.length > 0 ? refTools.join("/") : t("refToolsEmpty");
-  // 带插值的三行先取成变量：t(key, params) 嵌进 createElement 的对象字面量里会超
-  // unicorn/max-nested-calls 上限（createElement → t → 取值）。
   const factGateHint = t("factGateHint", { tools: refToolsText });
-  const smallHint = t("smallHint", { chars: DEFAULT_SMALL_EDIT_CHARS });
-  const bigHint = t("bigHint", { chars: DEFAULT_BIG_EDIT_CHARS });
-  const rowEnabled = createElement(ToggleRow, {
+  const enabled = createElement(ToggleField, {
     label: t("enabledLabel"),
-    hint: t("enabledHint"),
+    ...splitHint(t("enabledHint")),
     field: "enabled",
     checked: eff("enabled") !== false,
-    disabled: !writable,
-    onToggle: () => {
-      setField("enabled", eff("enabled") === false);
+    disabled,
+    onChange: (next: boolean): void => {
+      setField("enabled", next);
     },
   });
-  const rowFactGate = createElement(ToggleRow, {
+  const factGate = createElement(ToggleField, {
     label: t("factGateLabel"),
-    hint: factGateHint,
+    ...splitHint(factGateHint),
     field: "factGateEnabled",
     checked: eff("factGateEnabled") !== false,
-    disabled: !writable,
-    onToggle: () => {
-      setField("factGateEnabled", eff("factGateEnabled") === false);
+    disabled,
+    onChange: (next: boolean): void => {
+      setField("factGateEnabled", next);
     },
   });
-  const rowJudgeStats = createElement(ToggleRow, {
-    label: t("statsLabel"),
-    hint: t("statsHint"),
-    field: "judgeStats",
-    checked: eff("judgeStats") !== false,
-    disabled: !writable,
-    onToggle: () => {
-      setField("judgeStats", eff("judgeStats") === false);
-    },
-  });
-  const rowMaxDenies = createElement(NumberInputRow, {
-    label: t("maxDeniesLabel"),
-    hint: t("maxDeniesHint"),
-    field: "maxDenies",
-    value: eff("maxDenies"),
-    fallback: DEFAULT_MAX_DENIES,
-    min: 1,
-    max: 5,
-    disabled: !writable,
-    onChange: (num) => {
-      setField("maxDenies", num);
-    },
-  });
-  const rowStrict = createElement(ToggleRow, {
-    label: t("strictLabel"),
-    hint: t("strictHint"),
-    field: "strictMode",
-    checked: eff("strictMode") === true,
-    disabled: !writable,
-    onToggle: () => {
-      setField("strictMode", eff("strictMode") !== true);
-    },
-  });
-  const rowSmall = createElement(NumberInputRow, {
-    label: t("smallLabel"),
-    hint: smallHint,
-    field: "smallEditChars",
-    value: eff("smallEditChars"),
-    fallback: DEFAULT_SMALL_EDIT_CHARS,
-    min: 1,
-    max: 2000,
-    disabled: !writable,
-    onChange: (num) => {
-      setField("smallEditChars", num);
-    },
-  });
-  const rowBig = createElement(NumberInputRow, {
-    label: t("bigLabel"),
-    hint: bigHint,
-    field: "bigEditChars",
-    value: eff("bigEditChars"),
-    fallback: DEFAULT_BIG_EDIT_CHARS,
-    min: 2,
-    max: 100_000,
-    disabled: !writable,
-    onChange: (num) => {
-      setField("bigEditChars", num);
-    },
-  });
-  return [rowEnabled, rowFactGate, rowJudgeStats, rowMaxDenies, rowStrict, rowSmall, rowBig];
+  return createElement(Section, { title: t("blockSection") }, enabled, factGate);
 }
 
-/** 名单/词表族（引用取证两份名单、测试目录、两份 dev 词表、密钥路径正则）。
- *  引用取证两行吃**回退显示**：值缺失/非数组（快照未受理、持久段被手改坏）时显示内置
- *  默认名单——host 的 `strArray(...) ?? DEFAULT_*` 在同一形状下按默认名单判定，卡片若
- *  显示"空"，说明与判定就是两张皮；显式 `[]` 照实显示（那是用户的显式选择）。 */
-function vocabRows(rc: RowCtx): ReactNode[] {
-  const { t, writable, eff, setField } = rc;
+/** 判定与放行小节：统计开关、放行次数、严格模式。 */
+function buildJudgeSection(props: SectionInputs): ReactNode {
+  const { t, writable, eff, setField } = props;
+  const disabled = !writable;
+  const judgeStats = createElement(ToggleField, {
+    label: t("statsLabel"),
+    ...splitHint(t("statsHint")),
+    field: "judgeStats",
+    checked: eff("judgeStats") !== false,
+    disabled,
+    onChange: (next: boolean): void => {
+      setField("judgeStats", next);
+    },
+  });
+  const maxDenies = createElement(NumberField, {
+    label: t("maxDeniesLabel"),
+    ...splitHint(t("maxDeniesHint")),
+    field: "maxDenies",
+    value: numberValue(eff("maxDenies"), DEFAULT_MAX_DENIES, MAX_DENIES_SCHEMA),
+    ...MAX_DENIES_BOUNDS,
+    step: 1,
+    unit: t("unitTimes"),
+    invalidHint: t("outOfRange"),
+    disabled,
+    onChange: (next: number | undefined): void => {
+      setField("maxDenies", next);
+    },
+  });
+  const strict = createElement(ToggleField, {
+    label: t("strictLabel"),
+    ...splitHint(t("strictHint")),
+    field: "strictMode",
+    checked: eff("strictMode") === true,
+    disabled,
+    onChange: (next: boolean): void => {
+      setField("strictMode", next);
+    },
+  });
+  return createElement(Section, { title: t("judgeSection") }, judgeStats, maxDenies, strict);
+}
+
+/** 分级规则小节：两份写面阈值 + 六份名单/词表。 */
+function buildRulesSection(props: SectionInputs): ReactNode {
+  const { t, writable, eff, setField } = props;
+  const disabled = !writable;
+  const smallHint = t("smallHint", { chars: DEFAULT_SMALL_EDIT_CHARS });
+  const bigHint = t("bigHint", { chars: DEFAULT_BIG_EDIT_CHARS });
   const refToolsHint = t("refToolsHint", { tools: DEFAULT_REF_SEARCH_TOOLS.join("/") });
-  const rowRefTools = createElement(ListInputRow, {
-    t,
+  const listPlaceholder = t("listPlaceholder");
+  const small = createElement(NumberField, {
+    label: t("smallLabel"),
+    ...splitHint(smallHint),
+    field: "smallEditChars",
+    value: numberValue(eff("smallEditChars"), DEFAULT_SMALL_EDIT_CHARS, SMALL_EDIT_CHARS_SCHEMA),
+    ...(SMALL_EDIT_CHARS_SCHEMA.minValue === null ? {} : { min: SMALL_EDIT_CHARS_SCHEMA.minValue }),
+    max: 2000,
+    step: 1,
+    unit: t("unitChars"),
+    invalidHint: t("outOfRange"),
+    disabled,
+    onChange: (next: number | undefined): void => {
+      setField("smallEditChars", next);
+    },
+  });
+  const big = createElement(NumberField, {
+    label: t("bigLabel"),
+    ...splitHint(bigHint),
+    field: "bigEditChars",
+    value: numberValue(eff("bigEditChars"), DEFAULT_BIG_EDIT_CHARS, BIG_EDIT_CHARS_SCHEMA),
+    ...(BIG_EDIT_CHARS_SCHEMA.minValue === null ? {} : { min: BIG_EDIT_CHARS_SCHEMA.minValue }),
+    max: 100_000,
+    step: 1,
+    unit: t("unitChars"),
+    invalidHint: t("outOfRange"),
+    disabled,
+    onChange: (next: number | undefined): void => {
+      setField("bigEditChars", next);
+    },
+  });
+  const refTools = createElement(ListField, {
     label: t("refToolsLabel"),
-    hint: refToolsHint,
+    ...splitHint(refToolsHint),
     field: "refSearchTools",
-    value: nameListOf(eff("refSearchTools"), DEFAULT_REF_SEARCH_TOOLS),
-    disabled: !writable,
-    onChange: (field, list) => {
-      setField(field, list);
+    value: listValue(eff("refSearchTools"), DEFAULT_REF_SEARCH_TOOLS),
+    placeholder: listPlaceholder,
+    disabled,
+    onChange: (next: readonly string[]): void => {
+      setField("refSearchTools", next);
     },
   });
-  const rowRefStrictTools = createElement(ListInputRow, {
-    t,
+  const refStrict = createElement(ListField, {
     label: t("refStrictLabel"),
-    hint: t("refStrictHint"),
+    ...splitHint(t("refStrictHint")),
     field: "refSearchStrictTools",
-    value: nameListOf(eff("refSearchStrictTools"), DEFAULT_REF_SEARCH_STRICT_TOOLS),
-    disabled: !writable,
-    onChange: (field, list) => {
-      setField(field, list);
+    value: listValue(eff("refSearchStrictTools"), DEFAULT_REF_SEARCH_STRICT_TOOLS),
+    placeholder: listPlaceholder,
+    disabled,
+    onChange: (next: readonly string[]): void => {
+      setField("refSearchStrictTools", next);
     },
   });
-  const rowTestDirs = createElement(ListInputRow, {
-    t,
+  const testDirs = createElement(ListField, {
     label: t("testDirsLabel"),
-    hint: t("testDirsHint"),
+    ...splitHint(t("testDirsHint")),
     field: "extraTestDirs",
-    value: eff("extraTestDirs"),
-    disabled: !writable,
-    onChange: (field, list) => {
-      setField(field, list);
+    value: listValue(eff("extraTestDirs")),
+    placeholder: listPlaceholder,
+    disabled,
+    onChange: (next: readonly string[]): void => {
+      setField("extraTestDirs", next);
     },
   });
-  const rowDevWords = createElement(ListInputRow, {
-    t,
+  const devWords = createElement(ListField, {
     label: t("devWordsLabel"),
-    hint: t("devWordsHint"),
+    ...splitHint(t("devWordsHint")),
     field: "extraDevServerWords",
-    value: eff("extraDevServerWords"),
-    disabled: !writable,
-    onChange: (field, list) => {
-      setField(field, list);
+    value: listValue(eff("extraDevServerWords")),
+    placeholder: listPlaceholder,
+    disabled,
+    onChange: (next: readonly string[]): void => {
+      setField("extraDevServerWords", next);
     },
   });
-  const rowDevRunArgs = createElement(ListInputRow, {
-    t,
+  const devRunArgs = createElement(ListField, {
     label: t("devRunArgsLabel"),
-    hint: t("devRunArgsHint"),
+    ...splitHint(t("devRunArgsHint")),
     field: "extraDevRunArgs",
-    value: eff("extraDevRunArgs"),
-    disabled: !writable,
-    onChange: (field, list) => {
-      setField(field, list);
+    value: listValue(eff("extraDevRunArgs")),
+    placeholder: listPlaceholder,
+    disabled,
+    onChange: (next: readonly string[]): void => {
+      setField("extraDevRunArgs", next);
     },
   });
-  const rowSecretPatterns = createElement(ListInputRow, {
-    t,
+  const secretPatterns = createElement(ListField, {
     label: t("secretLabel"),
-    hint: t("secretHint"),
+    ...splitHint(t("secretHint")),
     field: "extraSecretPatterns",
-    value: eff("extraSecretPatterns"),
+    value: listValue(eff("extraSecretPatterns")),
     separator: "newline",
     placeholder: t("secretPlaceholder"),
-    disabled: !writable,
-    onChange: (field, list) => {
-      setField(field, list);
+    disabled,
+    onChange: (next: readonly string[]): void => {
+      setField("extraSecretPatterns", next);
     },
   });
-  return [
-    rowRefTools,
-    rowRefStrictTools,
-    rowTestDirs,
-    rowDevWords,
-    rowDevRunArgs,
-    rowSecretPatterns,
-  ];
+  return createElement(
+    Section,
+    { title: t("rulesSection") },
+    small,
+    big,
+    refTools,
+    refStrict,
+    testDirs,
+    devWords,
+    devRunArgs,
+    secretPatterns,
+  );
+}
+
+/** 三个小节的入参。 */
+interface SectionInputs {
+  t: Translate;
+  writable: boolean;
+  eff: (field: string) => unknown;
+  setField: (field: string, value: unknown) => void;
 }
 
 /** 一条读数的形状：`面名 12 · 键名 3`（各行的取值都过这里）。 */
@@ -752,26 +503,27 @@ function StatsBlock(props: {
   );
 }
 
+interface DgCardProps {
+  /** 取文案（官方 ctx.locale.bind 的结果，见 apply）。 */
+  t: Translate;
+  /** 读一次宿主侧判定统计；`undefined` = 这个部署没装 Remote 面（那一段显示"读不到"）。 */
+  readStats?: () => Promise<StatsSnapshot>;
+  useCard: <Out>(selector: (snap: CardSnapshot) => Out) => Out;
+  set: (field: string, value: unknown) => Promise<void>;
+  unset: (field: string) => Promise<void>;
+}
+
 function DgCard(props: DgCardProps): ReactNode {
   const { t } = props;
-  const [open, setOpen] = useState(false);
-  // 框架把 slots.register 注入的 hooks.card 映射为 useCard prop（client-runner PropsHooks）——
-  // 直接读 props.hooks.card 会崩（props.hooks 不存在）。与 ctx-observe / quality-gate 卡同契约。
-  // 快照出自本包 cardStore.getSnapshot()（见文件末尾的 `hooks: { card: store }`）：
-  // 它总是现造一枚完整的 CardSnapshot，value 也在那儿落好兜底，故这里不再判空。
   const snap = props.useCard((current) => current);
   const { value } = snap;
-  // 官方快照的 writable 是必选 boolean（memory 模式永假），故直接取值即可，
-  // 不再 `=== true` 假装它可能是别的形状；status==='ready' 仍是必要前置
-  //（loading/unavailable 时快照未就绪或命名空间未服务——禁用写入控件）。
   const writable = snap.status === "ready" && snap.writable;
-  // 保存条状态：touched = 用户动过的字段（undefined = 恢复默认/unset）
   const [touched, setTouched] = useState<Record<string, unknown>>({});
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  /** 渲染取值：touched 优先，快照兜底（未触碰字段实时跟随外部快照）。 */
   const eff = (field: string): unknown => (field in touched ? touched[field] : value[field]);
-  const dirty = diffTouched(touched, value).length > 0;
+  const dirtyKeys = diffTouched(touched, value);
+  const dirty = dirtyKeys.length > 0;
   const setField = (field: string, val: unknown): void => {
     setTouched((prev) => ({ ...prev, [field]: val }));
   };
@@ -786,9 +538,6 @@ function DgCard(props: DgCardProps): ReactNode {
       const val = touched[key];
       return val === undefined ? props.unset(key) : props.set(key, val);
     });
-    // allSettled 而不是 all：批量保存里一枚字段传输失败，其余字段**已经落盘**——
-    // 只把失败的那几个留在草稿里（重试只写它们），成功的不再重复写，也不会出现
-    // "界面回滚但磁盘已部分生效"的分叉。
     const results = await Promise.allSettled(ops);
     const failed: string[] = [];
     let firstReason: unknown;
@@ -822,34 +571,28 @@ function DgCard(props: DgCardProps): ReactNode {
     setTouched({});
     setSaveError(null);
   };
-  const rc: RowCtx = { t, writable, eff, setField };
-  // 各设置行（各自独立 createElement，避免最终返回式里层层嵌套超深）。
-  const body = createElement(
-    "ul",
-    { className: "dgc-body" },
-    ...gateRows(rc),
-    ...vocabRows(rc),
-    createElement(StatsBlock, { t, read: props.readStats }),
-    createElement(SaveBar, {
-      t,
-      dirty,
-      writable,
-      busy,
-      error: saveError,
-      onSave: () => {
-        void save();
-      },
-      onDiscard: discard,
-    }),
-  );
-  return createElement(
-    "li",
-    { className: `dgc-card${open ? " dgc-card-open" : ""}` },
-    cardHeader(t, open, () => {
-      setOpen(!open);
-    }),
-    open ? body : null,
-  );
+  const inputs: SectionInputs = { t, writable, eff, setField };
+  const block = buildBlockSection(inputs);
+  const judge = buildJudgeSection(inputs);
+  const rules = buildRulesSection(inputs);
+  const stats = createElement(StatsBlock, { t, read: props.readStats });
+  const saveBar = createElement(SaveBar, {
+    dirty,
+    busy,
+    writable,
+    error: saveError,
+    saveLabel: t("save"),
+    savingLabel: t("saving"),
+    revertLabel: t("revert"),
+    dirtyLabel: t("dirtyCount", { count: dirtyKeys.length }),
+    cleanLabel: t("statusClean"),
+    readOnlyLabel: t("statusReadOnly"),
+    onSave: () => {
+      void save();
+    },
+    onDiscard: discard,
+  });
+  return createElement(CardForm, null, block, judge, rules, stats, saveBar);
 }
 
 /**
@@ -961,8 +704,8 @@ const inject = ["slots", "configForms", "locale"];
 function apply(ctx: ClientCtx): void {
   ctx.effect(() => {
     const tag = document.createElement("style");
-    tag.id = "danger-guard-card-css";
-    tag.textContent = CARD_CSS;
+    tag.id = "dsh-card-ui-css-danger-guard";
+    tag.textContent = `${STATS_CSS}\n${CARD_UI_CSS}`;
     document.head.append(tag);
     return () => {
       tag.remove();

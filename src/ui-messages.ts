@@ -18,6 +18,13 @@ export interface UiMessages {
   /** 卡片副标题：一句话说明本包做什么。 */
   readonly cardDescription: string;
   /** 作用域只读（非 loopback 页面）时的状态条文本。 */
+  readonly blockSection: string;
+  readonly judgeSection: string;
+  readonly rulesSection: string;
+  readonly unitTimes: string;
+  readonly unitChars: string;
+  readonly outOfRange: string;
+  readonly dirtyCount: string;
   readonly statusReadOnly: string;
   /** 有未保存改动时的状态条文本。 */
   readonly statusDirty: string;
@@ -151,6 +158,13 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     cardTitle: "danger-guard 危险拦截",
     cardDescription:
       "危险命令物理拦截（git 钩子绕过/灾难删除/下载即执行/长驻 dev server/密钥编辑）+ 首次编辑事实强制门（ECC gateguard 移植）",
+    blockSection: "拦截",
+    judgeSection: "判定与放行",
+    rulesSection: "分级规则",
+    unitTimes: "次",
+    unitChars: "字符",
+    outOfRange: "超出允许范围，未保存",
+    dirtyCount: "已修改 {count} 项",
     statusReadOnly: "当前作用域只读",
     statusDirty: "有未保存的修改，点「保存」生效",
     statusClean: "无未保存的修改",
@@ -215,6 +229,13 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     cardTitle: "danger-guard danger block",
     cardDescription:
       "Physical blocking of dangerous commands (git hook bypass / catastrophic delete / download-and-run / long-running dev server / secret edits) + first-edit fact gate (ported from ECC gateguard)",
+    blockSection: "Blocking",
+    judgeSection: "Judgment and release",
+    rulesSection: "Tier rules",
+    unitTimes: "times",
+    unitChars: "chars",
+    outOfRange: "Out of the allowed range — not saved",
+    dirtyCount: "{count} changed",
     statusReadOnly: "This scope is read-only",
     statusDirty: "Unsaved changes - press Save to apply",
     statusClean: "No unsaved changes",

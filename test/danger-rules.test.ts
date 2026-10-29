@@ -2685,8 +2685,8 @@ describe("b10 反例：pwsh 参数名不得被当成短旗标簇（终审 Import
 
   it("夹具自证：两条靶串真是 Windows 盘符形态，折掉反斜杠就不再拦", () => {
     // 正向：字面上确实带反斜杠分隔的盘符路径。
-    assert.match(file, /^[A-Za-z]:\\[^\s]+$/u);
-    assert.match(userTree, /^[A-Za-z]:\\[^\s]+$/u);
+    assert.match(file, /^[A-Za-z]:\\\S+$/u);
+    assert.match(userTree, /^[A-Za-z]:\\\S+$/u);
     // 反向哨兵：同一串把反斜杠折掉（`C:Usersbob`）即不是灾难目标 ⇒ 上面那组"拦"是
     // **字形轨道**给的结论，不是夹具自己撞开的；本组其余用例才因此不是空转。
     assert.equal(bashDanger("Remove-Item -Recurse -Force C:Usersbob", pwshDialect), undefined);

@@ -8,11 +8,11 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@jayyuen66/dsh-danger-guard"><img src="https://img.shields.io/npm/v/@jayyuen66/dsh-danger-guard?style=flat-square&logo=npm&logoColor=white" alt="npm version" /></a>
-  <a href="https://www.npmjs.com/package/@jayyuen66/dsh-danger-guard"><img src="https://img.shields.io/npm/dm/@jayyuen66/dsh-danger-guard?style=flat-square" alt="npm downloads" /></a>
+  <a href="https://www.npmjs.com/package/@jayyuen66/dsh-danger-guard"><img src="https://img.shields.io/npm/d18m/@jayyuen66/dsh-danger-guard?style=flat-square" alt="npm downloads (18 months)" /></a>
   <a href="https://github.com/JayYuen666/dsh-danger-guard/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-danger-guard/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D22.12-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.3-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/dsh-0.2.1--rc.3%20%E2%86%92%200.2.2--alpha.2-658EFF?style=flat-square" alt="dsh 0.2.1-rc.3 to 0.2.2-alpha.2" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -87,12 +87,13 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 
 卸载：`dsh plugin --profile web remove @jayyuen66/dsh-danger-guard`。包在公共 npm 上，安装不需要凭据，也不需要配作用域源。
 
-- **要求 Node.js `>= 22.12`。** 本包是纯 ESM；正是这个下限让 ESM 入口的 `require()` 形式可用，所以声明了 `engines.node`。
-- **要求宿主 `dsh` 在 `0.2.1-rc.3` 这条线上。** 宿主真正读的是 `engines.dsh`（`^0.2.1-rc.3`），而且它**单独决定**：`evaluatePluginCompatibility` 在 `engines.dsh` 那一支就返回了，根本走不到读 `peerDependencies` 的那段——所以 `@deepseek-ai/dsh*` 那几枚 peer 在这里不参与兼容判定。预发布版本参与范围比较。宿主是 `0.2.x` 任一小版本都满足；`0.3.0` 及以后不满足，要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。`peerDependencies` 里的精确钉版是一条**独立的编译期纪律**（由 `test/publish-manifest.test.ts` 钉住）：本插件的类型与名义品牌与宿主 ABI 耦合，"自动跟上去"正是宿主类型面被装出第二份的那条路。
+- **要求 Node.js `>= 22.12`。** 本包是纯 ESM；正是这个下限让 ESM 入口的 `require()` 形式可用，所以声明了 `engines.node`。当前 `0.2.2-alpha.2` 宿主自身要求 Node `>= 24.9.0`；那一档来自宿主，不是本包的 `engines.node`。
+- **要求宿主 `dsh` 在 `0.2.1-rc.3` → `0.2.2-alpha.2` 窗口内。** 宿主真正读的是 `engines.dsh`（`^0.2.1-rc.3`），而且它**单独决定**：`evaluatePluginCompatibility` 在 `engines.dsh` 那一支就返回了，根本走不到读 `peerDependencies` 的那段——所以 `@deepseek-ai/dsh*` 那几枚 peer 在这里不参与兼容判定。预发布版本参与范围比较。宿主在 `0.2.1-rc.3` 到 `<0.3.0` 之间都满足；`0.3.0` 及以后不满足，要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。`@deepseek-ai/dsh*` 那几枚 peer 写同一条支持窗口范围，因为运行期那几份由宿主提供；`@deepseek-ai/schemastery` 仍钉宿主自带的那一版。`devDependencies` 里的精确钉版才是那条**独立的编译期纪律**（由 `test/publish-manifest.test.ts` 钉住）：本插件的类型与名义品牌与宿主 ABI 耦合，"自动跟上去"正是宿主类型面被装出第二份的那条路。支持窗口是滚动的：本包在发布时最近的三个已发布宿主版本上逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **`dependencies` 里不放任何 `@deepseek-ai/*`，这是契约**（`test/publish-manifest.test.ts` 钉着）。消费方的 profile 用 `nodeLinker: hoisted` 且 `autoInstallPeers: false` 安装，于是写在 `dependencies` 里的宿主包会被落成**真实目录**，与运行中的宿主已加载的那份并存。`@deepseek-ai/dsh-tools` 的工具运行期调度键是普通 `Symbol`（不是 `Symbol.for`），符号身份按模块实例算：宿主从 profile 副本上读那个键拿到 `undefined`，于是**每一次原生工具调用都抛**——而构建、类型检查、覆盖率门禁在此之前全部照绿。peer 与 devDependencies 都不会进 profile，所以都物化不出第二份。
-- **按值导入的宿主包必须保持外部化。** `@deepseek-ai/dsh-brand` 与 `@deepseek-ai/schemastery` 是值导入（`brandNumber`、`import Schema from …`）。外部化名单读 `dependencies` ∪ `peerDependencies`；只写 `devDependencies` 会被打包器把官方函数体内联进产物，本包就各持一份官方构造器。必需 peer 同时满足两件事：说明符仍是外部的，而消费方 profile 不多装任何东西。`zod` 是普通依赖（由 `lib/tool-ledger.ts` 值导入）。
+- **按值导入的宿主包必须保持外部化。** `@deepseek-ai/dsh-brand` 与 `@deepseek-ai/schemastery` 是值导入（`brandNumber`、`import Schema from …`）。外部化名单读 `dependencies` ∪ `peerDependencies`；只写 `devDependencies` 会被打包器把官方函数体内联进产物，本包就各持一份官方构造器。必需 peer 同时满足两件事：说明符仍是外部的，而消费方 profile 不多装任何东西。`zod` 是普通依赖（由 `lib/tool-ledger.ts` 与设置卡的 `src/stats-reader.ts` 值导入）。
 - **产物刻意不压缩。** `test/build-host.test.ts` 钉着 `host.js` 里那几枚裸说明符、以及 `settings.js` 里没有它们；压缩会把字符串一并去掉，那两条断言就会永远变绿。
 - **随包发 TypeScript 声明**（`types/host.d.ts`、`types/settings-host.d.ts`，以及它们引用的 `lib/` 声明），各子路径带 `types` 条件，`node16` / `bundler` 下 `tsc` 能解析。`./client` 刻意没有（它是浏览器 UMD 外壳），`./cordis.patch.yml` 也没有（宿主 loader 当文件读）。
+- **插件页读本包的 locale**。`locale/en.json` 与 `locale/zh.json` 给出 `meta.title`、`meta.description` 与 `meta.detail`；详情页是 `docs/DETAIL.md` / `docs/DETAIL.zh.md`。`./locale/*.json` 已导出，`locale/` 与 `docs/` 都在 `files` 里，所以装出去的 tarball 带得到它们。
 - 构建产物不入库，`prepack` 会重建，所以发出去的永远是当前源码产出的那一版。
 
 ### shared 的版本下限
@@ -158,11 +159,13 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 | `extraTestDirs` | string[] | `[]` | 追加 test 层目录名，只追加 |
 | `extraDevServerWords` | string[] | `[]` | 追加长驻命令头，只追加 |
 | `extraDevRunArgs` | string[] | `[]` | 追加 run 脚本名，只追加 |
-| `extraSecretPatterns` | string[] | `[]` | 追加密钥路径正则片段（卡片每行一条；非法片段跳过并告警），只追加、无白名单 |
+| `extraSecretPatterns` | string[] | `[]` | 追加密钥路径正则片段（卡片每行一条；非法片段跳过并告警；病态模式的风险由配置者自负，见「已知边界」），只追加、无白名单 |
 | `refSearchTools` | string[] | `["grep","glob","zg_search"]` | 哪些检索工具算"引用探查"凭证；清空即任何检索都不计入。给模型的指令只点这台宿主上真注册着的名字 |
 | `refSearchStrictTools` | string[] | `["zg_search"]` | 上表里改走"root + 相对路径"严格口径的子集 |
 
 **本包没有任何白名单。** 三份 `extra*` 名单与 `refSearchTools` 都只能收紧。所以误拦只有三条路：临时关 `enabled`（或只关 `factGateEnabled`）、靠 `maxDenies` 配额放行、或按拒绝文案改写命令形态。
+
+上表里只有 `preflightEnabled` 在卡上没有控件：它标了即时生效，但设置条目以 `auto: false` 注册表单。改它要走设置行的 `config:`。
 
 ## <img src="https://api.iconify.design/lucide/layers.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 四个权限预设各拦什么
 
@@ -191,6 +194,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 ### 与沙箱的让路，以及为什么只有 `rmrf` 有
 
 - 让路只在四件事同时成立时发生：执行器自报在拦、**它自报的默认模式本身也在拦**、解析出的模式不是完全权限、且双向包含性都不成立——目标既不能包住可写根，也不能落在可写根之内。
+- 包含性判定读的可写根表由四部分组成：工作区根、**执行器显式授予的每个额外可写根**（`sandboxPolicy.resolve()` 交回的 `additionalWritableRoots`）、`/tmp` 与平台临时目录。根表里只要有一枚读不出来，整份表就按不可信处理、完全不让路：只丢掉那一枚会让它底下的目标显得被完全覆盖，从而放行一段其实会真实删完的删除。宿主不报这一位时按「没有额外授予」处理。
 - 最后一条是刻意收紧的。`workspace-write` 的语义是*允许*改工作区内的文件，于是 `rm -rf ~`（工作区在 `~` 下）会**先删光工作区内容**、再在边界外被拒——沙箱是路径白名单，**不提供原子性**。所以 `~`、`/`、`.`、`..` 一律不让路，只有 `rm -rf /etc/foo`、`rm -rf ~/Downloads` 这类才让。
 - `secretPath` 完全不开让路：本地与沙箱两套文件系统后端是**互斥装配**，"装的是哪个"没有可读的口子，按本仓纪律**不猜**。代价也不对称——误拦只是让用户去终端改，漏拦是凭据外泄且难以发现。
 
@@ -205,6 +209,11 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 - **`bash` 重定向写入不在事实门覆盖面。** 门禁挂在 `edit` / `write` 两类工具上；`printf > f`、`tee`、`cat >`、`sed -i` 绕过"先取证"这条。纳入它要解析 shell 重定向与就地编辑器。
 - **少数 `ask` 档形态是盲问。** 裸 `git checkout <path>` 与"切分支"在词法上不可分（显式的 `checkout <rev> <path>` 会判），`git push --force` 不解析目标分支。经 shell 重定向落笔的改动、以及目标在会话外被改动的残窗，同理。
 - **MSYS/Cygwin 挂载形态不折算。** 真实 Windows 宿主上 `rm -rf /c/Windows/System32` 要一张挂载表，那是新依赖加新设计决定。
+- **内容自证上限为 1 MiB。** 把一次 mtime 跳变归因给本会话自己那次编辑，要把目标读回来找写入的文本。超过这个大小就把结论记为「不知」，不在同步的工具调用主路径上整份读入，于是这次改动按外部改动处理：下一次编辑之前需要一次成功的 read。
+
+### 扩展模式由配置者自负
+
+`extraSecretPatterns` 的片段在加载期逐条用 `new RegExp(pattern, "u")` 校验，匹配时用 `iu` 标志编译；长度上限只拦明显写错的输入，拦不住灾难回溯——一条病态模式可以让同步判定在工具调用主路径上长时间不返回。模式是否安全由配置者负责：本插件既不对模式做静态分析，也不在运行期给匹配加墙钟预算。非法片段在加载期被拒并告警。
 
 ## <img src="https://api.iconify.design/lucide/lock.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 数据与隐私
 
@@ -212,7 +221,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 |---|---|
 | 不写盘、不联网 | 判定链没有任何文件系统写入与网络请求；输出面只有 `console.*` 告警与回给模型的文案。**唯一**的例外是下面那趟 `ask` 档预演 |
 | 子进程调用（只有这一处） | `ask` 档命中时，按写死的 `BLAST_COMMANDS` 跑一条**只读命令**，在会话 cwd 里、经宿主的 `ctx.shell`，因此与 bash 工具走同一套沙箱与凭据擦洗环境。`git status` 用 `--no-optional-locks` 抑制可选锁与索引刷新，但仍按会话解析出的 `sandboxPolicy` 执行。输出收紧后按每门语言接进审批请求的 `reason` 与 `displayReason`。任何失败（执行器缺席、仓库目标不确定、策略解析失败、非零退出、超时、取消、宿主截断输出、形状不符）一律退回盲问，不重试、不换命令。命令表写死、**不插值任何模型输入**；原命令只用于目标/策略的跳过判据 |
-| 读什么 | 会话事件历史里的工具台账（主路径：守卫里同步读的投影单元；回退是一次全量事件扫描，判定逐字相同）；目标与层目录的 `statSync`；预检写面对每枚声明目标的一次路径解析与一次正文读取；家目录取 `os.homedir()` |
+| 读什么 | 会话事件历史里的工具台账（主路径：守卫里同步读的投影单元；回退是一次全量事件扫描，判定逐字相同）；目标与层目录的 `statSync`；预检写面对每枚声明目标的一次路径解析与一次正文读取；内容自证对最近一次成功编辑目标的一次回读（超过 1 MiB 的文件不回读，按「不知」处理）；家目录取 `os.homedir()` |
 | 记什么 | 全部在进程内存里——事实门分片、判定台账、以及卡片读的那几格计数——宿主退出即消失，dsh 数据目录下不留本包的文件 |
 | 出域的只有两处且都可关 | 装了 lesson-loop 时，`report` 载荷含 cwd、session id、命中命令原文或目标路径与拒绝文案，另带 `judgeMs` 与（密钥面命中时的）目标解析形清单。此外每次判定还有一条 `judge-cost` pass，载荷只有面名、毫秒、字符数三枚数值，不含命令原文与路径。**只有 `judge-cost` 那条 pass 受 `judgeStats` 管**——拒绝上报里的 `judgeMs` / `judgeLength` / `resolvedPaths` 是无条件发送的 |
 

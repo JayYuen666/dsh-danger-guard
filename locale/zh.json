@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "危险命令拦截",
+    "description": "在破坏性命令动手前拦下，并要求第一次修改某个文件前先读过它、做过引用检索取证。",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}

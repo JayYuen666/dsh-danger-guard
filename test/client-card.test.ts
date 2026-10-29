@@ -44,7 +44,6 @@ const PKG_DIR = path.resolve(import.meta.dirname, "..");
 
 /** 卡片 DOM 定位选择器（测试侧的**期望形状**：展开靠 header、开关靠 role、保存靠 data-field）。
  *  三条都散在十来个用例里，改一处不改其余就是"用例照绿、点的已不是那个元素"。 */
-const HEADER_SELECTOR = ".dgc-header";
 const SWITCH_SELECTOR = 'button[role="switch"]';
 const SAVE_BUTTON_SELECTOR = '[data-field="save"]';
 
@@ -554,9 +553,11 @@ describe("b11：danger-guard 设置卡", () => {
   function hintTextOf(field: string): string {
     const control = container.querySelector<HTMLElement>(`[data-field="${field}"]`);
     assert.ok(control !== null, `${field} 控件已渲染`);
-    const row = control.closest(".dgc-row");
+    const row = control.closest(".dsu-field");
     assert.ok(row !== null, `${field} 控件落在设置行内`);
-    return row.querySelector(".dgc-hint")?.textContent ?? "";
+    const hint = row.querySelector(".dsu-hint")?.textContent ?? "";
+    const detail = row.querySelector(".dsu-tip")?.textContent ?? "";
+    return hint === "" ? detail : hint;
   }
 
   /** 渲染一张未就绪（status ≠ ready）的卡并展开，交回全部开关控件。 */
@@ -580,11 +581,6 @@ describe("b11：danger-guard 设置卡", () => {
         ...cardWrites(scope),
       }),
     );
-    const header = container.querySelector<HTMLElement>(HEADER_SELECTOR);
-    assert.ok(header, "卡片 header 存在");
-    await act(async () => {
-      header.click();
-    });
     const switches = [...container.querySelectorAll(SWITCH_SELECTOR)] as HTMLButtonElement[];
     assert.ok(switches.length >= 2, `${status}：两个开关渲染`);
     return switches;
@@ -625,11 +621,6 @@ describe("b11：danger-guard 设置卡", () => {
         unset: (field: string) => cardWrites(scope).unset(field),
       }),
     );
-    const header = container.querySelector<HTMLElement>(HEADER_SELECTOR);
-    assert.ok(header);
-    await act(async () => {
-      header.click();
-    });
     const sw = container.querySelector<HTMLButtonElement>(SWITCH_SELECTOR);
     assert.ok(sw, "开关存在");
     assert.equal(sw.disabled, false, "ready 后开关可用");
@@ -678,9 +669,6 @@ describe("b11：danger-guard 设置卡", () => {
         ...cardWrites(scope),
       }),
     );
-    await act(async () => {
-      container.querySelector<HTMLElement>(HEADER_SELECTOR)!.click();
-    });
     const at = (): HTMLInputElement | null =>
       container.querySelector<HTMLInputElement>('[data-field="extraDevServerWords"]');
     const input = at();
@@ -741,15 +729,12 @@ describe("b11：danger-guard 设置卡", () => {
         ...cardWrites(scope),
       }),
     );
-    await act(async () => {
-      container.querySelector<HTMLElement>(HEADER_SELECTOR)!.click();
-    });
     const switches = [...container.querySelectorAll(SWITCH_SELECTOR)] as HTMLButtonElement[];
     assert.ok(switches.length >= 2);
     for (const sw of switches) {
       assert.equal(sw.disabled, true, "writable=false 时开关 disabled");
     }
-    const inputs = [...container.querySelectorAll(".dgc-input")] as HTMLInputElement[];
+    const inputs = [...container.querySelectorAll(".dsu-input")] as HTMLInputElement[];
     for (const input of inputs) {
       assert.equal(input.disabled, true, "writable=false 时输入 disabled");
     }
@@ -766,10 +751,7 @@ describe("b11：danger-guard 设置卡", () => {
         ...cardWrites(scope),
       }),
     );
-    await act(async () => {
-      container.querySelector<HTMLElement>(HEADER_SELECTOR)!.click();
-    });
-    const textarea = container.querySelector<HTMLTextAreaElement>(".dgc-textarea");
+    const textarea = container.querySelector<HTMLTextAreaElement>(".dsu-textarea");
     assert.ok(textarea, "密钥模式是 textarea（多行）");
     const propsKey = Object.keys(textarea).find((keyName) =>
       keyName.startsWith(REACT_PROPS_KEY_PREFIX),
@@ -836,9 +818,6 @@ describe("b11：danger-guard 设置卡", () => {
         ...cardWrites(scope),
       }),
     );
-    await act(async () => {
-      container.querySelector<HTMLElement>(HEADER_SELECTOR)!.click();
-    });
 
     // 渲染存在性：一律按 data-field 锚点定位，不依赖行序与中文文案。
     const swStrict = container.querySelector<HTMLButtonElement>('[data-field="strictMode"]');
@@ -913,9 +892,6 @@ describe("b11：danger-guard 设置卡", () => {
         ...cardWrites(scope),
       }),
     );
-    await act(async () => {
-      container.querySelector<HTMLElement>(HEADER_SELECTOR)!.click();
-    });
 
     // 两个新字段各有控件（schema-coverage 只查"字段名出现过"，这里查真实回显）。
     const toolsBox = container.querySelector<HTMLInputElement>('[data-field="refSearchTools"]');
@@ -943,9 +919,6 @@ describe("b11：danger-guard 设置卡", () => {
         unset: () => Promise.resolve(),
       }),
     );
-    await act(async () => {
-      container.querySelector<HTMLElement>(HEADER_SELECTOR)!.click();
-    });
     const hint = hintTextOf("factGateEnabled");
     assert.match(hint, /grep/u);
     assert.match(hint, /glob/u);
@@ -996,11 +969,8 @@ describe("b11：danger-guard 设置卡", () => {
         unset: () => Promise.resolve(),
       }),
     );
-    await act(async () => {
-      container.querySelector<HTMLElement>(HEADER_SELECTOR)!.click();
-    });
     const text = container.textContent;
-    assert.match(text, /danger-guard danger block/u, "英文标题");
+    assert.match(text, /Blocking/u, "英文小节标题");
     assert.match(text, /Save/u, "英文保存按钮");
     assert.ok(!/\p{Script=Han}/u.test(text), "整卡不该混进汉字");
   });
@@ -1016,9 +986,6 @@ describe("b11：danger-guard 设置卡", () => {
         unset: () => Promise.resolve(),
       }),
     );
-    await act(async () => {
-      container.querySelector<HTMLElement>(HEADER_SELECTOR)!.click();
-    });
     assert.match(container.textContent, /危险拦截/u);
   });
 
@@ -1057,7 +1024,8 @@ describe("b11：danger-guard 设置卡", () => {
       fileURLToPath(new URL("../cordis.patch.yml", import.meta.url)),
       "utf8",
     );
-    const entryIds = [...patch.matchAll(/^\s*(?:-\s+)?id:\s*(?<id>\S+)\s*$/gmu)].map(
+    const entryIds = Array.from(
+      patch.matchAll(/^\s*(?:-\s+)?id:\s*(?<id>\S+)\s*$/gmu),
       (row) => row.groups?.["id"] ?? "",
     );
     assert.ok(entryIds.includes(SETTINGS_ENTRY_ID), "cordis.patch.yml 里确有该设置条目");
@@ -1142,9 +1110,6 @@ describe("b11：danger-guard 设置卡", () => {
         },
       }),
     );
-    await act(async () => {
-      container.querySelector<HTMLElement>(HEADER_SELECTOR)!.click();
-    });
     const sw = container.querySelector<HTMLButtonElement>(SWITCH_SELECTOR);
     assert.ok(sw);
     await act(async () => {
@@ -1155,7 +1120,7 @@ describe("b11：danger-guard 设置卡", () => {
     await act(async () => {
       save.click();
     });
-    const err = container.querySelector<HTMLElement>(".dgc-saveerr");
+    const err = container.querySelector<HTMLElement>(".dsu-statusError");
     assert.ok(err, "传输失败呈现为可见错误");
     assert.match(err.textContent, /保存失败/u, "错误文案取 saveFailed 键");
     assert.match(err.textContent, /wire down/u, "底层原因原样带出");
@@ -1194,9 +1159,6 @@ describe("b11：danger-guard 设置卡", () => {
         },
       }),
     );
-    await act(async () => {
-      container.querySelector<HTMLElement>(HEADER_SELECTOR)!.click();
-    });
     const swEnabled = container.querySelector<HTMLButtonElement>('[data-field="enabled"]');
     const swStrict = container.querySelector<HTMLButtonElement>('[data-field="strictMode"]');
     assert.ok(swEnabled !== null && swStrict !== null);
@@ -1212,7 +1174,7 @@ describe("b11：danger-guard 设置卡", () => {
       save.click();
     });
     assert.match(
-      container.querySelector<HTMLElement>(".dgc-saveerr")?.textContent ?? "",
+      container.querySelector<HTMLElement>(".dsu-statusError")?.textContent ?? "",
       /保存失败/u,
       "部分失败照实呈现",
     );

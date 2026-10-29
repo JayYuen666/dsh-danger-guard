@@ -525,7 +525,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
     await writeFile(targetCaps, "// pf.c.ts\n");
     await writeFile(
       path.join(rootCaps, "hits.ts"),
-      Array.from({ length: HIT_LINES }, () => "uses pf.c here\n").join(""),
+      Array.from({ length: HIT_LINES }).fill("uses pf.c here\n").join(""),
     );
     await writeFile(path.join(rootCaps, "ok.ts"), "import pf.c ok\n");
     await writeFile(path.join(rootCaps, "bin.dat"), Buffer.from("\u0000pf.c\n"));
@@ -678,6 +678,27 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
         assert.ok(text.includes("user-a.ts"), "引用列表点名了真实引用者");
         assert.ok(!text.includes(READ_MARK), "目标正文不在这里给（模型这次就在读它）");
       }
+    });
+
+    it("会话给了 seq ⇒ 投递位次直接取它，不为日志长度再折叠一遍台账", async () => {
+      const ctx = createMockCtx();
+      apply(ctx);
+      let snapshots = 0;
+      const session = {
+        id: "s-seq",
+        seq: 9,
+        snapshotEvents: (): readonly SessionEvent[] => {
+          snapshots += 1;
+          return [];
+        },
+      };
+      const decision = await postFlightOf(ctx, {
+        name: "read",
+        arguments: { file_path: targetMain },
+        agent: fakeAgent(session),
+      });
+      assert.equal(contextsOf(decision).length, 1, "读取成功照常附引用面");
+      assert.equal(snapshots, 1, "评估读一次；投递位次取 seq，不再为长度重读台账");
     });
 
     it("同会话同目标再读一次 ⇒ 水位已记，不重复附加（上下文不许被刷满）", async () => {

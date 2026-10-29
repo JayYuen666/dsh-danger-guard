@@ -2,6 +2,27 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.10
+
+开发基线抬到 `0.2.2-alpha.2`，宿主支持窗口写成滚动三版，设置卡与插件页文档改走共享面。默认配置不变；需要留意的行为变化是额外可写根的沙箱覆盖与内容自证上限这两处保守收紧。
+
+### Added
+
+- **额外可写根参与沙箱覆盖**：`sandboxPolicy.resolve()` 交回 `additionalWritableRoots` 时，那些目录也进可写根表；根表里有一枚读不出来就整份不留 scope（不完整的根表会把被丢根之下的目标误判成沙箱完全覆盖，从而让路）。旧宿主没有这一位时按「没有额外 grant」处理。
+- **随包发插件页文档**：`locale/en.json` / `locale/zh.json` 给出 `meta.title` / `meta.description` / `meta.detail`，详情页是 `docs/DETAIL.md` / `docs/DETAIL.zh.md`；`files` 与 `exports` 同步补齐。
+
+### Changed
+
+- **开发基线抬到 `0.2.2-alpha.2`，宿主支持窗口写成 `^0.2.1-rc.3`**（`engines.dsh` 与裸宿主 peer 同一条范围；`devDependencies` 仍精确钉住开发基线）。窗口内 `0.2.1-rc.3` / `0.2.1-rc.4` / `0.2.2-alpha.2` 列入支持范围。
+- **会话投影注册改为双协议**：`await register()` 之后按 disposer / handle 形状分流；注册成功后才发布台账读口，卸载先撤读口再释放。
+- **投递位次改读 `Session.seq`**：只需要日志长度，不再为它折叠整份台账（`calls` / `results` 的数组分配随之消失）。
+- **设置卡迁到共享 `./lib/card-ui`**；统计快照的形状守卫改由 zod schema 承担，`zod` 在客户端产物中按宿主 `PLATFORM_MODULES` 外置。
+
+### Fixed
+
+- **内容自证有上限**：`selfWritesStillPresent` 抽到 `lib/self-write-proof.ts`，超过 1 MiB 的文件不再整份读入做 `includes`，返回「不知」并要求一次成功的 read；不再用一次可能卡住宿主线程的全文读取来决定放行。
+- **投影注册失败不再发布失效读口**：注册同步抛错、异步拒绝或交回第三种形状时，整条判定回退日志扫描，不把永远读到 `undefined` 的读者留给 guard。
+
 ## 0.1.9
 
 一轮跨面审查修复，加伞工作区落地。修复集中在五个面：沙箱让路的前提、shell 词法与灾难判定、
