@@ -10,15 +10,21 @@ import assert from "node:assert/strict";
 import { LEDGER_CAP, lruPut } from "../lib/lru.ts";
 
 describe("lruPut：容量入口校验", () => {
-  it("非法容量（0 / 负数 / 非整数 / NaN / Infinity）直接拒绝，不落到隐式行为", () => {
+  it("非法容量（0 / 负数 / 非整数 / NaN / Infinity）直接拒绝，台账不被部分改写", () => {
     for (const cap of [0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const map = new Map<string, number>([
+        ["old", 1],
+        ["newer", 2],
+      ]);
       assert.throws(
         () => {
-          lruPut(new Map<string, number>(), "k", 1, cap);
+          lruPut(map, "k", 1, cap);
         },
         RangeError,
         String(cap),
       );
+      assert.equal(map.size, 2, "拒绝必须发生在删/插之前：台账仍是原样");
+      assert.deepEqual([...map.keys()], ["old", "newer"]);
     }
   });
 

@@ -71,12 +71,27 @@ const pkgDir = path.resolve(import.meta.dirname, "..");
  *   第 15 次（会话投影的注册改成双协议：旧宿主同步交回 disposer、新宿主等待后交回 handle，
  *      判别放在 `await` 之后，另加卸载先撤读口再释放）：增量是分流那一处判据与两个形状守卫，
  *      不是查表；实测 116,602 B。
- *  预算按同一条规矩取实测上浮 ~0.7%。 */
-const HOST_BUDGET_BYTES = 117_400;
-/** 设置半产物体积预算（实测 3,380 B；开 minify 前 7,293 B）。与拦截半分属两个 bulkhead
+ *   第 16 次（OCR 核实轮：拆段状态机的注释/参数展开/heredoc 面、执行端包装词与取回路径、
+ *      家目录与 terraform 旗标的两处漏判、沙箱目标与可写根的规范形对齐、预检计数与截断、
+ *      档位说明的适用范围、容器取值旗标、编辑载荷的驼峰拼法）：增量全是判据本体与守卫，
+ *      不是查表；实测 120,424 B。预算按同一条规矩上浮 ~0.7%（取 121,000 B）。
+ *   第 17 次（复核轮补齐：kubectl 裸 `--dry-run` 取值、`buildx prune`、`git config
+ *      core.hooksPath` 读形、`cd`/`pushd`/`env --chdir` 的词法判据与预演结果形状白名单、
+ *      完全权限三出口的说明适用范围、设置策略白名单）：新增的是判据分支与两处词法走查，
+ *      实测 123,461 B；预算按同一条规矩取 124,300 B。
+ *   第 18 次（复核轮补齐：模板单趟替换、统计表的表外档位守卫与样本拷贝、上报表面的异常
+ *      隔离、沙箱读面的抛错兜底、自证的有界读取）：增量全是错误隔离与读取边界，没有
+ *      新增查表；实测 124,464 B。预算按同一条规矩上浮 ~1%（取 125,500 B）。 */
+const HOST_BUDGET_BYTES = 125_500;
+/** 设置半产物体积预算（实测 4,561 B；开 minify 前 7,293 B）。与拦截半分属两个 bulkhead
  *  条目，各自记账。增量：apply 阶段的值面形状守卫（plain 值当场点名，不拖到第一次读）
- *  与服务面守卫的报错收窄；预算按 ~3% 上浮。 */
-const SETTINGS_BUDGET_BYTES = 3500;
+ *  与服务面守卫的报错收窄；再加上设置条目装配时的密钥模式校验（`lib/secret-patterns.ts`
+ *  的逐条校验与按内容记账的缓存、`lib/secret-pattern-report.ts` 的去重上报）——那是
+ *  「非法片段在加载期就出声」这条承诺的本体，不是查表膨胀。预算按 ~3% 上浮。
+ *  本轮复核后实测 4,821 B：增量来自密钥模式解析与去重上报的判据分支，预算取 4,900 B。
+ *  第 18 次复核再加读数口的快照兜底与装配期探针（坏值面在 apply 阶段点名），实测 5,022 B，
+ *  预算按 ~1.5% 上浮取 5,100 B。 */
+const SETTINGS_BUDGET_BYTES = 5100;
 /** 客户端半产物体积预算（实测 34,671 B；设置卡迁到 shared card-ui 后组件与样式表随 bundle 打入）。
  *  浏览器侧加载，按平台计账。
  *  本轮增量：名单行的回退显示、批量保存的逐字段结算（部分失败只留失败项）、
@@ -86,7 +101,9 @@ const SETTINGS_BUDGET_BYTES = 3500;
  *  `secretPlaceholder` 的文案加长（写清"别写成 /…/i 形状"），HEAD 那一版就已顶穿旧预算，
  *  构建脚本的改动一个字节都没影响体积（A/B 过三份 `build-client.mjs`）。 */
 const CLIENT_BUDGET_BYTES = 40_000;
-/** 声明入口层体积预算。types/ 整目录进 files，体积会计入 tarball。 */
+/** 声明**入口层**体积预算（只量 types/ 顶层的 host.d.ts / settings-host.d.ts）。
+ *  types/lib 下的依赖声明同样随包发布、同样是 tarball 体积主体，本预算刻意不覆盖它们；
+ *  这里守的是入口桩不被塞进大表。要按 tarball 口径量全量声明，请另立一条递归预算。 */
 const DECLARATION_ENTRY_BUDGET_BYTES = 120_000;
 
 /** 产物文件名与预算的对照。 */
@@ -107,9 +124,12 @@ const BUDGETS: readonly (readonly [string, number])[] = [
  * @returns 字节合计
  */
 function entryDeclarationBytes(dir: string): number {
-  return readdirSync(dir)
-    .filter((name) => name.endsWith(".d.ts"))
-    .reduce((sum, name) => sum + readFileSync(path.join(dir, name)).byteLength, 0);
+  const entries = readdirSync(dir).filter((name) => name.endsWith(".d.ts"));
+  if (entries.length === 0) {
+    // 一个都没匹配到时求和恒为 0、预算恒成立——与子目录为空同一类假护栏。
+    throw new Error(`types/ 下没有任何 .d.ts：build:types 没跑，或产物命名约定变了`);
+  }
+  return entries.reduce((sum, name) => sum + readFileSync(path.join(dir, name)).byteLength, 0);
 }
 
 describe("产物体积", () => {

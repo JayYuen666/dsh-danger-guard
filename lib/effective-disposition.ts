@@ -65,7 +65,8 @@ export type DispositionFactory = (
  * 才付这份解析；普通 bash 调用与不含 rmrf 的串不额外读盘。
  *
  * @param input 档位事实、cwd 与宿主原始服务面。
- * @returns 排序用的 `dispositionOf` 与收口用的 `coveredFactsOf`。
+ * @returns 排序共用的 `dispositionOf` 与收口用的 `verdictOf`；`coveredFactsOf` 是两者共用的
+ *   中间步，生产收口不直接调它。
  */
 export function effectiveDispositionOf(input: EffectiveDispositionInput): EffectiveDisposition {
   let scope: SandboxScope | undefined;
@@ -90,9 +91,23 @@ export function effectiveDispositionOf(input: EffectiveDispositionInput): Effect
     }
     return scope;
   };
+  // 可写根登记的是规范形；灾难目标词面若带符号链接前缀（macOS `/tmp` → `/private/tmp`），
+  // 直接拿去比会落在另一个路径世界里，`rm -rf /tmp/x` 会被判成「沙箱盖得住」而让路。
+  // 这里把**绝对形**目标折成规范形再交给词法判据（相对形已按规范化的 cwd 归一）。
+  const canonicalFixOf = (fix: Fix | undefined): Fix | undefined => {
+    if (fix?.role !== "disasterTarget") {
+      return fix;
+    }
+    return {
+      ...fix,
+      offending: fix.offending.map((word) =>
+        path.isAbsolute(word) ? (input.canonicalize(word) ?? word) : word,
+      ),
+    };
+  };
   const coveredFactsOf = (key: BashDenialKey, fix: Fix | undefined): PolicyFacts =>
     SANDBOX_COVERED.has(key)
-      ? sandboxCoveredFacts(input.facts, key, fix, scopeOf(), input.cwd)
+      ? sandboxCoveredFacts(input.facts, key, canonicalFixOf(fix), scopeOf(), input.cwd)
       : input.facts;
   const verdictOf = (key: BashDenialKey, fix: Fix | undefined): EffectiveOutcome => {
     const covered = coveredFactsOf(key, fix);
@@ -121,8 +136,13 @@ export function effectiveDispositionFactory(host: EffectiveDispositionHost): Dis
       // 路径时原样打 brand，灾难目标会按 `process.cwd()` 解析出与可写根无关的绝对形——
       // 一次真实的工作区删除可能被判成"沙箱已覆盖"而由 deny 降为 allow。不绝对就交回
       // undefined（不让路，方向保守）。
+      // 先 canonicalize 再打 brand：可写根那边只登记规范形，目录基准也必须折到同一
+      // 路径世界；只折词法形时符号链接工作区（macOS `/tmp` → `/private/tmp`）两侧
+      // 对不上，`rm -rf .` 会被判成「沙箱盖得住」而由 deny 降为 allow。
       cwd:
-        cwd === undefined || cwd.length === 0 || !path.isAbsolute(cwd) ? undefined : asOsPath(cwd),
+        cwd === undefined || cwd.length === 0 || !path.isAbsolute(cwd)
+          ? undefined
+          : asOsPath(host.canonicalize(cwd) ?? cwd),
       shellRaw: host.shellRaw,
       policyRaw: host.policyRaw,
       canonicalize: host.canonicalize,

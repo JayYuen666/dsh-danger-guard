@@ -13,27 +13,9 @@ const OPTION_TERMINATOR = "--";
 const KUBECTL_DRY_RUN_FLAG = "--dry-run";
 const KUBECTL_DRY_RUN_VALUES: ReadonlySet<string> = new Set(["client", "server"]);
 
-function kubectlDryRun(words: readonly string[]): boolean {
-  let dryRun = false;
-  for (const word of words) {
-    // `--` 之后全是传给子命令的位置参数：`kubectl delete pod foo -- --dry-run=client`
-    // 里那个 `--dry-run=client` 是给 foo 的参数，不是 kubectl 自己的旗标，把它读成
-    // 预演会让一次真实删除被判成 dry-run。
-    if (word === OPTION_TERMINATOR) {
-      break;
-    }
-    if (word === KUBECTL_DRY_RUN_FLAG) {
-      dryRun = false;
-    } else if (word.startsWith(`${KUBECTL_DRY_RUN_FLAG}=`)) {
-      dryRun = KUBECTL_DRY_RUN_VALUES.has(
-        word.slice(KUBECTL_DRY_RUN_FLAG.length + 1).toLowerCase(),
-      );
-    }
-  }
-  return dryRun;
-}
-
-/** kubectl / docker 的全局取值旗标：`--namespace prod` 与 `--namespace=prod` 都要跳。 */
+/** kubectl / docker 的全局取值旗标：`--namespace prod` 与 `--namespace=prod` 都要跳。
+ *  kubectl 的日志旗标与 `--kuberc` 同样取独立值：漏登记时取值会落进位置词，
+ *  真删除会被读成「子命令 = 取值」而整条漏判。 */
 const KUBECTL_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "-n",
   "--namespace",
@@ -55,12 +37,17 @@ const KUBECTL_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "--profile",
   "--profile-output",
   "--log-flush-frequency",
+  "--log-file",
+  "--log-dir",
+  "--stderrthreshold",
+  "--log-backtrace-at",
   "--request-timeout",
   "--cache-dir",
   "--certificate-authority",
   "--client-certificate",
   "--client-key",
   "--tls-server-name",
+  "--kuberc",
 ]);
 const DOCKER_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "-H",
@@ -70,9 +57,52 @@ const DOCKER_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "--config",
   "-l",
   "--log-level",
+  // TLS 三件套也取独立值：漏了它们 `docker --tlscacert ca.pem system prune` 的
+  // 子命令会读成 ca.pem，prune 整条漏判。
+  "--tlscacert",
+  "--tlscert",
+  "--tlskey",
 ]);
 
-/** 跳过全局旗标及其独立取值后的位置词（附着值 `--flag=value` 只占一词）。 */
+function kubectlDryRun(words: readonly string[]): boolean {
+  let dryRun = false;
+  let skipValue = false;
+  for (const [index, word] of words.entries()) {
+    // `--` 之后全是传给子命令的位置参数：`kubectl delete pod foo -- --dry-run=client`
+    // 里那个 `--dry-run=client` 是给 foo 的参数，不是 kubectl 自己的旗标，把它读成
+    // 预演会让一次真实删除被判成 dry-run。
+    if (word === OPTION_TERMINATOR) {
+      break;
+    }
+    if (skipValue) {
+      // 上一枚旗标取独立值：它的取值不是 kubectl 自己的旗标。少了这一步，
+      // `kubectl delete pod x --as-group --dry-run=client` 里那枚 `--dry-run=client`
+      // 会被读成预演（实际它是 `--as-group` 的值），一次真实删除就此漏判。
+      skipValue = false;
+    } else if (word === KUBECTL_DRY_RUN_FLAG) {
+      // 裸形后面可以跟独立取值（`--dry-run client`）：取值为 client/server 才是预演，
+      // 缺失或未知值都会执行。该取值不是旗标，跳过它。
+      const value = words[index + 1];
+      dryRun = value !== undefined && KUBECTL_DRY_RUN_VALUES.has(value.toLowerCase());
+      skipValue = true;
+    } else if (word.startsWith(`${KUBECTL_DRY_RUN_FLAG}=`)) {
+      dryRun = KUBECTL_DRY_RUN_VALUES.has(
+        word.slice(KUBECTL_DRY_RUN_FLAG.length + 1).toLowerCase(),
+      );
+    } else if (word.startsWith("-")) {
+      const equals = word.indexOf("=");
+      skipValue = equals === -1 && KUBECTL_VALUE_FLAGS.has(word);
+    }
+  }
+  return dryRun;
+}
+
+/**
+ * 跳过全局旗标及其独立取值后的位置词（附着值 `--flag=value` 只占一词）。
+ *
+ * 约定：`words[0]` 是 docker/kubectl 命令词本身；包装词（`sudo`/`env`）与路径前缀
+ * 由调用方先剥离，否则子命令会读成包装词，整族判定静默失效。
+ */
 function commandWordsOf(words: readonly string[], valueFlags: ReadonlySet<string>): string[] {
   const out: string[] = [];
   let skipValue = false;
@@ -97,13 +127,15 @@ function commandWordsOf(words: readonly string[], valueFlags: ReadonlySet<string
   return out;
 }
 
-/** `docker <group> prune` / `docker prune`；资源名恰好叫 `prune` 不算。 */
+/** `docker <group> prune` / `docker prune`；资源名恰好叫 `prune` 不算。
+ *  `buildx prune` 是真实的构建缓存清理（与 `builder prune` 同族）。 */
 const DOCKER_PRUNE_GROUPS: ReadonlySet<string> = new Set([
   "system",
   "image",
   "container",
   "volume",
   "builder",
+  "buildx",
   "network",
 ]);
 

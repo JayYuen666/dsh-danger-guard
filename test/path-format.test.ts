@@ -5,7 +5,10 @@
 //
 // 为什么值得单列：这轮的真实事故（`path.posix.resolve` 处理宿主路径、手拼 `${x}/` 做前缀
 // 比较）在 POSIX 上一切正常、只在 Windows 上炸，靠读代码与测试都抓不住。brand 把
-// "路径属于哪个世界"变成编译期约束，于是这类混用在提交前就红。
+// "路径属于哪个世界"变成编译期约束。
+// 生产面现在只接了 `OsPath`（sandbox-scope / disaster-target / effective-disposition）；
+// `PosixPath` / `Win32Path` 尚无生产消费方，本文件钉的是它们作为**将来约束**的类型语义。
+// 真要把词法层接上时，改这里是下一位读者该看的入口。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
@@ -47,6 +50,26 @@ describe("brand：类型层禁止跨世界混用", () => {
     // @ts-expect-error Win32Path 不可当 PosixPath：`C:\Windows` 的语义只在 Windows 读法里
     const attempt = (): string => wantsPosixPath(windowsShape);
     assert.equal(typeof attempt, "function", "同上");
+  });
+
+  it("跨世界矩阵的其余方向与裸 string 都被类型层挡住", () => {
+    const posix = asPosixPath("/etc");
+    const win = asWin32Path(String.raw`C:\Windows`);
+    const os = asOsPath("/w/proj");
+    // @ts-expect-error PosixPath 不可当 Win32Path
+    const posixToWin = (): string => wantsWin32Path(posix);
+    // @ts-expect-error Win32Path 不可当 OsPath
+    const winToOs = (): string => wantsOsPath(win);
+    // @ts-expect-error OsPath 不可当 Win32Path
+    const osToWin = (): string => wantsWin32Path(os);
+    const bare = "/tmp";
+    // @ts-expect-error 裸 string 不能直接进 brand 形参
+    const bareToOs = (): string => wantsOsPath(bare);
+    assert.equal(
+      [posixToWin, winToOs, osToWin, bareToOs].every((fn) => typeof fn === "function"),
+      true,
+      "四条负向断言只为让 ts-expect-error 有落点",
+    );
   });
 });
 

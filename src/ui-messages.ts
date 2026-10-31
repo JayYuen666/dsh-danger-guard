@@ -38,6 +38,8 @@ export interface UiMessages {
   readonly revert: string;
   /** 保存失败前缀（后接错误摘要）。 */
   readonly saveFailed: string;
+  /** 宿主回 `false`（拒绝 / 表单已销毁 / 写入被跳过）时的失败摘要。 */
+  readonly saveRejected: string;
   /** 词表输入框的默认占位（未显式给 placeholder 的行）。 */
   readonly listPlaceholder: string;
   /** 引用取证名单为空时，事实门 hint 里的替代说明。 */
@@ -91,7 +93,7 @@ export interface UiMessages {
   readonly statsHits: string;
   /** 需确认的命中分布（槽位 summary）。 */
   readonly statsAsks: string;
-  /** 本档看见了但没拦的命中（按规则键）：零兵底与"交给 reviewer"两类的合计口径。 */
+  /** 本档看见了但没拦的命中（按规则键）：零兜底与"交给 reviewer"两类的合计口径。 */
   readonly statsAllowed: string;
   /** 重复命中未再上报的次数（同一会话同一命令）。 */
   readonly statsSkipped: string;
@@ -172,21 +174,22 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     saving: "保存中…",
     revert: "撤销",
     saveFailed: "保存失败：",
+    saveRejected: "宿主未受理这次写入",
     listPlaceholder: "逗号分隔，如 turbopack, remix",
     refToolsEmpty: "（当前名单为空：任何检索都不计入引用取证）",
     enabledLabel: "启用危险拦截",
     enabledHint: "关闭后所有命令与编辑放行（不建议长期关闭）",
     factGateLabel: "首次编辑事实门（gateguard）",
     factGateHint:
-      "每个文件首次编辑前强制取证：先成功 read 目标，再做项目级引用检索（计入取证的检索工具：{tools}），按写面风险分档补 test/e2e/docs 层探查。强校验：持续拒绝到取证齐备为止",
+      "每个文件首次编辑前强制取证：先成功 read 目标，再做项目级引用检索（计入取证的检索工具：{tools}），按写面风险分档补 test/e2e/docs 层探查。强校验：证据不全即拒；连续未收敛时按下方放行次数上限兑现配额（缺 read 时仍不放行）",
     statsLabel: "判定耗时采集",
     statsHint:
       "把每次判定的耗时与输入规模攒成一行滚动摘要（每 200 次一条，只进宿主日志），并在装了 " +
-      "lesson-loop 时随 `judge-cost` 各发一条 pass——样本只有面名/毫秒/字符数，**不含命令原文与路径**。" +
+      "lesson-loop 时随 `judge-cost` 各发一条 pass——样本只有面名/毫秒/字符数，不含命令原文与路径。" +
       "用途是给「输入长度上限该不该调」拿真实分布；关掉只是不再看分布，判定一字不变",
     maxDeniesLabel: "放行次数（强校验防死锁）",
     maxDeniesHint:
-      "连续无证据拒绝 maxDenies 次后放行并警告（1-5，默认 2）。证据判定不可行时走交互式确认，不消耗此次数",
+      "同一目标连续「未收敛」拒绝超过 maxDenies 次后放行并警告（1-5，默认 2）；缺项里仍有 read 时不放行，配额只免上层探查。证据判定不可行时走交互式确认，不消耗此次数",
     strictLabel: "严格模式（每文件全探查）",
     strictHint:
       "开：忽略按写面风险分档，每个代码文件首次编辑都走全探查（read + 引用 + 所有存在的 test/e2e/docs 层）。关：小改只要求 read，大改/触及导出签名/配置装配面才升档",
@@ -243,23 +246,24 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     saving: "Saving…",
     revert: "Revert",
     saveFailed: "save failed: ",
+    saveRejected: "the host did not accept the write",
     listPlaceholder: "comma separated, e.g. turbopack, remix",
     refToolsEmpty: "(the list is empty: no search counts towards reference evidence)",
     enabledLabel: "Enable danger blocking",
     enabledHint: "When off, every command and edit goes through (not a long-term setting)",
     factGateLabel: "First-edit fact gate (gateguard)",
     factGateHint:
-      "Before the first edit of a file, evidence is forced: read the target successfully, then run a project-level reference search (counted search tools: {tools}), and probe the test/e2e/docs layers according to the write's risk tier. Strict: the edit stays denied until the evidence is complete",
+      "Before the first edit of a file, evidence is forced: read the target successfully, then run a project-level reference search (counted search tools: {tools}), and probe the test/e2e/docs layers according to the write's risk tier. Strict: an edit with missing evidence stays denied; the release quota below caps consecutive denials (read is never waived)",
     statsLabel: "Judge-cost sampling",
     statsHint:
       "Folds each verdict's duration and input size into one rolling summary line (every 200 verdicts, " +
       "host log only); with lesson-loop installed it also sends one `judge-cost` pass per verdict - the " +
-      "sample carries face / milliseconds / character count only, **never the command text or a path**. " +
+      "sample carries face / milliseconds / character count only, never the command text or a path. " +
       "It exists so the question 'should the input length cap move' gets answered from a real " +
       "distribution; switching it off hides the numbers and changes no verdict",
-    maxDeniesLabel: "Release quota (deadlock guard for strict mode)",
+    maxDeniesLabel: "Release quota (deadlock guard for the fact gate)",
     maxDeniesHint:
-      "After maxDenies consecutive evidence-less denials the edit is allowed with a warning (1-5, default 2). When evidence cannot be determined the gate asks the user instead, which does not consume this quota",
+      "The edit is allowed with a warning once a target's consecutive non-converging denials exceed maxDenies (1-5, default 2); while a read gap is still open the quota is withheld - it waives the costlier probes only. When evidence cannot be determined the gate asks the user instead, which does not consume this quota",
     strictLabel: "Strict mode (full probe for every file)",
     strictHint:
       "On: risk tiers are ignored and the full probe (read + references + every existing test/e2e/docs layer) runs on the first edit of every code file. Off: a small edit only needs read; big rewrites, export-signature changes and config/assembly files escalate",
@@ -286,13 +290,13 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     secretLabel: "Extra secret path patterns",
     secretHint:
       "Appended to the built-in regex (.ssh / private keys / certificates / ...). One regex fragment per line - commas survive because lines are the separator. Each pattern is compiled at load time; one that fails to compile or is over-long is named in a warning as not in effect, never silently allowed through",
-    statsTitle: "Judgement stats (host-process memory; cleared when the host restarts)",
+    statsTitle: "Judgment stats (host-process memory; cleared when the host restarts)",
     statsRefresh: "Refresh",
     statsLoading: "Loading…",
     statsUnavailable:
       "Host-side stats are unreachable (this deployment composes no Remote read face) — thresholds and windows live in the settings rows above.",
     statsEmpty: "No judgement has happened yet.",
-    statsCalls: "Judgements: {summary}",
+    statsCalls: "Judgments: {summary}",
     statsHits: "Blocked (hard refusal): {summary}",
     statsAsks: "Needs confirmation (asked the user): {summary}",
     statsAllowed: "Allowed by the current preset: {summary}",

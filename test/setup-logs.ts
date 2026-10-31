@@ -8,12 +8,33 @@
 // 用例要看日志内容时用 logged()/loggedText() 取，断言写在用例里。
 import { afterEach, beforeEach } from "vitest";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { format } from "node:util";
 
 import { LOG_TEMPLATES } from "./log-templates.ts";
 
-/** 本包标签前缀，如 `[danger-guard]`。 */
-const PKG_PREFIX = "[danger-guard]";
+/** 包名派生标签前缀：`@scope/dsh-<name>` → `[<name>]`。
+ *  硬编码会在包改名或把本文件复制到别的包时让 `ours`/`strangers` 同时为空，账本静默失效。 */
+const PKG_PREFIX = ((): string => {
+  const pkg = createRequire(import.meta.url)("../package.json") as { name?: unknown };
+  const name = typeof pkg.name === "string" ? pkg.name.split("/").pop() : undefined;
+  if (name === undefined || name.length === 0) {
+    throw new Error("setup-logs：读不到 package.json 的 name，无法派生日志标签");
+  }
+  return `[${name.replace(/^dsh-/u, "")}]`;
+})();
+
+/** 模板片段的最短有效长度：空串 `includes("")` 恒真、极短高频词几乎认可任何日志。 */
+const MIN_TEMPLATE_CHARS = 6;
+
+// 模块初始化即校验模板集合：失校必须显式红，不能等某条日志碰巧不匹配才暴露。
+assert.ok(LOG_TEMPLATES.length > 0, "LOG_TEMPLATES 不得为空");
+for (const fragment of LOG_TEMPLATES) {
+  assert.ok(
+    fragment.trim().length >= MIN_TEMPLATE_CHARS,
+    `日志模板片段过短（< ${String(MIN_TEMPLATE_CHARS)} 字符）：${JSON.stringify(fragment)}`,
+  );
+}
 
 /** 插件会用到的四个 console 级别（联合类型取属性，避免以字符串索引 Console）。 */
 export type LogLevel = "info" | "warn" | "error" | "log";
@@ -44,13 +65,17 @@ function spyLevel(level: LogLevel): void {
   };
 }
 
-function install(): void {
+/** 接管四个级别。重复调用是幂等的：上一轮 uninstall 没跑到位时不能把 spy 当原始实现。 */
+export function install(): void {
   for (const level of LEVELS) {
-    spyLevel(level);
+    if (!originals.has(level)) {
+      spyLevel(level);
+    }
   }
 }
 
-function uninstall(): void {
+/** 还原并清空原始实现表。 */
+export function uninstall(): void {
   for (const [level, fn] of originals) {
     console[level] = fn;
   }
@@ -62,6 +87,21 @@ function containsTemplate(text: string): boolean {
   return LOG_TEMPLATES.some((fragment) => text.includes(fragment));
 }
 
+/** 本包标签以外的 console 记录都算别家；完全没标签的记录同样在列。 */
+export function strangerTextsOf(entries: readonly LogRecord[]): string[] {
+  return entries
+    .filter((record) => !record.text.startsWith(PKG_PREFIX))
+    .map((record) => record.text.slice(0, 120));
+}
+
+/** 带本包标签、但没有模板片段认领的记录。 */
+export function unclaimedTextsOf(entries: readonly LogRecord[]): string[] {
+  return entries
+    .filter((record) => record.text.startsWith(PKG_PREFIX))
+    .filter((record) => !containsTemplate(record.text))
+    .map((record) => record.text.slice(0, 120));
+}
+
 beforeEach(() => {
   records = [];
   install();
@@ -69,14 +109,8 @@ beforeEach(() => {
 
 afterEach(() => {
   uninstall();
-  const ours = records.filter((record) => record.text.startsWith(PKG_PREFIX));
-  const strangers = records
-    .filter((record) => record.text.startsWith("["))
-    .filter((record) => !record.text.startsWith(PKG_PREFIX))
-    .map((record) => record.text.slice(0, 120));
-  const unclaimed = ours
-    .filter((record) => !containsTemplate(record.text))
-    .map((record) => record.text.slice(0, 120));
+  const strangers = strangerTextsOf(records);
+  const unclaimed = unclaimedTextsOf(records);
 
   assert.deepEqual(strangers, [], "本包测试里出现了别家插件的日志：装配范围错了");
   assert.deepEqual(

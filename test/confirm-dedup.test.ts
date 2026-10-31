@@ -26,6 +26,11 @@ describe("dedupKeyOf：同一条命令得同一个键，不同命令得不同键
       dedupKeyOf("gitForcePush", FORCE_PUSH),
       dedupKeyOf("gitForcePush", "git push --force origin main"),
     );
+    // 等长、仅一个字符不同：长度段相同，摘要必须真正参与键形。
+    assert.notEqual(
+      dedupKeyOf("gitForcePush", "git push --force a"),
+      dedupKeyOf("gitForcePush", "git push --force b"),
+    );
   });
 
   it("规则键参与键形：同一条命令落在两枚规则下互不去重", () => {
@@ -80,8 +85,10 @@ describe("askDeduper：同一会话同一命令只上报一次", () => {
     const deduper = new AskDeduper();
     const key = dedupKeyOf("gitResetHard", RESET_HARD);
     deduper.shouldReport("s-1", key);
+    deduper.shouldReport("s-2", key);
     deduper.reset();
-    assert.equal(deduper.shouldReport("s-1", key), true);
+    assert.equal(deduper.shouldReport("s-1", key), true, "s-1 分片已清空");
+    assert.equal(deduper.shouldReport("s-2", key), true, "s-2 分片同样清空");
   });
 
   it("每会话有上限：超过之后整表清空（有界内存，只退化成多上报一次）", () => {
@@ -112,8 +119,15 @@ describe("askDeduper：同一会话同一命令只上报一次", () => {
     assert.equal(deduper.shouldReport("s-1", key), true);
     assert.equal(deduper.shouldReport("s-2", key), true);
     assert.equal(deduper.shouldReport("s-2", key), false, "容量内的会话照常去重");
+    // 先再命中一次 s-1：读取不续命，后面被淘汰的仍应是最早插入的 s-1（FIFO，不是 LRU）。
+    assert.equal(deduper.shouldReport("s-1", key), false);
     // 第三个会话挤进两个分片位：最旧的 s-1 被淘汰，s-2 / s-3 存活。
     assert.equal(deduper.shouldReport("s-3", key), true);
+    assert.equal(
+      deduper.shouldReport("s-2", key),
+      false,
+      "读取不续命：s-2 仍在（若按 LRU 它会先被淘汰）",
+    );
     assert.equal(deduper.shouldReport("s-1", key), true, "最旧的分片被淘汰：重新上报");
     assert.equal(deduper.shouldReport("s-3", key), false, "最新的分片还在：去重照常");
   });
@@ -124,6 +138,14 @@ describe("askDeduper：同一会话同一命令只上报一次", () => {
       deduper.drop("never-seen");
       deduper.drop(undefined);
     });
+  });
+
+  it("drop(undefined) 真的丢掉无会话共用分片（不是空实现）", () => {
+    const deduper = new AskDeduper();
+    const key = dedupKeyOf("gitResetHard", RESET_HARD);
+    assert.equal(deduper.shouldReport(undefined, key), true);
+    deduper.drop(undefined);
+    assert.equal(deduper.shouldReport(undefined, key), true, "丢掉之后重新上报");
   });
 });
 

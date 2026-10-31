@@ -56,7 +56,6 @@ import {
   editDanger,
   editTargetPath,
   isSecretPath,
-  partitionSecretPatterns,
 } from "./lib/danger-rules.ts";
 import type {
   BashDangerOptions,
@@ -68,9 +67,14 @@ import type {
 // 需确认档的判定与两句话构造（宿主无关的那一半，可脱离宿主单测）。
 import { askRequestOf, AskDeduper, dedupKeyOf } from "./lib/confirm.ts";
 // 爆炸半径预演：常量表与渲染是纯函数（可脱离宿主单测），跑子进程那一趟在本文件。
-import { BLAST_COMMANDS, measureBlastOf, withBlast } from "./lib/blast-radius.ts";
+import {
+  BLAST_COMMANDS,
+  blastPreflightSkippedOf,
+  measureBlastOf,
+  withBlast,
+} from "./lib/blast-radius.ts";
 // 设置值面的防御性读取（`strArray`）与两个判定入口共用的词表装配（`bashOptsOf`）。
-import { bashOptsOf, editThresholdsOf, strArray } from "./lib/settings-read.ts";
+import { bashOptsOf, editThresholdsOf, numOf, strArray } from "./lib/settings-read.ts";
 // 宿主沙箱的管辖面（哪些灾难目标该让给它拦）。规范化折法由本文件注入 —— lib 不 import
 // `node:fs`，而 `realpathOf` 是同步判定链唯一付得起的那种解析。
 import { sandboxModeOf } from "./lib/sandbox-scope.ts";
@@ -80,6 +84,8 @@ import { presenceOfAttempt } from "./lib/fs-errors.ts";
 import type { StatAttempt } from "./lib/fs-errors.ts";
 import { mountLedgerReader } from "./lib/projection-reader.ts";
 import type { ProjectionsRegistry } from "./lib/projection-reader.ts";
+// 非法密钥模式的点名上报（去重表与设置条目共用一枚）：判定链这里补报 apply 之后才写进来的值。
+import { reportRejectedSecretPatterns } from "./lib/secret-pattern-report.ts";
 import { selfWritesStillPresent } from "./lib/self-write-proof.ts";
 // 「模型读到的是哪一版」的记账（观测/失效点同一条记录、只在成功结果后提交）。
 import {
@@ -142,10 +148,14 @@ import { lruPut } from "./lib/lru.ts";
 //（预检 B 面、`fs/observed`），读口在同步的 guard 谓词里，键形必须逐字同源，所以收在一处。
 import {
   clearOfficialPaths,
+  isAncestorDirOf,
+  isInside,
   rememberObservedPath,
   rememberOfficialTargetsOf,
   resolveTarget,
   resolvedFormsOf,
+  toPosixRelative,
+  underLayer,
 } from "./lib/target-paths.ts";
 // 引用取证的口径面单源在 lib/ref-search-policy.ts：名单默认值与派生映射都在那里，
 // 本文件每次判定现读设置算出策略，指令渲染侧（lib/gap-directives.ts）吃同一份。
@@ -523,25 +533,6 @@ function stringIdOf(value: unknown): string {
   return "";
 }
 
-/** 非法/超长的扩展密钥模式：**加载期就校验**（判定链走的是同一个谓词），并且点名报出来——
- *  静默跳过等于让用户以为这条保护已经生效。按模式字面去重，否则每次编辑判定都刷同一条日志。
- *
- *  去重表**必须有界**：模式串来自用户配置，长驻进程里反复改设置会持续往里加，而它只用于
- *  「这条已经报过别再刷」，丢一条旧记录最坏的后果是多打一行日志，不是漏掉一条保护。
- *  容量按一次设置的合理规模取，淘汰交给 `lruPut`（与其它台账同一条容量口径）。 */
-const rejectedPatternsLogged = new Map<string, true>();
-
-/** 去重表的容量：一次设置里的无效模式数远小于它；超出的旧记录被淘汰只意味着日志可能重复一次。 */
-const REJECTED_PATTERNS_CAP = 64;
-function reportRejectedPatterns(patterns: readonly string[]): void {
-  for (const pattern of partitionSecretPatterns(patterns).rejected) {
-    if (!rejectedPatternsLogged.has(pattern)) {
-      lruPut(rejectedPatternsLogged, pattern, true, REJECTED_PATTERNS_CAP);
-      console.warn(`[danger-guard] extraSecretPatterns 无效，本条未生效: ${pattern}`);
-    }
-  }
-}
-
 /**
  * 设置面（schema / 内置默认 / 命名空间）在 `lib/settings-schema.ts` 单源，本文件只是转发
  * 给既有导入方（test/*、client 侧的字段清单）继续用 `from "../host.ts"` 这一条路径。
@@ -728,37 +719,6 @@ const hasRootMarker = (dir: string): boolean =>
   // `dir` 是宿主真实路径 ⇒ 拼子项走平台实现（理由同 `probeLayersAt`：`/` 拼出混分隔符串，
   // Windows 上 fs 查不到那个文件，于是工程根标记全判"不存在"，项目根回落到父目录）。
   ROOT_MARKERS.some((marker) => pathExists(path.join(dir, marker)));
-
-/** `candidate` 是否为 `target` 的**祖先目录**（目标自身不算）。
- *  这是「引用取证的作用域判据」与「项目根的回落取值」共用的**同一条不变式**，故单列一处：
- *  判定侧（`isProjectScopeOf`）只认"检索起点是目标的祖先"，而拒绝文案会把项目根当检索
- *  起点原样递给模型（`assembleGaps` 的 `ctx.searchPath`）。两处一旦不同源，就会出现
- *  「门禁教模型去搜的位置，门禁自己又不认」——模型怎么照做都攒不满凭证。 */
-/**
- * `path` 是否就是 `root` 或落在它之下（照官方 `workspace-changes/src/paths.ts` 的 `isInside`）。
- *
- * 为什么不拼前缀再 `startsWith`：那要自己判"末尾有没有分隔符"，而分隔符在 Windows 上是
- * `\\`、混形还合法——每漏一种写法就多一条恒假的判据。`path.relative` 由平台实现同时解决
- * 分隔符与 `..` 归一：结果是空串（同一路径）或以 `..` 开头（在外面）都不是"在内部"。
- *
- * @param root     绝对目录。
- * @param candidate 待判的绝对路径。
- * @returns 自身与所有后代为 true。
- */
-function isInside(root: string, candidate: string): boolean {
-  // 食宿主的 `path`：`host.ts` 里这条判据只服务"检索作用域是否覆盖目标"这一件事，
-  // 而入参都来自宿主服务（`workingDirectory` / `session header`），随平台走是对的。
-  // 需要按 Windows 规则验证的那两处（`lib/sandbox-scope.ts`、`lib/preflight-scan.ts`）
-  // 已改成**注入 `pathApi`**，测试可以显式交 `path.win32`。
-  const rel = path.relative(root, candidate);
-  // ⚠ 判"是否上跳出根"必须比**路径组件边界**，不能只看 `rel.startsWith("..")`：
-  // `relative()` 对根内名为 `..cache` 的目录返回 `..cache`，那个前缀判断会把它误判成
-  // "跑到根外面" —— 方向是**放行**（"沙箱盖不住"为真 ⇒ 灾难删除让路给同样管不了它的沙箱）。
-  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
-}
-
-const isAncestorDirOf = (candidate: string, target: string): boolean =>
-  candidate !== target && isInside(candidate, target);
 
 /** 项目根：向上找工程标记（与 quality-gate gate-detect 同一族标记）。
  *  **找不到标记时退到目标自己的父目录，不是会话 cwd** —— 回落值必须满足
@@ -975,19 +935,12 @@ function tierOf(facts: RiskFacts): FactTier {
   return "mid";
 }
 
-/** 数值型设置取值：非法/缺省回落内置默认。**绝不用 0 兜底**——0 等于关掉整道防线。
- *  阈值默认值单源在 lib/fact-gate.ts（DEFAULT_SMALL/BIG_EDIT_CHARS），host 导入使用。 */
-function numOf(value: unknown, fallback: number): number {
-  const num = Number(value);
-  return Number.isFinite(num) && num > 0 ? num : fallback;
-}
-
 /**
  * 设置面读数降级告警：**只响一次**。守卫谓词每次工具调用都跑，坏设置在修复前会一直
  * 存在——逐次刷屏会把日志冲干净，反而盖掉真正的拦截记录（`strArray` 的降级告警同口径）。
  */
 let settingsFallbackWarned = false;
-function warnSettingsFallback(): void {
+function warnSettingsFallback(cause?: unknown): void {
   if (settingsFallbackWarned) {
     return;
   }
@@ -995,6 +948,7 @@ function warnSettingsFallback(): void {
   console.warn(
     "[danger-guard] 设置面（条目 danger-guard-settings）不可用，本轮回落内置默认底座；" +
       "危险命令拦截照常生效。修复请查该条目的装配状态（dsh 日志里的 ValidationError）。",
+    ...(cause === undefined ? [] : [cause]),
   );
 }
 
@@ -1028,7 +982,14 @@ function settingsConfig(svc: HostCtx): Config {
     return BUILTIN_BASE;
   }
   // 引用即现读：设置卡改完，下一次工具调用就是新值，不需要重载本条目。
-  return readerRaw.read();
+  // 读数口自己抛错时按"设置面不可用"回落：这一句在每次工具调用的判定路径上，
+  // 异常从这里冒出去会让所有工具调用一起失败，而闸门本应带着内置底座继续拦截。
+  try {
+    return readerRaw.read();
+  } catch (error: unknown) {
+    warnSettingsFallback(error);
+    return BUILTIN_BASE;
+  }
 }
 
 /**
@@ -1557,14 +1518,15 @@ function settleReadOf(
   target: string,
   cwd: string | undefined,
   isError: boolean,
+  blocked: boolean,
 ): void {
   const targetN = resolveTarget(target, cwd);
   const key = sessionTargetKeyOf(session?.id, targetN);
-  if (isError) {
+  if (isError || blocked) {
     discardReadObservation(key);
     return;
   }
-  commitReadObservation(key, targetN, presenceOf(targetN).mtimeMs);
+  commitReadObservation(key);
 }
 
 /** 写/读型调用记账：read 与 str_replace_editor 的 view 记 readCalls，其余按写登记。 */
@@ -2196,8 +2158,9 @@ const STOCK_SEARCH_TOOLS: ReadonlySet<string> = new Set(["grep", "glob"]);
  * 而它决定模型在拒绝理由里看到几个可走的路，所以这里必须筛（见 `toolPresentOf`）。
  */
 const refPolicyOf = (cfg: Config, present: ToolPresent): RefSearchPolicy => {
-  const names = strArray(cfg.refSearchTools) ?? DEFAULT_REF_SEARCH_TOOLS;
-  const strict = strArray(cfg.refSearchStrictTools) ?? DEFAULT_REF_SEARCH_STRICT_TOOLS;
+  const names = strArray(cfg.refSearchTools, "refSearchTools") ?? DEFAULT_REF_SEARCH_TOOLS;
+  const strict =
+    strArray(cfg.refSearchStrictTools, "refSearchStrictTools") ?? DEFAULT_REF_SEARCH_STRICT_TOOLS;
   return refSearchPolicyOf(
     names.filter((name) => STOCK_SEARCH_TOOLS.has(name) || present(name)),
     strict,
@@ -2249,7 +2212,8 @@ interface FactEvidenceQuery {
  * `strArray(...) ?? []` 时，任何一侧改了读法就会让"门禁要一层、预检查不到那层"变成死结
  * （预检永远让路，模型永远拿不到层证据）。
  */
-const extraTestDirsOf = (cfg: Config): string[] => strArray(cfg.extraTestDirs) ?? [];
+const extraTestDirsOf = (cfg: Config): string[] =>
+  strArray(cfg.extraTestDirs, "extraTestDirs") ?? [];
 
 /**
  * 一次调用的档位与取证缺项：同步判定（`evaluateFactGate`）与预检的两个触发点走**同一条**
@@ -2352,7 +2316,7 @@ function secretOptsOf(
 ): { targets: readonly string[]; opts: SecretFaceOpts } | undefined {
   const targets = declaredTargets(args);
   // 密钥词表在这里现读：strArray 兜住未经 schema 校验的值面，与调用点那两处同一口径。
-  const secretPatterns = strArray(cfg.extraSecretPatterns);
+  const secretPatterns = strArray(cfg.extraSecretPatterns, "extraSecretPatterns");
   return targets.length === 0
     ? undefined
     : {
@@ -2498,7 +2462,7 @@ const refNeedlesOf = (base: string): string[] => [
  * （isSecretPath 的相对补形对绝对路径是恒等），传它等于多养一条永远走不到的分支。
  */
 const scanQuarantineOf = (cfg: Config): ((file: string) => boolean) => {
-  const extra = strArray(cfg.extraSecretPatterns);
+  const extra = strArray(cfg.extraSecretPatterns, "extraSecretPatterns");
   const opts: EditDangerOptions = extra === undefined ? {} : { extraSecretPatterns: extra };
   return (file: string): boolean => isSecretPath(file, opts);
 };
@@ -2659,16 +2623,6 @@ function needsScan(gaps: readonly FactGap[]): boolean {
 /** 还缺哪几层（保持 `LAYER_NEEDS` 的顺序，写进文案与水位都按它）。 */
 const missingLayers = (gaps: readonly FactGap[]): LayerNeed[] =>
   LAYER_NEEDS.filter((need) => gaps.some((gap) => gap.need === need));
-
-/** 起点内的层目录 → 相对起点的 POSIX 形（结果里的 `file` 用的就是这一形，比对才不用两边各 normalize）。 */
-function toPosixRelative(root: string, dir: string): string {
-  return path.relative(root, dir).split(path.sep).join("/");
-}
-
-/** 这一项是不是那层（或层更深）里的命中。层就是起点自身时（rel = ""）整棵都在层内。 */
-function underLayer(rel: string, file: string): boolean {
-  return rel.length === 0 || file === rel || file.startsWith(`${rel}/`);
-}
 
 /** 层结论：目标所属包链上**实际存在**的层目录（`existingLayersOf`，与门禁算缺项同一个函数、
  *  同一枚缓存、同一份 extraTestDirs 读法）本次扫描有没有走到，走过去就报该层内的命中数。
@@ -2953,21 +2907,25 @@ async function preflightOnPreExecute(
   const downstream: PreDecision = await next();
   let decision = downstream;
   if (downstream.kind === "allow") {
-    // 需确认档先判：命中就**不再跑 B 面预检** —— 那一趟取证是给"马上就能改"的调用省往返的，
-    // 对"等人拍板"的这趟没有意义。而它自己那一趟**只读预演**（量爆炸半径）在下面 await。
-    const confirm = await confirmOf(exec);
-    if (confirm === undefined) {
-      const req = reqOf(exec);
-      if (req !== undefined) {
-        try {
+    // 整段包一处 try：需确认档的 `confirmOf` 会跑只读预演（`ctx.shell` 起子进程）、
+    // 预检的 `reqOf` / `runPreflight` 会读宿主服务面——它们抛错时若冒出去，整条
+    // tools/pre-execute 瀑布就断了，下游连原始决定都收不到。失败方向必须是"撤回本层
+    // 的补充、保留下游的 allow"，而不是让调用直接炸掉。
+    try {
+      // 需确认档先判：命中就**不再跑 B 面预检** —— 那一趟取证是给"马上就能改"的调用省往返的，
+      // 对"等人拍板"的这趟没有意义。而它自己那一趟**只读预演**（量爆炸半径）在下面 await。
+      const confirm = await confirmOf(exec);
+      if (confirm === undefined) {
+        const req = reqOf(exec);
+        if (req !== undefined) {
           const reason = await runPreflight(req);
           decision = reason === undefined ? downstream : { kind: "deny", reason };
-        } catch (error: unknown) {
-          console.warn(PREFLIGHT_WARN, error);
         }
+      } else {
+        decision = confirm;
       }
-    } else {
-      decision = confirm;
+    } catch (error: unknown) {
+      console.warn(PREFLIGHT_WARN, error);
     }
   }
   return decision;
@@ -2983,12 +2941,24 @@ async function preflightOnPostExecute(
   reqOf: PreflightRequestOf,
   settleRead: SettleReadObservation,
 ): Promise<PostDecision> {
-  // 读取基线的结算**先于**一切：它是证据链的前提，而下面的附加会因为"预检没装 fs"整趟跳过
-  // （reqOf 返回 undefined）——用 req 当守卫会让基线在那些 profile 上永不提交。
-  settleRead(exec, result.isError);
   // oxlint-disable-next-line node/callback-return -- 同 pre-execute 那一处：next() 的结果要和本次附加合并，不能直接交回
   const downstream: PostDecision = await next();
-  const req = result.isError ? undefined : reqOf(exec);
+  // 读取基线的结算要看到**下游的最终决定**：这次读取被别的策略 block 掉时，模型并没有拿到
+  // 它以为拿到的那份内容，不能当作"这一版看过"记进基线（那会把失效点一并清掉，fail-open）。
+  // 所以结算排在 next() 之后并带上 block 位；整段包 try，结算抛错不能打断下面的预检附加。
+  try {
+    settleRead(exec, result.isError, downstream.kind === "block");
+  } catch (error: unknown) {
+    console.warn(PREFLIGHT_WARN, error);
+  }
+  let req: ReturnType<PreflightRequestOf> | undefined;
+  if (!result.isError) {
+    try {
+      req = reqOf(exec);
+    } catch (error: unknown) {
+      console.warn(PREFLIGHT_WARN, error);
+    }
+  }
   let decision = downstream;
   if (req !== undefined) {
     try {
@@ -3020,11 +2990,16 @@ function wirePreflightListeners(
  *  与预检的请求工厂分开装：后者在"没有会话 / 没有 fs"时整趟不装配，而这件结算不依赖 fs
  *  （只用执行面自己的参数与 agent 会话），那两样缺席时照样必须做——否则在没装 fs 后端的
  *  profile 上，读取基线永远停在暂存态，等于把"首次评估盲区"那一条又放回来。 */
-type SettleReadObservation = (exec: PreExecuteParams[0], isError: boolean) => void;
+/** `blocked` = 下游把这次读取 block 掉了：内容没交付，基线不得推进（见调用点）。 */
+type SettleReadObservation = (
+  exec: PreExecuteParams[0],
+  isError: boolean,
+  blocked: boolean,
+) => void;
 
 /** 造一枚结算口（值面每趟现读，与其余工厂同一条纪律：`apply` 不持有状态）。 */
 function readObservationSettler(svc: HostCtx): SettleReadObservation {
-  return (exec, isError) => {
+  return (exec, isError, blocked) => {
     const agentRaw: unknown = exec.agent;
     const session = isPreflightAgent(agentRaw) ? agentRaw.session : undefined;
     const args = isRecord(exec.arguments) ? exec.arguments : {};
@@ -3035,7 +3010,7 @@ function readObservationSettler(svc: HostCtx): SettleReadObservation {
     // cwd 与 guard 时点那次（recordReadObservation）**必须同源**：两处各自现取时，中间夹
     // 一次 `cd` 就会把提交写到另一个键上，暂存永远配不上（见 effectiveCwdOf 的注释）。
     const cwd = effectiveCwdOf(svc, session);
-    settleReadOf(session, target, cwd, isError);
+    settleReadOf(session, target, cwd, isError, blocked);
   };
 }
 
@@ -3082,6 +3057,7 @@ interface PolicyDenyInput {
 function denyFromPolicy(input: PolicyDenyInput): string {
   const { wiring, exec, name, key, command, fix, facts, messages, cost } = input;
   noteRuleHit(key, "deny");
+  const flags = policyDenyFlags(facts, key);
   const deny = policyDenyText({ key, fix, facts, messages });
   reportDeny(reportContextOf(wiring, exec), {
     category: DANGEROUS_BASH_CATEGORY,
@@ -3094,7 +3070,8 @@ function denyFromPolicy(input: PolicyDenyInput): string {
       tool: name,
       // 两种 deny 不是一回事：一部分是"确认危险"，另一部分是"这档问不了"。
       // 后者仍不是用户拍板过的动作，所以这两位分开写，别让统计把它们混成一种。
-      needsUserConfirmation: policyDenyFlags(facts, key).policyDenied,
+      needsUserConfirmation: flags.policyDenied,
+      verdict: flags.verdict,
       mode: facts.mode,
       // 耗时与输入规模一起发：长度上限该不该调，看的是这两枚的真实分布。
       judgeMs: Math.round(cost.ms),
@@ -3164,13 +3141,19 @@ function confirmFactory(
     }
     // **量爆炸半径**：`ask` 档专属，量不出来就盲问（边界见 lib/blast-radius.ts 的文件头）。
     // 去重掉的那次**照样量**：它仍然会弹给用户（判定是 `ask`），没有证据的卡比有证据的卡更难判。
+    // `git clean -nd` 不列 `.gitignore` 忽略的文件；原命令带 `-x`/`-X` 时清单会偏小，
+    // 这种情形**不量**（盲问），理由与判据见 `blastPreflightSkippedOf`。
+    const blastCommand =
+      ask === undefined || blastPreflightSkippedOf(ask.key, ask.command)
+        ? undefined
+        : BLAST_COMMANDS[ask.key];
     const blast =
-      ask === undefined
+      ask === undefined || blastCommand === undefined
         ? undefined
         : await measureBlastOf({
             shellRaw: svc.get?.("shell"),
             policyRaw: svc.get?.("sandboxPolicy"),
-            command: BLAST_COMMANDS[ask.key],
+            command: blastCommand,
             sourceCommand: ask.command,
             cwd,
             session: exec.agent?.session,
@@ -3236,9 +3219,10 @@ function secretJudgeOf(
 ): SecretJudge {
   const { messages, cfg, cwd } = rt;
   // 非法/超长的扩展模式要在这一层点名上报（值面判定本身在 lib 的 partition 里）。
-  const secretPatterns = strArray(cfg.extraSecretPatterns);
+  // 设置条目 apply 时已经报过一次，这里是给 apply 之后才写进来的值兜底；同一串只报一次。
+  const secretPatterns = strArray(cfg.extraSecretPatterns, "extraSecretPatterns");
   if (secretPatterns !== undefined) {
-    reportRejectedPatterns(secretPatterns);
+    reportRejectedSecretPatterns(secretPatterns);
   }
   const built = secretOptsOf(args, cfg, cwd);
   let reason: string | undefined;
@@ -3300,7 +3284,7 @@ function wireReadFaces(
       publish: (reader) => {
         ledgerBox.value = reader === undefined ? undefined : (session) => asLedger(reader(session));
       },
-      effect: (factory) => svc.effect(factory),
+      effect: (factory) => svc.effect(factory, "danger-guard: tool-ledger reader"),
     });
   });
 

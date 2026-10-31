@@ -33,6 +33,8 @@ import type { PreflightFs } from "../../lib/preflight-scan.ts";
 /** 可注入的失败位：一支对应一条用例（真世界里是权限 / 断链 / IO 故障 / 后端拒绝）。 */
 export interface LocalFsFailures {
   readonly resolveThrows?: string;
+  /** 只让指定路径的 `resolve` 抛错，其余路径照常解析（模拟某一层起点不可达）。 */
+  readonly resolveThrowsAt?: { readonly path: string; readonly message: string };
   readonly lstatThrows?: string;
   readonly listDirThrows?: string;
   readonly readThrows?: string;
@@ -184,6 +186,10 @@ async function listChildrenOf(dir: string): Promise<FsDirEntry[]> {
 export function localFsFace(fail: LocalFsFailures = {}): PreflightFs {
   return {
     async resolve(targetPath, opts): Promise<FsTarget> {
+      const targeted = fail.resolveThrowsAt;
+      if (targeted?.path === targetPath) {
+        throw new Error(targeted.message);
+      }
       throwIf(fail.resolveThrows);
       return localTargetOf(targetPath, opts?.cwd);
     },

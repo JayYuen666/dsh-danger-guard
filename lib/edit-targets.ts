@@ -64,13 +64,26 @@ const WRITE_PAYLOAD_SUFFIX = /(?:^|_)(?:text|content|string|str|patch|diff)$/u;
 /** 插入写的行号键（两种拼法都认）。 */
 const INSERT_LINE_KEY = /^(?:insert_line|insertLine)$/u;
 
-const WRITE_PAYLOAD_SET: ReadonlySet<string> = new Set(WRITE_PAYLOAD_KEYS);
+/** 键名折成 snake_case 后再比：`newContent` 与 `new_content` 是同一个载荷位。 */
+const snakeKeyOf = (key: string): string =>
+  key.replaceAll(/(?<head>[a-z0-9])(?<upper>[A-Z])/gu, "$<head>_$<upper>").toLowerCase();
+
+/** 白名单折成 snake_case：驼峰拼法（`newContent`/`fileText`）也要命中。 */
+const WRITE_PAYLOAD_SNAKE_SET: ReadonlySet<string> = new Set(
+  WRITE_PAYLOAD_KEYS.map((key) => snakeKeyOf(key)),
+);
+
+/** 普通对象判定（不认 null、不认数组）。 */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
 /**
  * 该键的取值是否携带写载荷。
  *
  * 走到这里时键名已经落在白名单或 `*_text`/`*_content` 这类后缀里，所以取值形态够用即可：
- * 非空字符串是写内容；非空数组是批量编辑（`edits: []` 等于没改，不算写）；行号是插入写。
+ * 任何字符串都是写内容（空串是清空文件，仍然算写）；非空数组是批量编辑（`edits: []`
+ * 等于没改，不算写）；行号是插入写。
  */
 function isWriteValue(key: string, value: unknown): boolean {
   if (typeof value === "string") {
@@ -79,14 +92,23 @@ function isWriteValue(key: string, value: unknown): boolean {
   if (Array.isArray(value)) {
     return value.length > 0;
   }
+  // 对象载荷也是写内容：`patch: { hunks }`、`content: { type: "text", text }` 这类
+  // provider 用对象承载改动。只认 string/数组时，带只读动词 + 对象载荷的调用会整趟
+  // 按只读放行、目标清单为空——那是最坏的一侧（漏拦），白名单判定要宁宽勿窄。
+  if (isRecord(value)) {
+    return Object.keys(value).length > 0;
+  }
   return typeof value === "number" && INSERT_LINE_KEY.test(key);
 }
 
 function hasWritePayload(args: Record<string, unknown>): boolean {
-  return Object.entries(args).some(
-    ([key, value]) =>
-      (WRITE_PAYLOAD_SET.has(key) || WRITE_PAYLOAD_SUFFIX.test(key)) && isWriteValue(key, value),
-  );
+  return Object.entries(args).some(([key, value]) => {
+    const snake = snakeKeyOf(key);
+    return (
+      (WRITE_PAYLOAD_SNAKE_SET.has(snake) || WRITE_PAYLOAD_SUFFIX.test(snake)) &&
+      isWriteValue(key, value)
+    );
+  });
 }
 
 /**
@@ -104,11 +126,6 @@ function readOnlyAction(args: Record<string, unknown>): boolean {
     return false;
   }
   return verbs.every((verb) => READ_ONLY_VERBS.has(verb.toLowerCase())) && !hasWritePayload(args);
-}
-
-/** 普通对象判定（不认 null、不认数组）。 */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /** 一次工具调用声明的全部目标路径（键形口径，去重后按键位顺序给出）。 */

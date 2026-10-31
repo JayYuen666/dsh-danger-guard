@@ -34,6 +34,11 @@ const scopeWith = (root: string): SandboxScope => ({ mode: WS_MODE, roots: [asOs
 /** 一台"规范化即原样"的折法（多数用例不需要软链语义，给恒等函数让断言看得清）。 */
 const identity = (absolute: string): string => absolute;
 
+/** 宿主实现抛错的替身（`resolve` 与 `canonicalize` 两处注入共用）。 */
+const hostFailure = (): never => {
+  throw new Error("host implementation failed");
+};
+
 /** 判据的主角 mode（收常量：它在本文件里出现十几次，sonarjs 的 no-duplicate-string 盯着）。 */
 const WS_ROOT = "/ws";
 const FULL_ACCESS_MODE = "danger-full-access";
@@ -130,10 +135,15 @@ describe("sandboxScopeOf：读宿主的两个能力面", () => {
     );
   });
 
-  it("`read-only` 与 `workspace-write` 都留 scope，且可写根含工作区根与两枚临时区", () => {
-    const scope = scopeOf(WRITABLE_MODE);
-    assert.equal(scope?.mode, WS_MODE);
-    assert.deepEqual(scope.roots, [WORKSPACE, TEMP_ROOT]);
+  it("`read-only` 与 `workspace-write` 都留 scope，且可写根含工作区根与临时区", () => {
+    const writable = scopeOf(WRITABLE_MODE);
+    assert.equal(writable?.mode, WS_MODE);
+    assert.deepEqual(writable.roots, [WORKSPACE, TEMP_ROOT]);
+    // read-only 也留 scope：它的「覆盖」判定走另一支（一切写都被禁），但仍要带上
+    // 同一份根表，否则后续把 mode 换成 workspace-write 时根会凭空少一枚。
+    const readOnly = scopeOf("read-only");
+    assert.equal(readOnly?.mode, "read-only");
+    assert.deepEqual(readOnly.roots, [WORKSPACE, TEMP_ROOT]);
   });
 
   it("逐会话说：`session` 在场时原样交给 `resolve`（逐会话的 mode 覆盖归它解析）", () => {
@@ -303,6 +313,22 @@ describe("注入 pathApi：同一份判据按 Windows 规则验证（不伪装�
     // 两个方向都「包着可写的东西」：祖先包住整棵根，子路径本身就在根里可写。
     assert.equal(sandboxDropsOf(posixScope, [parentDir], path.posix), false, "祖先包住可写根");
     assert.equal(sandboxDropsOf(posixScope, [insideDir], path.posix), false, "子路径落在可写根里");
+    // 同形状的 Windows 方言再走一遍：判据由 pathApi 决定，两个方言的结论必须一致，
+    // 否则「只在 Windows 上错」这类回归在这条用例里仍然看不见。
+    const windowsRoot = path.win32.join(String.raw`C:\w`, "proj");
+    const winScope = { mode: WS_MODE, roots: [asOsPath(windowsRoot)] };
+    const windowsParent = asOsPath(path.win32.dirname(windowsRoot));
+    const windowsInside = asOsPath(path.win32.join(windowsRoot, "build"));
+    assert.equal(
+      sandboxDropsOf(winScope, [windowsParent], path.win32),
+      false,
+      "Windows 方言：祖先包住可写根",
+    );
+    assert.equal(
+      sandboxDropsOf(winScope, [windowsInside], path.win32),
+      false,
+      "Windows 方言：子路径落在可写根里",
+    );
   });
 });
 
@@ -363,6 +389,10 @@ describe("disasterTargetPathOf：灾难目标词面 → 绝对路径", () => {
     // `path.posix.isAbsolute("C:/etc")` 是假 ⇒ 它掉不进绝对形分支；而反斜杠形态在 opaque 里。
     // 判据是"宁可交回 undefined 让调用方不让路"，不是猜一个看起来合理的落点。
     assert.equal(disasterTargetPathOf("C:/etc", undefined), undefined);
+    // 生产链路一定带会话 cwd：盘符形的「不猜」不能只在 cwd 缺席时成立，否则
+    // `path.resolve(cwd, "C:/etc")` 会编出一个看似合理的落点。
+    assert.equal(disasterTargetPathOf("C:/etc", asOsPath("/w")), undefined);
+    assert.equal(disasterTargetPathOf("//server/share", asOsPath("/w")), undefined);
   });
 
   it("相对形按会话 cwd 归一；cwd 缺席则**交回 undefined**（保守）", () => {
@@ -463,6 +493,29 @@ describe("sandboxScopeOf 的两道前提：执行器自报在拦 + 策略也说�
       undefined,
     );
   });
+
+  it("宿主实现抛错 ⇒ 按读不到处理，不留 scope（异常不穿进判定链）", () => {
+    assert.equal(
+      sandboxScopeOf(
+        { sandboxMode: WRITABLE_MODE },
+        { resolve: hostFailure },
+        undefined,
+        identity,
+        TEMP_ROOT,
+      ),
+      undefined,
+    );
+    assert.equal(
+      sandboxScopeOf(
+        { sandboxMode: WRITABLE_MODE },
+        { resolve: () => ({ mode: WS_MODE, workspaceRoot: WS_ROOT }) },
+        undefined,
+        hostFailure,
+        TEMP_ROOT,
+      ),
+      undefined,
+    );
+  });
 });
 
 /** `/ws` 折成 `/real/ws`、其余原样成功。 */
@@ -506,7 +559,10 @@ describe("writableRootsOf：规范化失败的那一枚按 path.resolve 形保�
     assert.deepEqual(scope?.roots, [WS_ROOT, path.resolve(TEMP_ROOT)]);
   });
 
-  it("workspaceRoot 不是字符串 ⇒ 这一枚不算根，其余照常", () => {
+  it("workspaceRoot 读不出（非字符串）⇒ 整份不留 scope，不拿临时区顶替工作区根", () => {
+    // 只丢这一枚会让工作区里的目标显得"谁都没包住" ⇒ 判成沙箱完全覆盖 ⇒ 让路，
+    // 而 `workspace-write` 恰恰允许真实删完工作区。`/tmp` 与临时区照常可算，
+    // 但它们不覆盖工作区，不能替它背书。
     const scope = sandboxScopeOf(
       { sandboxMode: WRITABLE_MODE },
       { resolve: () => ({ mode: WRITABLE_MODE, workspaceRoot: 42 }) },
@@ -514,9 +570,7 @@ describe("writableRootsOf：规范化失败的那一枚按 path.resolve 形保�
       identity,
       TEMP_ROOT,
     );
-    // 剩下的两枚候选（`/tmp` 与 TEMP_ROOT）同值且被 identity 桩原样成功，去重后一枚；
-    // 期望用字面值而不是 path.resolve，理由同上组。
-    assert.deepEqual(scope?.roots, [TEMP_ROOT]);
+    assert.equal(scope, undefined);
   });
 });
 
@@ -658,6 +712,33 @@ describe("sandboxModeOf：原始模式读法（按档位分叉用的那一份）
     );
   });
 
+  it("执行器自报 danger-full-access 时以自报为准，不返回策略侧的受限档位", () => {
+    // 自报不拦文件效应 ⇒ 策略解析出的 read-only 不描述实际环境；与 sandboxScopeOf 同一条前提。
+    assert.equal(
+      sandboxModeOf(
+        { sandboxMode: FULL_ACCESS_MODE },
+        { resolve: () => ({ mode: "read-only" }) },
+        undefined,
+      ),
+      FULL_ACCESS_MODE,
+    );
+  });
+
+  it("策略 resolve 抛错 ⇒ undefined（异常不穿进同步判定链）", () => {
+    assert.equal(
+      sandboxModeOf(
+        { sandboxMode: "read-only" },
+        {
+          resolve: (): never => {
+            throw new Error("host implementation failed");
+          },
+        },
+        undefined,
+      ),
+      undefined,
+    );
+  });
+
   it("会话缺席时 resolve 收到空对象（官方读法：没 agent 就 resolve({})）", () => {
     const seen: unknown[] = [];
     sandboxModeOf(
@@ -691,5 +772,20 @@ describe("sandboxCoveredFacts：只给 rmrf 的灾难目标补覆盖位", () => 
 
   it("非 rmrf 键 ⇒ 即使 scope 在场也不补覆盖位", () => {
     assert.equal(sandboxCoveredFacts(facts, "gitForcePush", undefined, scope, undefined), facts);
+  });
+
+  it("可判的灾难目标全部落在可写根之外 ⇒ 补成 sandboxCovers: true", () => {
+    const fix = { role: "disasterTarget", offending: ["/etc/foo"] } as const;
+    assert.deepEqual(sandboxCoveredFacts(facts, "rmrf", fix, scope, undefined), {
+      ...facts,
+      sandboxCovers: true,
+    });
+  });
+
+  it("空 offending 或词面全判不出来 ⇒ 原样交回（空数组不能让 every 恒真）", () => {
+    const empty = { role: "disasterTarget", offending: [] } as const;
+    assert.equal(sandboxCoveredFacts(facts, "rmrf", empty, scope, undefined), facts);
+    const windows = { role: "disasterTarget", offending: [String.raw`C:\Windows`] } as const;
+    assert.equal(sandboxCoveredFacts(facts, "rmrf", windows, scope, undefined), facts);
   });
 });

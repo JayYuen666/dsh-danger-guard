@@ -7,10 +7,10 @@
 //   value: T | undefined（:14，首个快照受理前才是 undefined）、base/user/revision
 //   snapshot.writable: boolean（恒存在，独立于 status 的可写位，:29）
 //   表单五位在位：getSnapshot/subscribe/**mutate**/set/unset；后两者回
-//   Promise<boolean>（:65/:73 受理位，只有传输失败才 reject）
+//   Promise<boolean>（:65/:73 受理位：false = 宿主拒绝/跳过，传输失败才 reject）
 //   契约里**没有** dispose —— 表单归 provider 持有（config-form.d.ts:138-142）
-// 卡片侧本地 iface 仍是 Promise<void>（apply 的 payload 把受理位 await 后即弃，此次迁移
-// 只换入口不改行为），入口从 ctx.settingsScope.bind({namespace}) 换成
+// 卡片侧本地 iface 仍是 Promise<void>（apply 的 payload 把 false 翻成 rejection，走卡片
+// 既有的失败面），入口从 ctx.settingsScope.bind({namespace}) 换成
 // ctx.configForms.get(条目 id)。
 // 要求：
 //   1) status!=='ready' 或 writable=false 时开关 disabled（两者都满足才让写）；
@@ -25,7 +25,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Window } from "happy-dom";
-import React, { act } from "react";
+import React, { act, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
 import type { Root } from "react-dom/client";
 import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-settings/client";
@@ -45,7 +45,11 @@ const PKG_DIR = path.resolve(import.meta.dirname, "..");
 /** 卡片 DOM 定位选择器（测试侧的**期望形状**：展开靠 header、开关靠 role、保存靠 data-field）。
  *  三条都散在十来个用例里，改一处不改其余就是"用例照绿、点的已不是那个元素"。 */
 const SWITCH_SELECTOR = 'button[role="switch"]';
+/** 严格模式开关的字段选择器（多处用例按它定位，抽常量避免同串重复）。 */
+const STRICT_SELECTOR = '[data-field="strictMode"]';
 const SAVE_BUTTON_SELECTOR = '[data-field="save"]';
+/** 取证检索工具词表输入框（两条外部值同步用例共用）。 */
+const EXTRA_WORDS_SELECTOR = '[data-field="extraDevServerWords"]';
 
 /** React 挂在元素上的 props 键前缀（取它才能直接驱动 onChange）。 */
 const REACT_PROPS_KEY_PREFIX = "__reactProps$";
@@ -226,7 +230,8 @@ type ConfigFormMock = ConfigForm<Record<string, unknown>> & { dispose: () => nev
 /** DgCard 的真实 props 形状（client-entry.ts DgCard，测试侧结构投影：
  *  不 import client-entry 导出，避免值依赖；泛型 selector 用宽松签名）。
  *  ⚠ set/unset 是**卡片本地 iface**（Promise<void>）：0.1.7 的表单本身回
- *  Promise<boolean>，apply 的 payload 把它 await 收成 void（受理位不消费）。 */
+ *  Promise<boolean>，apply 的 payload 把 false 翻成 rejection（saveRejected），
+ *  卡片按失败处理（显示错误并留住草稿）。 */
 interface DgCardHandlers {
   /** 取文案（apply 里 ctx.locale.bind 的结果，经 slots.register 的 payload 下发）。 */
   t: Translate;
@@ -250,23 +255,29 @@ function disposeTripwire(): never {
 }
 
 /** 卡片写入口：表单的 Promise<boolean> → 卡片 iface 的 Promise<void>。
- *  与 src/client-entry.ts 里 payload 的包装同形（受理位 await 后即弃）。 */
+ *  与 src/client-entry.ts 里 payload 的包装同形：false（宿主拒绝受理）翻成 rejection。 */
 function cardWrites(form: ConfigFormMock): {
   set: (field: string, value: unknown) => Promise<void>;
   unset: (field: string) => Promise<void>;
 } {
   return {
     set: async (field: string, value: unknown): Promise<void> => {
-      await form.set(field, value);
+      if (!(await form.set(field, value))) {
+        throw new Error(UI_MESSAGES.zh.saveRejected);
+      }
     },
     unset: async (field: string): Promise<void> => {
-      await form.unset(field);
+      if (!(await form.unset(field))) {
+        throw new Error(UI_MESSAGES.zh.saveRejected);
+      }
     },
   };
 }
 
 /** 真宿主里**别人 provide 的服务**（客户端 profile 常驻的那一批）。不在本条目 `inject` 清单
- *  里的那些，读即抛 —— 这份名单只需覆盖"读错会炸"的那几枚，不必穷举。 */
+ *  里的那些，读即抛 —— 这份名单只需覆盖"读错会炸"的那几枚，不必穷举。`settingsScope` 是
+ *  0.1.6 那一代的服务名，宿主已随 0.1.7 删除：源码若回退去读它，在真宿主里拿到的就是
+ *  「服务不存在」，所以它和被 provide 的那几枚同属"读错要当场响"的一类。 */
 const PROVIDED_SERVICES = new Set([
   "remote",
   "connection",
@@ -274,6 +285,7 @@ const PROVIDED_SERVICES = new Set([
   "commandUi",
   "settingsSchema",
   "agentPresets",
+  "settingsScope",
 ]);
 
 /** 给 ctx 桩件套上 cordis 的 inject 门禁（见调用点那段说明）。 */
@@ -314,7 +326,9 @@ async function loadCard(): Promise<{
   slotDescs: { name: string; key: string | undefined }[];
   /** 最后一次 register 的 payload（slots.inject 工厂产出，含 set/unset/hooks.card）。 */
   payload: Record<string, unknown> | null;
-  /** slots.inject 工厂返回的 disposer 清单（loadCard 已就地各调用过一次）。 */
+  /** 改宿主受理位：false = 传输成功但宿主拒绝/跳过这次写入。 */
+  setWriteAccepted: (accepted: boolean) => void;
+  /** slots.inject 工厂返回的 disposer 清单（loadCard 只记录，由用例决定何时调用）。 */
   slotCleanups: (() => void)[];
   /** 入口的 inject 清单（装配契约）。 */
   injectList: string[];
@@ -338,16 +352,18 @@ async function loadCard(): Promise<{
   const formWrites: { field: string; value: unknown }[] = [];
   const slotDescs: { name: string; key: string | undefined }[] = [];
   const slotCleanups: (() => void)[] = [];
+  /** 宿主对 `set`/`unset` 的受理位。用例可改成 false 模拟"拒绝受理"（传输仍成功）。 */
+  let writeAccepted = true;
   const fakeForm: ConfigFormMock = {
     getSnapshot: () => snap(),
     subscribe: () => () => void 0,
     set: (field: string, value: unknown) => {
       formWrites.push({ field, value });
-      return Promise.resolve(true);
+      return Promise.resolve(writeAccepted);
     },
     unset: (field: string) => {
       formWrites.push({ field, value: undefined });
-      return Promise.resolve(true);
+      return Promise.resolve(writeAccepted);
     },
     // 官方 ConfigForm 的第五位（路径级原子写入）：本卡不走它，但类型面要求它在位。
     mutate: async () => true,
@@ -383,10 +399,10 @@ async function loadCard(): Promise<{
       // `callback`（那会撞 eslint `callback-return` / `prefer-await-to-callbacks`）。
       inject: (_key, install) => {
         // 官方 `SlotInjectionEffect` = 一枚 disposer 或一组 disposer（本卡是前者）。
+        // 真实槽位在 collapse 时才调用它，桩件只记录，注册保持到用例显式回收。
         const cleanup = install();
         if (typeof cleanup === "function") {
           slotCleanups.push(cleanup);
-          cleanup();
         }
         return (): void => void 0;
       },
@@ -421,21 +437,33 @@ async function loadCard(): Promise<{
         ns,
         dicts: Record<BuiltInLocaleId, LocaleDictOf<LocaleNs>>,
       ): (() => void) => {
+        const registered: (typeof locales)[number][] = [];
         for (const [localeId, dict] of Object.entries(dicts)) {
-          locales.push({ ns, localeId, dict });
+          const row = { ns, localeId, dict };
+          locales.push(row);
+          registered.push(row);
         }
-        return () => void 0;
+        // 官方 disposer 只注销本次注册（installed `register` 回一枚 disposer）；
+        // 桩件照此从记录里摘掉本次条目，好让「回收后已注销」可断言。
+        return () => {
+          for (const row of registered) {
+            const index = locales.indexOf(row);
+            if (index !== -1) {
+              locales.splice(index, 1);
+            }
+          }
+        };
       },
       // 卡片用例默认看中文（断言里的中文串与迁移前逐字相同）；英文侧另有对拍。
       bind: () => tZh,
     },
   };
   // ⚠ 桩件外套一层 **cordis 的 inject 门禁**：真宿主里"别人 provide 的服务"若不在本条目的
-  // `inject` 清单里，读它就是**抛错**（`cannot get property "x" without inject`，
-  // vendor/cordis/src/reflect.ts:144）。普通对象桩件不套这层，就会让"未 inject 就取服务"
-  // 这类错误一路绿 —— 0.1.3 正是这么发出去的：`ctx.remote` 一读就抛，web boot 直接失败
-  // （页面卡在错误页），而当时的产物与全部用例都是绿的。套上之后，任何一次这样的读取都会
-  // 在这里当场炸掉。
+  // `inject` 清单里，读它就是**抛错**（`cannot get property "x" without inject`，见 cordis 的
+  // `reflect` 服务面）。普通对象桩件不套这层，就会让"未 inject 就取服务"这类错误一路绿 ——
+  // 0.1.3 正是这么发出去的：`ctx.remote` 一读就抛，web boot 直接失败（页面卡在错误页），
+  // 而当时的产物与全部用例都是绿的。这层只拦 `PROVIDED_SERVICES` 名单内的名字：桩件还要收
+  // 测试框架与本包自己塞的普通属性，一律抛会让桩件本身先炸。
   const guardedCtx = guardUndeclaredServices(fakeCtx);
   (exported["apply"] as (ctx: unknown) => void)(guardedCtx);
   assert.ok(capturedView !== null, "slots.register 捕获到卡片 view");
@@ -448,6 +476,9 @@ async function loadCard(): Promise<{
     slotDescs,
     slotCleanups,
     payload: capturedPayload,
+    setWriteAccepted: (accepted: boolean): void => {
+      writeAccepted = accepted;
+    },
     injectList: exported["inject"] as string[],
     guardedCtx,
     makeScope: (initial: Snap, calls: { field: string; value: unknown }[]) => {
@@ -560,7 +591,8 @@ describe("b11：danger-guard 设置卡", () => {
     return hint === "" ? detail : hint;
   }
 
-  /** 渲染一张未就绪（status ≠ ready）的卡并展开，交回全部开关控件。 */
+  /** 渲染一张未就绪（status ≠ ready）的卡并展开，交回全部开关控件。
+   *  writable 传 true：这样禁用的成因只能是 status，不会与「不可写」那条用例共用同一个解释。 */
   async function renderUnreadyCard(
     status: "loading" | "unavailable",
   ): Promise<HTMLButtonElement[]> {
@@ -568,10 +600,10 @@ describe("b11：danger-guard 设置卡", () => {
     const calls: { field: string; value: unknown }[] = [];
     // 首个快照受理前 value 是 undefined（官方契约），cardStore 会把它落成 {}；
     // status 现在由官方类型交出，直接读即可（原先要 `as { status: string }` 再取）。
-    const scope = makeScope(snap({ status, writable: false, value: undefined }), calls);
+    const scope = makeScope(snap({ status, writable: true, value: undefined }), calls);
     const useCard = useCardOf({
       status: scope.getSnapshot().status,
-      writable: false,
+      writable: true,
       value: {},
     });
     await renderCard(
@@ -642,6 +674,72 @@ describe("b11：danger-guard 设置卡", () => {
     assert.equal(calls[0]!.value, false, "写入取反值");
   });
 
+  it("保存进行中的新编辑不被成功回调清掉（草稿只移除已结算且未再改的键）", async () => {
+    const { DgCardForTest, makeScope } = await loadCard();
+    const calls: { field: string; value: unknown }[] = [];
+    const view: CardView = {
+      status: "ready",
+      writable: true,
+      value: { enabled: true, strictMode: false },
+    };
+    const scope = makeScope(snap(view), calls);
+    const { promise: gate, resolve: release } = Promise.withResolvers<boolean>();
+    let held = false;
+    await renderCard(
+      React.createElement(DgCardForTest, {
+        t: tZh,
+        useCard: useCardOf(view),
+        set: async (field: string, value: unknown): Promise<void> => {
+          if (field === "strictMode" && !held) {
+            held = true;
+            await gate;
+          }
+          await cardWrites(scope).set(field, value);
+        },
+        unset: (field: string) => cardWrites(scope).unset(field),
+      }),
+    );
+    const swEnabled = container.querySelector<HTMLButtonElement>('[data-field="enabled"]');
+    const swStrict = container.querySelector<HTMLButtonElement>(STRICT_SELECTOR);
+    const save = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR);
+    assert.ok(swEnabled !== null && swStrict !== null && save !== null);
+    // 草稿 A：strictMode；点保存后写入挂起。
+    await act(async () => {
+      swStrict.click();
+    });
+    await act(async () => {
+      save.click();
+    });
+    // 挂起期间的新编辑 B：enabled。成功后 A 被清掉、B 必须留在草稿里。
+    await act(async () => {
+      swEnabled.click();
+    });
+    await act(async () => {
+      release(true);
+      await gate;
+    });
+    assert.equal(save.disabled, false, "新编辑仍算草稿：保存键可用");
+    assert.equal(
+      calls.some((call) => call.field === "strictMode"),
+      true,
+      "A 已落盘",
+    );
+    // 再点保存：只写 B，且 A 不重复写。
+    await act(async () => {
+      save.click();
+    });
+    assert.deepEqual(
+      calls.filter((call) => call.field === "enabled").map((call) => call.value),
+      [false],
+      "B 只在第二次保存时写一次",
+    );
+    assert.equal(
+      calls.filter((call) => call.field === "strictMode").length,
+      1,
+      "已落盘的 A 不重复写",
+    );
+  });
+
   it("listInputRow 外部值变化时回同步 + 输入暂存（保存一次性写入）", async () => {
     const { DgCardForTest, makeScope } = await loadCard();
     const calls: { field: string; value: unknown }[] = [];
@@ -670,7 +768,7 @@ describe("b11：danger-guard 设置卡", () => {
       }),
     );
     const at = (): HTMLInputElement | null =>
-      container.querySelector<HTMLInputElement>('[data-field="extraDevServerWords"]');
+      container.querySelector<HTMLInputElement>(EXTRA_WORDS_SELECTOR);
     const input = at();
     assert.ok(input, "词表输入框存在");
     assert.match(input.value, /turbopack/u, "初始值来自外部快照");
@@ -716,6 +814,50 @@ describe("b11：danger-guard 设置卡", () => {
     const written = calls.filter((call) => call.field === "extraDevServerWords");
     assert.equal(written.length, 1, "保存只写一次");
     assert.deepEqual(written[0]!.value, ["abc"]);
+  });
+
+  it("store 通知（subscribe→listener）驱动输入框回同步，不依赖手工 rerender", async () => {
+    const { DgCardForTest, makeScope } = await loadCard();
+    const calls: { field: string; value: unknown }[] = [];
+    const scope = makeScope(snap({ value: { extraDevServerWords: ["turbopack"] } }), calls);
+    // 与 src 的 cardStore 同形：快照引用不变时 view 引用稳定（useSyncExternalStore 要求
+    // getSnapshot 可缓存），变更经 subscribe 挂上的 listener 通知。卡片只能靠这条通知
+    // 重画——用例不调用 root.render 第二次。
+    let cachedSnap: Snap | null = null;
+    let cachedView: CardView | null = null;
+    const view = (): CardView => {
+      const current = scope.getSnapshot();
+      if (current !== cachedSnap || cachedView === null) {
+        cachedSnap = current;
+        cachedView = {
+          status: current.status,
+          writable: current.writable,
+          value: current.value ?? {},
+        };
+      }
+      return cachedView;
+    };
+    const useCard = <Out>(sel: (snapshot: CardView) => Out): Out =>
+      useSyncExternalStore(
+        (listener) => scope.subscribe(listener),
+        () => sel(view()),
+      );
+    await renderCard(
+      React.createElement(DgCardForTest, {
+        t: tZh,
+        useCard,
+        ...cardWrites(scope),
+      }),
+    );
+    const initial = container.querySelector<HTMLInputElement>(EXTRA_WORDS_SELECTOR);
+    assert.ok(initial !== null, "词表输入框存在");
+    assert.match(initial.value, /turbopack/u, "初始值取自 store 快照");
+    await act(async () => {
+      scope.push(snap({ value: { extraDevServerWords: ["remix"] } }));
+    });
+    const synced = container.querySelector<HTMLInputElement>(EXTRA_WORDS_SELECTOR);
+    assert.ok(synced !== null, "通知后输入框仍在");
+    assert.match(synced.value, /remix/u, "store 通知后输入框回同步");
   });
 
   it("ready 但 writable=false（workspace 级只读）→ 开关 disabled（status/writable 独立闸门）", async () => {
@@ -820,7 +962,7 @@ describe("b11：danger-guard 设置卡", () => {
     );
 
     // 渲染存在性：一律按 data-field 锚点定位，不依赖行序与中文文案。
-    const swStrict = container.querySelector<HTMLButtonElement>('[data-field="strictMode"]');
+    const swStrict = container.querySelector<HTMLButtonElement>(STRICT_SELECTOR);
     assert.ok(swStrict, "strictMode 开关已渲染");
     assert.equal(swStrict.getAttribute("aria-checked"), "true", "快照 true → 开关呈开启态");
     const numSmall = container.querySelector<HTMLInputElement>('[data-field="smallEditChars"]');
@@ -956,6 +1098,7 @@ describe("b11：danger-guard 设置卡", () => {
       null,
       "effect 回收后样式已摘掉",
     );
+    assert.deepEqual(locales, [], "locale 注册随 effect 回收而注销");
   });
 
   it("en translator 渲染整张卡片：标题/按钮是英文，且不残留汉字", async () => {
@@ -1005,11 +1148,16 @@ describe("b11：danger-guard 设置卡", () => {
       await loadCard();
     // 负向对照：这层 inject 门禁**真的会抛**（否则"apply 不抛"那条判据等于没判）。
     // 0.1.3 就是在这一条上发出去的：`ctx.remote` 未 inject ⇒ 读即抛 ⇒ web boot 失败、页面卡死。
-    assert.throws(
-      () => (guardedCtx as { remote?: unknown }).remote,
-      /without inject/u,
-      "门禁桩件必须能复现真宿主的 inject 拒绝",
-    );
+    // 逐个名字验，不抽查一个：名单是这道桩件的全部射程，某一枚其实拦不住时，
+    // 「源码回退去读它」仍然一路绿。
+    const guarded = guardedCtx as Record<string, unknown>;
+    for (const name of PROVIDED_SERVICES) {
+      assert.throws(
+        () => guarded[name],
+        /without inject/u,
+        `门禁桩件必须能复现真宿主对 "${name}" 的 inject 拒绝`,
+      );
+    }
     // inject 清单就是装配契约：`settingsScope` 在 installed 0.1.7 全树零命中，留着它整条
     // client 入口挂不上（症状正是"设置卡静默消失"）。替代面 = configForms（installed
     // dsh-client-ui-settings/lib/types/client/config-form.d.ts:94-98 的 Context 增强、
@@ -1085,14 +1233,31 @@ describe("b11：danger-guard 设置卡", () => {
       ],
       "payload 的写入必须落到 configForms.get() 交回的那张表单",
     );
-    // slot disposer：只注销登记。`form.dispose` 是抛错绊线——loadCard 已就地调过一次
-    //（没炸即证明 disposer 没销毁表单），这里再调一次确认幂等且不碰表单。
+    // slot disposer：只注销登记。`form.dispose` 是抛错绊线——桩件在 loadCard 期间只记录
+    // 不调用（真实槽位 collapse 时才卸载），这里连续调用两次，既证明 disposer 不销毁
+    // provider 持有的共享表单，也证明重复回收幂等。
     assert.equal(slotCleanups.length, 1, "slots.inject 工厂产出一个 disposer");
     for (const cleanup of slotCleanups) {
       assert.doesNotThrow(() => {
         cleanup();
-      }, "再次清理也不得销毁 provider 持有的共享表单（0.1.7 ConfigForm 无 dispose）");
+        cleanup();
+      }, "清理不得销毁 provider 持有的共享表单（0.1.7 ConfigForm 无 dispose）");
     }
+  });
+
+  it("宿主回 false（拒绝受理）→ payload 把它翻成失败，卡片不再显示已保存", async () => {
+    const { makeScope, payload, setWriteAccepted } = await loadCard();
+    makeScope(snap({ value: { enabled: true } }), []);
+    setWriteAccepted(false);
+    const write = payload?.["set"];
+    assert.equal(typeof write, "function", "payload 带写入口");
+    await assert.rejects(
+      async () => {
+        await (write as (field: string, value: unknown) => Promise<void>)("enabled", false);
+      },
+      new RegExp(UI_MESSAGES.zh.saveRejected, "u"),
+      "false（宿主拒绝/表单已销毁/写入被跳过）必须变成带 saveRejected 文案的 rejection",
+    );
   });
 
   it("表单写入因传输失败 reject → 卡片显示保存失败并留住草稿（受理位之外的唯一失败面）", async () => {
@@ -1160,7 +1325,7 @@ describe("b11：danger-guard 设置卡", () => {
       }),
     );
     const swEnabled = container.querySelector<HTMLButtonElement>('[data-field="enabled"]');
-    const swStrict = container.querySelector<HTMLButtonElement>('[data-field="strictMode"]');
+    const swStrict = container.querySelector<HTMLButtonElement>(STRICT_SELECTOR);
     assert.ok(swEnabled !== null && swStrict !== null);
     await act(async () => {
       swEnabled.click();

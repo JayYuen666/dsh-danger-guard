@@ -46,33 +46,53 @@ export const DEFAULT_REF_SEARCH_STRICT_TOOLS: readonly string[] = Object.freeze(
  * 把陌生名字只写进严格名单不会给它开任何凭证——否则"顺手配上一个还没装的插件名"就会
  * 静默扩大凭证面（本包是安全拦截插件，配置面只能收紧不能放宽）。
  *
- * 同一名字只记一次、空串整条丢弃：设置层只校验 string，重复项与空串会原样进入
+ * 同一名字只记一次、空串与纯空白整条丢弃：设置层只校验 string，重复项与空串会原样进入
  * 渲染指令（"grep、grep"、空项），而 criteria 作为 Map 键本就去重——两侧不同步时，
- * never/narrow 两支指令会互相矛盾。
+ * never/narrow 两支指令会互相矛盾。名字先 `trim` 归一，`" grep "` 与 `"grep"` 不再算两个工具。
  */
 export const refSearchPolicyOf = (
   tools: readonly string[],
   strict: readonly string[],
 ): RefSearchPolicy => {
-  const strictNames = new Set(strict);
+  const strictNames = new Set(strict.map((name) => name.trim()));
   const criteria = new Map<string, RefSearchCriterion>();
   const patternTools: string[] = [];
   const strictTools: string[] = [];
   for (const tool of tools) {
-    if (tool.length > 0 && !criteria.has(tool)) {
-      if (strictNames.has(tool)) {
-        criteria.set(tool, "strict-relative");
-        strictTools.push(tool);
+    const name = tool.trim();
+    if (name.length > 0 && !criteria.has(name)) {
+      if (strictNames.has(name)) {
+        criteria.set(name, "strict-relative");
+        strictTools.push(name);
       } else {
-        criteria.set(tool, "pattern");
-        patternTools.push(tool);
+        criteria.set(name, "pattern");
+        patternTools.push(name);
       }
     }
   }
+  // 对外只交 `ReadonlyMap` 的读面：`ReadonlyMap` 只是编译期约束，一次 `as` 断言就能拿回
+  // `set`/`delete` 改写口径。这里用不带写方法的视图挡住那条路（`Object.freeze` 对 Map
+  // 的条目无效，不能靠它）。
+  const criteriaView: ReadonlyMap<string, RefSearchCriterion> = {
+    get size() {
+      return criteria.size;
+    },
+    get: (key) => criteria.get(key),
+    has: (key) => criteria.has(key),
+    entries: () => criteria.entries(),
+    keys: () => criteria.keys(),
+    values: () => criteria.values(),
+    forEach: (callbackfn) => {
+      for (const [key, value] of criteria) {
+        callbackfn(value, key, criteriaView);
+      }
+    },
+    [Symbol.iterator]: () => criteria[Symbol.iterator](),
+  };
   // 冻结两份名单：返回类型是 readonly，但那是编译期约束——任何一次 `as` 断言后的就地
   // push 都会改写这份策略，而它同时是记账与指令文案的单源。
   return {
-    criteria,
+    criteria: Object.freeze(criteriaView),
     patternTools: Object.freeze(patternTools),
     strictTools: Object.freeze(strictTools),
   };

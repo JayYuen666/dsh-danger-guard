@@ -75,7 +75,19 @@ const REFS_HEAD_MARK = markOf(zh.preflightRefsHead);
 const OTHER_PLUGIN_MARK = "[other-plugin]";
 
 /** 开出去的测试台，随 describe 收（每台一份独立临时工程，互不踩 mtime）。 */
+/** 宿主 `FiberState` 的 ACTIVE 数值：cordis 把它声明成 const enum，运行时被擦除，
+ *  只能按发布 d.ts 的数值比。宿主调整枚举顺序时这里会红——集中一处，改一个数字即可。 */
+const FIBER_ACTIVE = 2;
+
 const stages: Spine[] = [];
+
+/** 收掉本文件开出去的全部测试台。stages 是两个 describe 共用的，所以**两个 describe 各挂一份**
+ *  afterAll——vitest 的 afterAll 只作用到它所在的 describe，只挂在第一个组会让 ask 组开出去的台
+ *  （临时工程目录 + 未卸载的 fiber）全部泄漏。 */
+const disposeStages = async (): Promise<void> => {
+  await Promise.all(stages.map(async (spine) => disposeSpine(spine)));
+  stages.length = 0;
+};
 
 /** 装配一台，会话 cwd 指向那台自己的临时工程。 */
 async function stage(row: Record<string, unknown> = {}): Promise<{ spine: Spine; agent: Agent }> {
@@ -110,16 +122,13 @@ function contextText(message: { content: readonly { type: string; text?: string 
 }
 
 describe("真实 spine 下的接线与物化", () => {
-  afterAll(async () => {
-    await Promise.all(stages.map(async (spine) => disposeSpine(spine)));
-    stages.length = 0;
-  });
+  afterAll(disposeStages);
 
   it("两条条目都装配成功，且 guard 真的进了官方链（rm -rf / 被物化成 isError 结果）", async () => {
     const { spine, agent } = await stage();
     // cordis 的 FiberState 是 const enum（运行时擦除），按发布 d.ts 的数值比：2 === ACTIVE
-    assert.equal(spine.guardFiber.state, 2, "拦截条目必须 ACTIVE");
-    assert.equal(spine.settingsFiber.state, 2, "设置条目必须 ACTIVE");
+    assert.equal(spine.guardFiber.state, FIBER_ACTIVE, "拦截条目必须 ACTIVE");
+    assert.equal(spine.settingsFiber.state, FIBER_ACTIVE, "设置条目必须 ACTIVE");
     const result = await dispatch(spine, agent, "b1", TOOL_BASH, {
       description: "清理",
       command: "rm -rf /",
@@ -327,6 +336,10 @@ describe("真实 spine 下的接线与物化", () => {
       text.includes(String(PREFLIGHT_MAX_BYTES)),
       "点明上界是多少字节，模型才知道自己拿到的是多少",
     );
+    assert.ok(
+      text.includes(`\`big.ts\`（${PREFLIGHT_MAX_BYTES} 字节）`),
+      `正文头报的字节数必须停在上界，实际：${text.slice(0, 200)}`,
+    );
   });
 
   it("二进制目标拿不到正文 ⇒ B 面整趟让路，交回 guard 的行动清单", async () => {
@@ -507,7 +520,7 @@ describe("真实 spine 下的接线与物化", () => {
     const text = await refsLine(spine, agent, "t3");
     assert.doesNotMatch(text, /nope_a|nope_b/u, "两条都不存在，一条都不该点");
     assert.ok(
-      text.includes("没有任何计入取证的检索工具"),
+      text.includes("当前没有可计入取证的检索工具"),
       `应给出「无法记账」那句指令，实际：${text.slice(0, 320)}`,
     );
   });
@@ -626,6 +639,10 @@ async function stageAsk(outcome?: ApprovalOutcome): Promise<{
 }
 
 describe("需确认档（ask 通道）：官方 serviceAsk 的四个出口", () => {
+  // 这一组开出去的台同样进 stages：清理挂在模块级 afterAll 会被 lint 拦（hook 必须在 describe 内），
+  // 所以两个 describe 各挂一份。
+  afterAll(disposeStages);
+
   /** 一条必然落在 `ask` 档的命令：引号不闭合 ⇒ 取不出体 ⇒ `nestedShellUnconfirmed`。 */
   const ASK_COMMAND = 'bash -c "rm -rf /';
   // `description` 是宿主那条 bash 夹具的必填参数（缺它会先被工具自己的参数校验拦下，

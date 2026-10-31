@@ -110,14 +110,22 @@ export function noteJudgeCost(cost: JudgeCost): void {
     bump(slowByFace, face);
     console.warn(`[danger-guard] slow judge (${face}): ${ms.toFixed(1)}ms, input ${length} chars`);
   }
+  // 落样本时浅拷贝：调用方（`sampleJudge` 的同一对象还会交给总线上报）之后改写
+  // `cost` 不应回写已经进窗的历史样本。
+  const sample: JudgeCost = {
+    face,
+    ms,
+    length,
+    ...(cost.judged === undefined ? {} : { judged: cost.judged }),
+  };
   // 直接在原数组上推进、只在窗口攒满时换新数组：每次判定整份复制（最多 200 条）会让
   // 这条每个工具调用都走的热路径在攒窗期付出 O(n²) 的分配。
   const window = samplesByFace.get(face);
   if (window === undefined) {
-    samplesByFace.set(face, [cost]);
+    samplesByFace.set(face, [sample]);
     return;
   }
-  window.push(cost);
+  window.push(sample);
   if (window.length < STATS_WINDOW_CALLS) {
     return;
   }
@@ -138,13 +146,18 @@ export function noteJudgeCost(cost: JudgeCost): void {
 export function noteRuleHit(key: BashDenialKey, tier: RuleTier): void {
   // 查表而不是三元分流：`Record<RuleTier, …>` 让以后扩出 allow/sandbox 之类新档位时
   // 这里编译期就红——三元会把"非 ask"一律折进 hits，快照里那栏读数被静默污染。
+  // 表外档位（跨包调用方或运行期形状漂移）只丢这一格：统计是旁路读数，不能因为
+  // 一个非法键在 deny 分支上抛 TypeError 而打断判定链。
+  if (!Object.hasOwn(HIT_TABLE, tier)) {
+    return;
+  }
   bump(HIT_TABLE[tier], key);
 }
 
 /** 记一次"看见了但本档选择不动手"。
  *
  *  它与 `hits` / `asks` 分开记：那两格是"动手拦了"，这一格是"按当前档位没拦"。
- *  ⚠ 这一格**不专指**零兵底：自动审查档里交给 reviewer 的命中、已退役规则（长驻服务器）的
+ *  ⚠ 这一格**不专指**零兜底：自动审查档里交给 reviewer 的命中、已退役规则（长驻服务器）的
  *  命中也会落进来，所以读它是「这一档总共放过多少」，不是「用户选了完全不拦」。
  *  沙箱让路（`rmrf` 交给宿主）**不算**这一格——那是交给别人拦，不是放过。
  *

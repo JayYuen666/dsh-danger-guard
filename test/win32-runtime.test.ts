@@ -36,7 +36,11 @@ vi.mock("node:os", async (importOriginal) => {
   const homedir = (): string => String.raw`C:\Users\tester`;
   // oxlint-disable-next-line unicorn/consistent-function-scoping
   const platform = (): string => "win32";
-  return { ...actual, homedir, platform, default: { ...actual, homedir, platform } };
+  // 运行期命名空间上有 `default`（指向同一模块），类型面没有：经 unknown 取它，
+  // 让 `os.default.homedir()` 也落在桩上，而不是回到宿主真实家目录。
+  const actualDefault =
+    (actual as unknown as { readonly default?: typeof actual }).default ?? actual;
+  return { ...actual, homedir, platform, default: { ...actualDefault, homedir, platform } };
 });
 
 describe("win32 全运行时下的路径判据", () => {
@@ -66,6 +70,12 @@ describe("win32 全运行时下的路径判据", () => {
     const elsewhere = asOsPath(win("C:", "elsewhere"));
     assert.equal(sandboxDropsOf(scope, [driveRoot]), false, "盘根包住可写根");
     assert.equal(sandboxDropsOf(scope, [parentDir]), false, "父目录包住可写根");
+    const insideRoot = asOsPath(win("C:", "w", "proj", "build"));
+    assert.equal(
+      sandboxDropsOf(scope, [insideRoot]),
+      false,
+      "目标落在可写根之内 ⇒ 沙箱允许写，不能让路",
+    );
     assert.equal(sandboxDropsOf(scope, [elsewhere]), true, "够不着 ⇒ 让路");
   });
 

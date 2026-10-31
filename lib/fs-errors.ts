@@ -20,15 +20,21 @@ const ENOENT_MESSAGE_PREFIX = /^ENOENT(?::|$|\s)/u;
  *          那时并没有 errno 可依据，判据比"有 code"那一支松，只作为旧宿主/自定义 fs 的兜底。
  */
 export function isNotFoundError(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) {
+  try {
+    if (typeof error !== "object" || error === null) {
+      return false;
+    }
+    const { code, message } = error as { code?: unknown; message?: unknown };
+    if (typeof code === "string") {
+      return code === "ENOENT";
+    }
+    // 前缀匹配带词边界：libuv 的措辞是 "ENOENT: …"，"ENOENTX" 一类拼接串不得误判成缺失。
+    return typeof message === "string" && ENOENT_MESSAGE_PREFIX.test(message);
+  } catch {
+    // 抛错 getter / 异常包装对象：读不到判据就按"不可知"处理（false 不授予新建豁免），
+    // 分类函数自己不能把异常泄给守卫热路径。
     return false;
   }
-  const { code, message } = error as { code?: unknown; message?: unknown };
-  if (typeof code === "string") {
-    return code === "ENOENT";
-  }
-  // 前缀匹配带词边界：libuv 的措辞是 "ENOENT: …"，"ENOENTX" 一类拼接串不得误判成缺失。
-  return typeof message === "string" && ENOENT_MESSAGE_PREFIX.test(message);
 }
 
 /** stat 的三态结论：**不存在**（ENOENT）/ **存在**（拿到 stat）/ **不可知**（其它错误）。
@@ -42,9 +48,10 @@ export interface StatAttempt {
   readonly mtimeMs: number;
 }
 
-/** "取不到 mtime"的哨兵值。真实 mtimeMs 理论上可为负（1970 年前的时间戳），与之撞值时
- *  下游的比较只会把那次读当作"从未见过"——方向是多要求一次取证，不是放行。 */
-export const MTIME_UNKNOWN = -1;
+/** "取不到 mtime"的哨兵值。`-1` 会与 1970 年前的真实 mtime 撞值，那一格会让外部改动
+ *  检测静默失效；负无穷不会与任何有限实数相撞，下游的 `mtimeMs > seenMtime` 仍把真实
+ *  时间判成跳变，方向是多要求一次取证。 */
+export const MTIME_UNKNOWN = Number.NEGATIVE_INFINITY;
 
 /**
  * 把一次 stat 尝试折成三态之一。

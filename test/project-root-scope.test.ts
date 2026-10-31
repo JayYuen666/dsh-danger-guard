@@ -122,13 +122,20 @@ function absolutePathsIn(message: string): string[] {
  *  收窄责任放在这里：`fire` 交回 `string | undefined`，而 `assert.equal` 不收窄类型；
  *  两次失败都用 `assert.fail` 的 `never` 返回域收窄，而不是把 undefined 传下去。
  *  `undefined` 即"放行了"—— 本用例期望的是先给行动清单。 */
-function firstRootOf(message: string | undefined): string {
+function firstRootOf(message: string | undefined, target?: string): string {
   if (message === undefined) {
     assert.fail("首次编辑必须先给行动清单（拒绝理由），而不是静默放行");
   }
-  const [first] = absolutePathsIn(message);
+  const paths = absolutePathsIn(message);
+  // 给了 target 就按语义取："检索起点必须是目标的祖先"——不依赖文案里路径的先后。
+  const first =
+    target === undefined
+      ? paths[0]
+      : paths.find(
+          (candidate) => target === candidate || target.startsWith(`${candidate}${path.sep}`),
+        );
   if (first === undefined) {
-    assert.fail(`拒绝理由必须点名检索起点，实际文案：${message}`);
+    assert.fail(`拒绝理由必须点名目标的祖先目录作为检索起点，实际文案：${message}`);
   }
   return first;
 }
@@ -165,7 +172,7 @@ describe("项目根回落与引用取证起点必须同源（提示可照做）"
 
     const denial = fire(ctx, { target, sessionId, cwd: cwdElsewhere });
     // 第一条绝对路径就是 grep/glob 的 path 位置（与 zg 的 root 同值）。
-    const instructionRoot = firstRootOf(denial);
+    const instructionRoot = firstRootOf(denial, target);
     assert.ok(
       isAncestorDir(instructionRoot, target),
       `门禁给出的检索起点必须是目标的祖先目录，否则模型照提示做也拿不到凭证；` +
@@ -193,7 +200,7 @@ describe("项目根回落与引用取证起点必须同源（提示可照做）"
 
     const denial = fire(ctx, { target, sessionId: "inside", cwd: cwdElsewhere });
     assert.equal(
-      firstRootOf(denial),
+      firstRootOf(denial, target),
       projectRoot,
       "项目内目标的起点必须是被 ROOT_MARKER 认出的项目根，而不是会话 cwd、也不是目标父目录",
     );
@@ -209,7 +216,7 @@ describe("项目根回落与引用取证起点必须同源（提示可照做）"
 
     const denial = fire(ctx, { target, sessionId: "nested", cwd: outsideRoot });
     assert.equal(
-      firstRootOf(denial),
+      firstRootOf(denial, target),
       outsideRoot,
       "cwd 是目标祖先时应取 cwd（层探查范围更大），而不是目标自身的父目录",
     );
@@ -224,13 +231,13 @@ describe("项目根回落与引用取证起点必须同源（提示可照做）"
     const target = path.join(nested, "same.mjs");
 
     const insideDenial = fire(ctx, { target, sessionId: "two-cwd-inside", cwd: outsideRoot });
-    assert.equal(firstRootOf(insideDenial), outsideRoot, "cwd 是祖先 ⇒ 起点取 cwd");
+    assert.equal(firstRootOf(insideDenial, target), outsideRoot, "cwd 是祖先 ⇒ 起点取 cwd");
 
     // 同一枚目标，换到与它分处两棵树的会话目录：起点必须回落成目标父目录。
     // 只按 targetN 缓存时这里会吃到上一趟的根（= 别人的 cwd），起点错位而判定不报错。
     const outsideDenial = fire(ctx, { target, sessionId: "two-cwd-outside", cwd: cwdElsewhere });
     assert.equal(
-      firstRootOf(outsideDenial),
+      firstRootOf(outsideDenial, target),
       nested,
       "cwd 不是祖先 ⇒ 回落成目标父目录：根缓存不许跨会话目录串味",
     );
@@ -250,7 +257,11 @@ describe("项目根回落与引用取证起点必须同源（提示可照做）"
     const target = path.join(narrow, "mod.mjs");
 
     // ① 窄根会话先评估：它的层集合里没有 test。
-    const narrowDenial = fire(ctx, { target, sessionId: "layer-narrow", cwd: narrow }) ?? "";
+    const narrowDenial = fire(ctx, { target, sessionId: "layer-narrow", cwd: narrow });
+    assert.ok(
+      typeof narrowDenial === "string" && narrowDenial.length > 0,
+      "窄根会话必须先给拒绝理由（否则下面的负向断言是空转）",
+    );
     assert.ok(
       !narrowDenial.includes("test 层触达"),
       `窄根会话不该被要求一层它自己的根里不存在的 test 层，实际：${narrowDenial.slice(0, 200)}`,

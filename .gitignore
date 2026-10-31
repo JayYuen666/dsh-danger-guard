@@ -10,3 +10,8 @@ coverage/
 
 # 统一构建件的原子落盘草稿目录（shared/lib/build-artifacts 的 writeArtifact）。
 /.tmp/
+
+# 本地联调用的凭据文件（README 把 .env 全族列为密钥面）。示例文件保留。
+/.env
+/.env.*
+!/.env.example

@@ -528,44 +528,50 @@ function DgCard(props: DgCardProps): ReactNode {
     setTouched((prev) => ({ ...prev, [field]: val }));
   };
   const save = async (): Promise<void> => {
-    const keys = diffTouched(touched, value);
+    // 提交期间字段仍可编辑（`busy` 只拦保存按钮），所以这里以**提交那一刻**的草稿为准：
+    // 成功/失败只清掉「已结算且期间未被再改」的键，其余（新编辑、失败键）留在 touched 里。
+    const submitted = { ...touched };
+    const keys = diffTouched(submitted, value);
     if (keys.length === 0) {
       return;
     }
     setBusy(true);
     setSaveError(null);
     const ops = keys.map((key) => {
-      const val = touched[key];
+      const val = submitted[key];
       return val === undefined ? props.unset(key) : props.set(key, val);
     });
     const results = await Promise.allSettled(ops);
-    const failed: string[] = [];
+    const failed = new Set<string>();
     let firstReason: unknown;
     for (const [index, key] of keys.entries()) {
       const outcome = results[index];
       if (outcome?.status === "rejected") {
-        failed.push(key);
+        failed.add(key);
         if (firstReason === undefined) {
           firstReason = outcome.reason;
         }
       }
     }
     setBusy(false);
-    if (failed.length === 0) {
-      setTouched({});
-      return;
-    }
+    const submittedKeys = new Set(keys);
     setTouched((prev) => {
       const remaining: Record<string, unknown> = {};
-      for (const key of failed) {
-        remaining[key] = prev[key];
+      for (const [key, val] of Object.entries(prev)) {
+        const settled = submittedKeys.has(key) && !failed.has(key);
+        if (!settled || !Object.is(val, submitted[key])) {
+          remaining[key] = val;
+        }
       }
       return remaining;
     });
+    if (failed.size === 0) {
+      return;
+    }
     setSaveError(
       `${t("saveFailed")}${String(firstReason instanceof Error ? firstReason.message : firstReason)}`,
     );
-    console.error("[danger-guard] save failed:", failed, firstReason);
+    console.error("[danger-guard] save failed:", [...failed], firstReason);
   };
   const discard = (): void => {
     setTouched({});
@@ -747,15 +753,18 @@ function apply(ctx: ClientCtx): void {
           // 读数器在 apply 期造一次（`$mount` 幂等，见 stats-reader）；宿主没装 Remote 面时
           // 交 undefined，卡片那一段显示"读不到"而不是让整张卡挂不上。
           ...(readStats === undefined ? {} : { readStats }),
-          // 0.1.7 的 set/unset 回 `Promise<boolean>`（受理位）。这里**刻意不消费**它：卡片的
-          // 保存条沿用 0.1.6 的 `Promise<void>` 形状，失败面仍只认 rejection（传输失败），
-          // 由 save() 的 try/catch 呈现为可见错误。改用受理位要新增判定与文案键，那是改
-          // 行为而不是迁移（session-rescue / ctx-observe / quality-gate 同一条纪律）。
+          // 0.1.7 的 set/unset 回 `Promise<boolean>`：false = 宿主拒绝 / 表单已销毁 /
+          // 写入被跳过。翻成 rejection 交给卡片既有的失败面（saveFailed + 留住草稿）：
+          // 吞掉它只会让卡片显示"已保存"而实际一个字节都没写。
           set: async (field: string, value: unknown): Promise<void> => {
-            await scope.set(field, value);
+            if (!(await scope.set(field, value))) {
+              throw new Error(t("saveRejected"));
+            }
           },
           unset: async (field: string): Promise<void> => {
-            await scope.unset(field);
+            if (!(await scope.unset(field))) {
+              throw new Error(t("saveRejected"));
+            }
           },
         }),
       },

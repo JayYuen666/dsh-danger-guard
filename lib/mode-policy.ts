@@ -32,6 +32,21 @@ const FULL_ACCESS_MODE = "danger-full-access";
  */
 export type GuardMode = "read-only" | "workspace-write" | typeof FULL_ACCESS_MODE | "unknown";
 
+/** 宿主认识的三种沙箱模式（`unknown` 不是宿主模式，是本包的降级值）。 */
+const isKnownGuardMode = (value: string): value is GuardMode =>
+  value === "read-only" || value === "workspace-write" || value === FULL_ACCESS_MODE;
+
+/** 把宿主交回的原始模式名折成档位；认不出的（含非字符串）一律 `unknown`。 */
+export function guardModeOf(raw: unknown): GuardMode {
+  return typeof raw === "string" && isKnownGuardMode(raw) ? raw : "unknown";
+}
+
+/** 与 {@link guardModeOf} 同源，但只交回宿主确实认识的那三种；`unknown` 交回 `undefined`。 */
+export function knownGuardModeOf(raw: unknown): GuardMode | undefined {
+  const mode = guardModeOf(raw);
+  return mode === "unknown" ? undefined : mode;
+}
+
 /** 一枚规则键在某次调用上的处置结论。 */
 export type RuleVerdict = "allow" | "ask" | "deny";
 
@@ -45,7 +60,9 @@ export type RuleVerdict = "allow" | "ask" | "deny";
  */
 export interface PolicyFacts {
   readonly mode: GuardMode;
-  /** 本会话此刻能否真的问到用户：审批策略不是 `never`，且审批服务在位。 */
+  /** 本会话此刻能否真的问到用户：审批策略为 `ask`（配置缺席按宿主默认的 `ask`）。
+   *  审批服务整个缺席时按 `true` 处理——宿主那条 fail-closed 路径保留我们交的 reason，
+   *  判定与文案都不变，只是最终结论由宿主收口成拒绝。 */
   readonly askable: boolean;
   /** 本会话是不是「自动审查」档（`danger-full-access` + `ask` + 逐调用 reviewer）。 */
   readonly autoReview: boolean;
@@ -64,9 +81,9 @@ type ModeTable = Readonly<Record<BashDenialKey, RuleVerdict>>;
  * 每个格子就是一个结论，没有隐藏的 if 分支。
  *
  * 逐列的理由：
- *  - `read-only`：沙箱拒一切写，写类判据（`rmrf`）一律让给沙箱；`pipeShell` 这一档放行是
- *    用户的明确取舍（只读档里下载的脚本落不了盘）；仍然要问的是那些沙箱盖不到的东西
- *    （git 破坏族、基础设施族）与"判据看不见"的形态。
+ *  - `read-only`：沙箱拒一切写，写类判据（`rmrf`）一律让给沙箱；`pipeShell` 在这一档照问——
+ *    管道执行不落盘，沙箱拒写根本管不到「下载即执行」，让给沙箱等于不拦；仍然要问的是
+ *    那些沙箱盖不到的东西（git 破坏族、基础设施族）与"判据看不见"的形态。
  *  - `workspace-write`：沙箱的语义是**允许**改工作区，所以包住可写根的灾难删除必须我们拦
  *    （沙箱是路径白名单、不提供原子性：`rm -rf ~` 会先删光工作区再在边界外被拒）；
  *    `pipeShell` 会下载代码再执行，沙箱管不到"跑起来之后做什么"，保留硬拒。
@@ -80,7 +97,7 @@ const BASE: Readonly<Record<Exclude<GuardMode, typeof FULL_ACCESS_MODE>, ModeTab
   "read-only": {
     noVerify: "deny",
     rmrf: "deny",
-    pipeShell: "allow",
+    pipeShell: "ask",
     devServer: "allow",
     nestedShellUnconfirmed: "ask",
     gitResetHard: "ask",
@@ -143,6 +160,8 @@ const BASE: Readonly<Record<Exclude<GuardMode, typeof FULL_ACCESS_MODE>, ModeTab
  * 为什么只有这两枚：reviewer 是一个 LLM，它的 allow 不等于用户批准，而这一档的沙箱什么都
  * 不拦；灾难删除与"下载即执行"是两条它可能被话术说服放过的形态，也是唯一值得留一道
  * 不可绕过的确定性命中的地方。其余全部交给 reviewer——我们再问一次就是同一个动作两张卡。
+ * `noVerify` 不在本集合里，但同样在这一档硬拒：绕 git 钩子不是沙箱面的事，交给 reviewer
+ * 等于让它替一条与沙箱无关的固定判据做决定（见 `decideRule`）。
  *
  * 导出：档位说明文案（lib/policy-deny.ts）要按**同一份集合**决定"哪几条拒绝接硬拦成因"，
  * 两处各写一遍时增删规则键会静默漂移。
@@ -161,9 +180,16 @@ export const AUTO_REVIEW_HARD_STOPS: ReadonlySet<BashDenialKey> = new Set<BashDe
  */
 export function decideRule(facts: PolicyFacts, key: BashDenialKey): RuleVerdict {
   if (facts.mode === FULL_ACCESS_MODE) {
-    // 零兵底只属于**问不了**的那一档（官方预设为 `danger-full-access` + `never`）。
+    // 自动审查档先判：硬拦不依赖“能不能问”。若先命中 `!askable`，`auto` 预设叠加
+    // 审批策略 `never` 时 `rmrf`/`pipeShell` 会被整档放行，`AUTO_REVIEW_HARD_STOPS` 失效。
+    if (facts.autoReview) {
+      // `noVerify` 不在 `AUTO_REVIEW_HARD_STOPS` 里，却和「完全权限但问不了」那一支一样硬拒：
+      // 绕 git 钩子与沙箱无关，也不该被 reviewer 的一次判断顺带放行（`BASE` 每一列都是 deny）。
+      return key === "noVerify" || AUTO_REVIEW_HARD_STOPS.has(key) ? "deny" : "allow";
+    }
+    // 零兜底只属于**问不了**的那一档（官方预设为 `danger-full-access` + `never`）。
     // 判据用 `askable` 而不是预设名：`danger-full-access + ask` 是对得上的组合（用户自定义，
-    // 或没装预设服务时的默认 `ask`），那一档沙箱什么都不拦、却**还能问** —— 按零兵底处理
+    // 或没装预设服务时的默认 `ask`），那一档沙箱什么都不拦、却**还能问** —— 按零兜底处理
     // 等于把本该问的动作静默放行，方向正好与"问不了才降级"相反。
     if (!facts.askable) {
       // 例外只有 `noVerify`：绕 git 钩子与沙箱无关，`BASE` 表里它每一列都是 `deny`
@@ -171,17 +197,15 @@ export function decideRule(facts: PolicyFacts, key: BashDenialKey): RuleVerdict 
       // 也会让"完全权限档"成为钩子绕过的唯一开口。
       return key === "noVerify" ? "deny" : "allow";
     }
-    // 自动审查档：只留两条 reviewer 盖不住的确定性硬拦，其余交给它，避免一次动作两张卡。
-    if (facts.autoReview) {
-      return AUTO_REVIEW_HARD_STOPS.has(key) ? "deny" : "allow";
-    }
     // 完全权限但仍能问：沿用工作区档的处置（沙箱不兜底，所以写类判据一律我们拦）。
     return BASE["workspace-write"][key];
   }
   const base = BASE[facts.mode][key];
   // 沙箱确实盖住这次的目标（只可能发生在 `rmrf` 上）：让宿主去拦，它会给出官方拒绝标记
   // 与 escalation 路径，而我们的硬拒会掐死那条路。
-  if (base === "deny" && key === "rmrf" && facts.sandboxCovers) {
+  // `unknown` 档没有可用的沙箱模式，`sandboxCovers` 却可能由另一条读取路径补齐；
+  // 这一档的契约是"没有沙箱兜底"，不能凭这一位让路。
+  if (base === "deny" && key === "rmrf" && facts.mode !== "unknown" && facts.sandboxCovers) {
     return "allow";
   }
   if (base !== "ask") {
@@ -263,5 +287,43 @@ export function severityResolverOf(facts: PolicyFacts): (verdict: BashVerdict) =
  *  静默少测一格——而 `Record` 只会因为 `BASE`/`AUTO_REVIEW_HARD_STOPS` 缺格而报错，
  *  不会因为清单漏项报错。派生之后两者结构上不可能不一致。 */
 export const ALL_RULE_KEYS: readonly BashDenialKey[] = Object.keys(BASE["read-only"]).filter(
-  (name): name is BashDenialKey => name in BASE["read-only"],
+  (name): name is BashDenialKey => Object.hasOwn(BASE["read-only"], name),
 );
+
+/** 每条档位说明**对哪几枚规则键**成立（其余键只出基础理由与出路，不接一段无关的成因）。
+ *
+ *  `read-only` 与 `unknown` 两段讲的是"这一层的定位"（谁负责写面、有没有沙箱兜底），
+ *  对任何键都成立；工作区档那段讲的是删除的原子性，只有 `rmrf` 用得上；自动审查那段讲的是
+ *  "为什么只留少数几条硬拦"，只在那几条硬拦真的被拒时才有意义。
+ *
+ *  导出：`policy-deny` 与 `confirm` 都用它决定"这段档位说明该不该接"——两处各写一遍时，
+ *  增删规则键会让"模型侧有成因、弹窗里没有"这类漂移静默发生。
+ */
+export const NOTE_APPLIES: Readonly<
+  Record<Exclude<GuardMode, typeof FULL_ACCESS_MODE>, (rule: BashDenialKey) => boolean>
+> = {
+  "read-only": () => true,
+  unknown: () => true,
+  // 完全权限档的三个出口由 `modeNoteApplies` 按事实分派，不在本表里重复一份。
+  "workspace-write": (rule) => rule === "rmrf",
+};
+
+/**
+ * 这段档位说明对这条规则成不成立。
+ *
+ * `danger-full-access` 有三个出口：自动审查只拒绝硬拦集合与 `noVerify`；问不了时只拒绝
+ * `noVerify`；仍能问时沿用工作区档（只有 `rmrf` 接删除原子性的说明）。只看 mode 会把
+ * 「本档不逐条问」的说明接到一个其实能问的出口，也会漏掉 `noVerify` 的拒绝。
+ */
+export const modeNoteApplies = (facts: PolicyFacts, rule: BashDenialKey): boolean => {
+  if (facts.mode !== FULL_ACCESS_MODE) {
+    return NOTE_APPLIES[facts.mode](rule);
+  }
+  if (facts.autoReview) {
+    return rule === "noVerify" || AUTO_REVIEW_HARD_STOPS.has(rule);
+  }
+  if (!facts.askable) {
+    return rule === "noVerify";
+  }
+  return rule === "rmrf";
+};

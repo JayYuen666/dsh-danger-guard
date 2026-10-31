@@ -13,6 +13,7 @@ import {
   ALL_RULE_KEYS,
   decideRule,
   deniedByPolicy,
+  modeNoteApplies,
   modeNoteKeyOf,
   severityResolverOf,
 } from "../lib/mode-policy.ts";
@@ -53,7 +54,7 @@ const EXPECTED: Readonly<Record<GuardMode, Readonly<Record<BashDenialKey, RuleVe
   "read-only": {
     noVerify: "deny",
     rmrf: "deny",
-    pipeShell: "allow",
+    pipeShell: "ask",
     devServer: "allow",
     nestedShellUnconfirmed: "ask",
     gitResetHard: "ask",
@@ -109,15 +110,51 @@ const EXPECTED: Readonly<Record<GuardMode, Readonly<Record<BashDenialKey, RuleVe
   },
   // 完全权限：零兵底，只统计不打断 —— 除 `noVerify`：绕 git 钩子与沙箱无关，是这张表自己
   // 的判据（`BASE` 里每一列都是 deny），不该被"这档不问"顺带放行。
-  "danger-full-access": Object.fromEntries(
-    ALL_RULE_KEYS.map((key) => [key, key === "noVerify" ? "deny" : "allow"]),
-  ) as Readonly<Record<BashDenialKey, RuleVerdict>>,
+  // 逐键写全（不按 ALL_RULE_KEYS 生成）：新增规则键时这里必须**编译失败**，
+  // 「这档该不该放行新规则」才会回到用户面前，而不是被默认值静默吞掉。
+  "danger-full-access": {
+    noVerify: "deny",
+    rmrf: "allow",
+    pipeShell: "allow",
+    devServer: "allow",
+    nestedShellUnconfirmed: "allow",
+    gitResetHard: "allow",
+    gitCheckoutDiscard: "allow",
+    gitRestoreDiscard: "allow",
+    gitCleanForce: "allow",
+    gitStashDrop: "allow",
+    gitBranchDelete: "allow",
+    gitForcePush: "allow",
+    tfDestroy: "allow",
+    tfAutoApprove: "allow",
+    dockerPrune: "allow",
+    kubectlDelete: "allow",
+    dbMigrate: "allow",
+  },
 };
 
-/** 自动审查不是 `GuardMode` 的一列（它是 `danger-full-access` + reviewer），期望单列一份。 */
-const AUTO_EXPECTED = Object.fromEntries(
-  ALL_RULE_KEYS.map((key) => [key, key === "rmrf" || key === "pipeShell" ? "deny" : "allow"]),
-) as Readonly<Record<BashDenialKey, RuleVerdict>>;
+/** 自动审查不是 `GuardMode` 的一列（它是 `danger-full-access` + reviewer），期望单列一份。
+ *  同样是逐键写全：灾难删除与下载即执行硬拦；`noVerify` 也硬拦（与沙箱无关的固定判据，
+ *  不交给 reviewer）；其余交给它。 */
+const AUTO_EXPECTED: Readonly<Record<BashDenialKey, RuleVerdict>> = {
+  noVerify: "deny",
+  rmrf: "deny",
+  pipeShell: "deny",
+  devServer: "allow",
+  nestedShellUnconfirmed: "allow",
+  gitResetHard: "allow",
+  gitCheckoutDiscard: "allow",
+  gitRestoreDiscard: "allow",
+  gitCleanForce: "allow",
+  gitStashDrop: "allow",
+  gitBranchDelete: "allow",
+  gitForcePush: "allow",
+  tfDestroy: "allow",
+  tfAutoApprove: "allow",
+  dockerPrune: "allow",
+  kubectlDelete: "allow",
+  dbMigrate: "allow",
+};
 
 describe("四档矩阵：每一枚规则键在每一个预设下的结论", () => {
   it("仅可查看：写类让给沙箱、长驻让给宿主、其余照问", () => {
@@ -150,16 +187,16 @@ describe("四档矩阵：每一枚规则键在每一个预设下的结论", () =
     }
   });
 
-  it("四档逐键确实**不同**（这张表不是一个常量穿四件衣服）", () => {
-    // 这几枚在四档之间必须分叉，否则"按档位分叉"这件事等于没做。
-    for (const key of ["pipeShell", "nestedShellUnconfirmed", "rmrf"] as const) {
-      const verdicts = new Set([
-        decideRule(READ_ONLY, key),
-        decideRule(WORKSPACE_WRITE, key),
-        decideRule(FULL_ACCESS, key),
-        decideRule(AUTO_REVIEW, key),
-      ]);
-      assert.ok(verdicts.size >= 2, `${key} 在四档下应当至少有两种结论`);
+  it("四档两两整列不同（这张表不是一个常量穿四件衣服）", () => {
+    const columns = [READ_ONLY, WORKSPACE_WRITE, FULL_ACCESS, AUTO_REVIEW].map((facts) =>
+      ALL_RULE_KEYS.map((key) => `${key}=${decideRule(facts, key)}`).join(","),
+    );
+    for (const [leftIndex, left] of columns.entries()) {
+      for (const [rightIndex, right] of columns.entries()) {
+        if (leftIndex < rightIndex) {
+          assert.notEqual(left, right, `第 ${leftIndex} 档与第 ${rightIndex} 档的整列结论必须不同`);
+        }
+      }
     }
   });
 });
@@ -193,9 +230,16 @@ describe("完全权限档的两个分支：零兵底只属于「问不了」的�
   });
 
   it("自动审查档仍按两条硬拦收紧", () => {
-    const auto: PolicyFacts = { ...FULL_ACCESS_ASKABLE, autoReview: true };
-    assert.equal(decideRule(auto, "rmrf"), "deny");
-    assert.equal(decideRule(auto, "pipeShell"), "deny");
+    assert.equal(decideRule(AUTO_REVIEW, "rmrf"), "deny");
+    assert.equal(decideRule(AUTO_REVIEW, "pipeShell"), "deny");
+  });
+
+  it("自动审查 + 问不了：硬拦仍然生效，不被零兵底整档放行", () => {
+    const autoNever: PolicyFacts = { ...FULL_ACCESS_ASKABLE, autoReview: true, askable: false };
+    for (const key of ["rmrf", "pipeShell", "noVerify"] as const) {
+      assert.equal(decideRule(autoNever, key), "deny", key);
+    }
+    assert.equal(decideRule(autoNever, "gitForcePush"), "allow");
   });
 });
 
@@ -213,6 +257,14 @@ describe("rmrf 的沙箱让路只发生在「沙箱确实盖住这次目标」�
     const bogus: PolicyFacts = { ...WORKSPACE_WRITE, sandboxCovers: true };
     assert.equal(decideRule(bogus, "pipeShell"), "deny");
     assert.equal(decideRule(bogus, "gitCleanForce"), "ask");
+  });
+
+  it("`unknown` 档不因 `sandboxCovers` 让路：没有沙箱模式就没有兜底", () => {
+    const unknownCovered: PolicyFacts = {
+      ...UNKNOWN,
+      sandboxCovers: true,
+    };
+    assert.equal(decideRule(unknownCovered, "rmrf"), "deny");
   });
 });
 
@@ -246,16 +298,28 @@ describe("档位说明：同一枚键在不同预设下说不同的话", () => {
     assert.equal(modeNoteKeyOf(FULL_ACCESS), "noteFullAccess");
     assert.equal(modeNoteKeyOf(UNKNOWN), "noteUnknown");
   });
+
+  it("完全权限的三个出口各接各的说明（不把「问不了」的话接到能问的出口）", () => {
+    const askable: PolicyFacts = { ...FULL_ACCESS, askable: true };
+    assert.equal(modeNoteApplies(askable, "rmrf"), true);
+    assert.equal(modeNoteApplies(askable, "pipeShell"), false);
+    assert.equal(modeNoteApplies(askable, "gitForcePush"), false);
+
+    const auto: PolicyFacts = { ...FULL_ACCESS, askable: true, autoReview: true };
+    assert.equal(modeNoteApplies(auto, "rmrf"), true);
+    assert.equal(modeNoteApplies(auto, "pipeShell"), true);
+    assert.equal(modeNoteApplies(auto, "noVerify"), true);
+    assert.equal(modeNoteApplies(auto, "gitForcePush"), false);
+
+    // 问不了时整档只硬拒 `noVerify`，硬拦集合这一支反而放行，不能接说明。
+    assert.equal(modeNoteApplies(FULL_ACCESS, "noVerify"), true);
+    assert.equal(modeNoteApplies(FULL_ACCESS, "rmrf"), false);
+  });
 });
 
 describe("severityResolverOf：扫描层按真实档位排序（串行命令的漏拦修复）", () => {
-  /** 只读档：`pipeShell` 与 `devServer` 放行，git 族仍要问——这组差异正是排序要用的。 */
-  const READ_ONLY_FACTS: PolicyFacts = {
-    mode: "read-only",
-    askable: true,
-    autoReview: false,
-    sandboxCovers: false,
-  };
+  /** 只读档：`devServer` 放行、git 族仍要问——这组差异正是排序要用的。 */
+  const READ_ONLY_FACTS: PolicyFacts = READ_ONLY;
 
   it("逐键回的就是 `decideRule` 的结论", () => {
     const severity = severityResolverOf(READ_ONLY_FACTS);
@@ -269,9 +333,27 @@ describe("severityResolverOf：扫描层按真实档位排序（串行命令的�
     assert.equal(severity({ key: "gitForcePush" }), severity({ key: "gitForcePush" }));
   });
 
-  it("只读档里 `pipeShell` 是 allow、`gitForcePush` 是 ask（后者更严重）", () => {
+  it("串行命令按真实档位择优：前段放行不会吞掉后段该问的那一条", () => {
+    // 只读档里 `devServer` 放行、`gitForcePush` 仍要问：按静态表「最严重」排序会让前段的
+    // allow 提前收工，把后段该问的那条整个吞掉。
     const severity = severityResolverOf(READ_ONLY_FACTS);
-    assert.equal(severity({ key: "pipeShell" }), "allow");
+    const verdicts = [{ key: "devServer" }, { key: "gitForcePush" }].map((hit) =>
+      severity(hit as { key: BashDenialKey }),
+    );
+    assert.deepEqual(verdicts, ["allow", "ask"], "两段的实际处置按档位给出");
+    const rank: Readonly<Record<RuleVerdict, number>> = { allow: 0, ask: 1, deny: 2 };
+    let worst: RuleVerdict = "allow";
+    for (const verdict of verdicts) {
+      if (rank[verdict] > rank[worst]) {
+        worst = verdict;
+      }
+    }
+    assert.equal(worst, "ask", "取最严重的那一段：ask，而不是被前段的 allow 吞掉");
+  });
+
+  it("只读档里 `devServer` 是 allow、`gitForcePush` 是 ask（后者更严重）", () => {
+    const severity = severityResolverOf(READ_ONLY_FACTS);
+    assert.equal(severity({ key: "devServer" }), "allow");
     assert.equal(severity({ key: "gitForcePush" }), "ask");
   });
 });

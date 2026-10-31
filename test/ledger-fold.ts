@@ -24,6 +24,19 @@ export const INIT_PLACEHOLDER = new Proxy(
         `ledger-fold 占位值被读取：${String(prop)}（单元的 init 开始消费 header/inherited 了）`,
       );
     },
+    has(_target, prop): never {
+      throw new TypeError(
+        `ledger-fold 占位值被 in 检查：${String(prop)}（单元开始消费 header/inherited 了）`,
+      );
+    },
+    ownKeys(): never {
+      throw new TypeError("ledger-fold 占位值被枚举（Object.keys/展开）：单元开始消费 header 了");
+    },
+    getOwnPropertyDescriptor(_target, prop): never {
+      throw new TypeError(
+        `ledger-fold 占位值被取属性描述符：${String(prop)}（Object.assign/展开会走这一支）`,
+      );
+    },
   },
 ) as never;
 

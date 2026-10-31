@@ -124,11 +124,16 @@ const toolLedgerSchema: z.ZodType<ToolLedger> = z
     };
     checkRows(value.calls, "calls");
     checkRows(value.results, "results");
-    const maxSeq = Math.max(
-      -1,
-      ...value.calls.map((row) => row.seq),
-      ...value.results.map((row) => row.seq),
-    );
+    // 逐个比较而不是展开成实参：`calls` / `results` 的长度由持久缓存回填与宿主漂移决定，
+    // 不受 `LEDGER_WINDOW` 约束；超过引擎实参上限时 `Math.max(...)` 抛 RangeError 会穿透
+    // `safeParse`，让守卫在同步路径上抛异常，而不是按设计退回全量扫描。
+    let maxSeq = -1;
+    for (const row of value.calls) {
+      maxSeq = Math.max(maxSeq, row.seq);
+    }
+    for (const row of value.results) {
+      maxSeq = Math.max(maxSeq, row.seq);
+    }
     if (maxSeq >= 0 && value.length <= maxSeq) {
       ctx.addIssue({
         code: "custom",

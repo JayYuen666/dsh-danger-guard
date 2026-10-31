@@ -18,9 +18,15 @@ import { pathToFileURL } from "node:url";
 
 const pkgDir = path.resolve(import.meta.dirname, "..");
 
+/** 单次加载的上限。产物里若有顶层死循环或永不 resolve 的等待，门禁必须失败，不能挂住 CI。 */
+const LOAD_TIMEOUT_MS = 30_000;
+/** stderr 上限：够放一条完整报错，同时挡住产物往 stderr 无限输出时吃满内存。 */
+const LOAD_MAX_BUFFER = 4 * 1024 * 1024;
+
 /** 在**独立进程**里 import 一个产物（同进程 import 会污染我们的模块表，也测不到解析期的
  *  语法错）。同步子进程：这条门禁没有并发需求，而 async 三种写法都被本仓的 promise 规则夹住
- *  —— 见 oxlint.config.ts 里 `syncWrites` 那一段。stdio 一律收进返回值，绝不漏进测试日志。 */
+ *  —— 见 oxlint.config.ts 的 syncIoScopes，`execFileSync` 只在这份文件里豁免。
+ *  stdio 一律收进返回值，绝不漏进测试日志。 */
 function loadArtifact(file: string): { code: number; stderr: string } {
   const url = pathToFileURL(path.join(pkgDir, file)).href;
   try {
@@ -30,15 +36,25 @@ function loadArtifact(file: string): { code: number; stderr: string } {
       {
         cwd: pkgDir,
         stdio: ["ignore", "ignore", "pipe"],
+        timeout: LOAD_TIMEOUT_MS,
+        maxBuffer: LOAD_MAX_BUFFER,
       },
     );
     return { code: 0, stderr: "" };
   } catch (error: unknown) {
-    const stderr =
-      error instanceof Error && "stderr" in error
-        ? String((error as { stderr: unknown }).stderr)
-        : String(error);
-    return { code: 1, stderr };
+    // 失败原因可能只在 status/signal/message 里（spawn 失败、被信号杀死时 stderr 为空）；
+    // 丢掉它们会得到一条「host.js 加载失败：」后面什么都没有的断言。
+    const failure = error as {
+      status?: unknown;
+      signal?: unknown;
+      stderr?: unknown;
+      message?: unknown;
+    };
+    const stderr = typeof failure.stderr === "string" ? failure.stderr : String(error);
+    const status = typeof failure.status === "number" ? failure.status : 1;
+    const signal =
+      typeof failure.signal === "string" ? `\nterminated by signal ${failure.signal}` : "";
+    return { code: status, stderr: `${stderr}${signal}`.trim() };
   }
 }
 
@@ -47,8 +63,6 @@ describe("产物可加载：两个 host 产物能被 Node 真的 import 进来",
     assert.ok(existsSync(path.join(pkgDir, "host.js")), "host.js 不存在：先跑 npm run build");
     const { code, stderr } = loadArtifact("host.js");
     assert.equal(code, 0, `host.js 加载失败：\n${stderr.slice(-1200)}`);
-    // 语法错是这一类里最该被点名的一种（装饰器原样落进产物就是它）。
-    assert.doesNotMatch(stderr, /SyntaxError/u, `host.js 有语法错误：\n${stderr.slice(-600)}`);
   });
 
   it("settings.js 解析并加载成功（同上）", () => {
@@ -58,10 +72,10 @@ describe("产物可加载：两个 host 产物能被 Node 真的 import 进来",
     );
     const { code, stderr } = loadArtifact("settings.js");
     assert.equal(code, 0, `settings.js 加载失败：\n${stderr.slice(-1200)}`);
-    assert.doesNotMatch(stderr, /SyntaxError/u, `settings.js 有语法错误：\n${stderr.slice(-600)}`);
   });
 
   it("装饰器**没有**原样落进产物（本轮踩过的那一类：rolldown 不降级标准装饰器）", () => {
+    assert.ok(existsSync(path.join(pkgDir, "host.js")), "host.js 不存在：先跑 npm run build");
     const host = readFileSync(path.join(pkgDir, "host.js"), "utf8");
     // 源码里那个装饰器用法还在（注释里提到过），但**不能**出现在可执行位置：
     // `@Remote("stats")` 这种行首装饰器形状一旦出现，就是预转换没生效 —— 而那是**非法 JS**，

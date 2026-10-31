@@ -11,9 +11,10 @@
 //  - **整趟作废**：取消 ⇒ 回 undefined ⇒ 不注入、不记凭证（半份"已探过引用面"最糟）；
 //  - **降级但不作废**：目录列不出 / 子项探不到 / 文件读不动 ⇒ `complete: false`
 //    ⇒ 文案换成"已扫范围内"，refs 凭证不给（保守），但已取到的正文照给；
-//  - **本来就不算数**：软链、点开头目录、依赖/产物目录、超大文件、二进制 ⇒ 跳过而**不**降级
-//    （它们不是"该看没看到"，而是"按口径就不看"）。
-import { describe, it, beforeAll, afterAll } from "vitest";
+//  - **不展开**：软链、点开头目录、依赖/产物目录 ⇒ 跳过而**不**降级（按口径就不看）；
+//  - **走到了但没读**：超大文件、二进制 ⇒ 进 `unread` / `unreadNotQuarantined`，
+//    零命中结论要降级成「已扫范围内」（它们不是"按口径不看"，是"这份正文没看"）。
+import { describe, it, beforeEach, afterEach } from "vitest";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -30,8 +31,8 @@ import type { RefScan } from "../lib/preflight-scan.ts";
 import { localFsFace } from "./fixtures/local-fs-face.ts";
 import type { LocalFsFailures } from "./fixtures/local-fs-face.ts";
 
-/** 一次临时"项目"的根与目标（beforeAll 里建，afterAll 里删；不给初值，避免 describe
- *  体内那层 setup 语义 —— vitest(require-hook) 管的就是这个）。 */
+/** 一次临时"项目"的根与目标（每个用例各建一份，afterEach 删；用例断言失败时残留
+ *  不会进入下一个用例）。 */
 let root: string;
 let target: string;
 
@@ -57,7 +58,9 @@ async function scanned(fail: LocalFsFailures = {}): Promise<RefScan> {
 }
 
 describe("引用扫描的降级与跳过", () => {
-  beforeAll(async () => {
+  beforeEach(async () => {
+    root = "";
+    target = "";
     root = await mkdtemp(path.join(tmpdir(), "dg-fs-face-"));
     target = path.join(root, "src", "target.ts");
     await mkdir(path.dirname(target), { recursive: true });
@@ -65,8 +68,12 @@ describe("引用扫描的降级与跳过", () => {
     await writeFile(path.join(root, "caller.ts"), 'import { widget } from "./src/target";\n');
   });
 
-  afterAll(async () => {
-    await rm(root, { recursive: true, force: true });
+  afterEach(async () => {
+    if (root.length > 0) {
+      await rm(root, { recursive: true, force: true });
+      root = "";
+      target = "";
+    }
   });
 
   it("主路径：命中报的是相对起点的路径，整趟算扫完", async () => {
@@ -98,10 +105,13 @@ describe("引用扫描的降级与跳过", () => {
     assert.equal(scan.scanned, 0, "这层没展开，就是没读过任何文件");
   });
 
-  it("文件读不动 ⇒ 降级", async () => {
+  it("文件读不动 ⇒ 降级，且不计入「读过」", async () => {
     const scan = await scanned({ readThrows: "read boom" });
     assert.equal(scan.complete, false);
-    assert.equal(scan.scanned, 1, "确实算作「读过一次」，只是没读到");
+    // `scanned` 的契约是「真实读到正文的文件数」：读不动只证明走到了这一枚，
+    // 不能据此声称探过它的内容；它由 `unreadNotQuarantined` 记账。
+    assert.equal(scan.scanned, 0, "没读到正文就不能算进读过");
+    assert.equal(scan.unreadNotQuarantined.length, 1);
   });
 
   it("中途取消 ⇒ 整趟作废（回 undefined，既不注入也不记凭证）", async () => {
@@ -133,6 +143,15 @@ describe("引用扫描的降级与跳过", () => {
     const scan = await scanned();
     assert.equal(scan.complete, true, "跳过 ≠ 没扫完：这两类按口径本来就不读");
     assert.deepEqual(hitFiles(scan), ["caller.ts"], "超大与二进制都不进命中");
+    // 但它们是「走到了没读」：必须进 unreadNotQuarantined，零命中结论才会降级。
+    assert.ok(
+      scan.unreadNotQuarantined.some((entryPath) => entryPath.endsWith("huge.ts")),
+      "超大文件必须记进 unreadNotQuarantined",
+    );
+    assert.ok(
+      scan.unreadNotQuarantined.some((entryPath) => entryPath.endsWith("blob.ts")),
+      "二进制文件同样必须记进 unreadNotQuarantined",
+    );
     await Promise.all([rm(bigFile), rm(binFile)]);
   });
 
@@ -147,6 +166,7 @@ describe("引用扫描的降级与跳过", () => {
       false,
       "跟随软链等于让「项目级引用探查」去读目录树之外",
     );
+    assert.deepEqual(hitFiles(scan), ["caller.ts"], "同层普通文件照常命中：排除的只是软链");
     assert.equal(scan.complete, true, "按口径不看，就不算没扫完");
     await Promise.all([rm(link), rm(outside)]);
   });
@@ -178,12 +198,11 @@ describe("引用扫描的降级与跳过", () => {
     // 而 `unread` 每次 push 都带一条相对路径字符串，实测 400 个就长了 400 条。
     const secrets = path.join(root, "secrets");
     await mkdir(secrets, { recursive: true });
-    const count = PREFLIGHT_MAX_FILES + 40;
-    await Promise.all(
-      Array.from({ length: count }, (_unused, index) =>
-        writeFile(path.join(secrets, `k${String(index)}.env`), "widget\n"),
-      ),
-    );
+    // 逐个写：预算量级（约 300）的无界并发在 macOS 默认 ulimit 下可能撞 EMFILE。
+    for (let index = 0; index < PREFLIGHT_MAX_FILES + 40; index += 1) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- 顺序写是刻意的：控制同时打开的文件数
+      await writeFile(path.join(secrets, `k${String(index)}.env`), "widget\n");
+    }
     const scan = await scanReferences({
       targetN: target,
       root,
@@ -194,6 +213,8 @@ describe("引用扫描的降级与跳过", () => {
     });
     assert.ok(scan !== undefined, "这一趟该跑成");
     assert.equal(scan.complete, false, "预算用尽就是没扫完，不能报「扫完了」");
+    assert.ok(scan.quarantined > 0, "隔离分支确实生效（否则预算耗尽也能伪装成这条结论）");
+    assert.deepEqual(hitFiles(scan), ["caller.ts"], "隔离文件不进命中");
     assert.ok(
       scan.unread.length <= PREFLIGHT_MAX_FILES,
       `unread 不得超过文件预算（实测 ${String(scan.unread.length)} 条，上限 ${String(PREFLIGHT_MAX_FILES)}）`,

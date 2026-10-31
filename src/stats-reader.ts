@@ -85,17 +85,18 @@ const isStatsNamespace = (value: unknown): value is StatsNamespace =>
 /** 跨进程返回值的形状守卫：字段齐、表是对象、计数是有限数字。多出来的键不拦——
  *  这是消费侧的下限校验，不是对宿主实现的穷举。zod 只做校验，不把原对象换成解析产物：
  *  宿主多写的键仍照原样交给上层。 */
+const countOf = z.int().nonnegative();
 const STATS_SNAPSHOT_SCHEMA: z.ZodType<StatsSnapshot> = z.object({
-  calls: z.record(z.string(), z.number()),
-  slow: z.record(z.string(), z.number()),
-  hits: z.record(z.string(), z.number()),
-  asks: z.record(z.string(), z.number()),
-  allowed: z.record(z.string(), z.number()),
-  allowedByMode: z.record(z.string(), z.number()),
-  skipped: z.record(z.string(), z.number()),
-  quotaReleases: z.number(),
-  slowMs: z.number(),
-  window: z.number(),
+  calls: z.record(z.string(), countOf),
+  slow: z.record(z.string(), countOf),
+  hits: z.record(z.string(), countOf),
+  asks: z.record(z.string(), countOf),
+  allowed: z.record(z.string(), countOf),
+  allowedByMode: z.record(z.string(), countOf),
+  skipped: z.record(z.string(), countOf),
+  quotaReleases: countOf,
+  slowMs: countOf,
+  window: countOf,
 });
 
 const isStatsSnapshot = (value: unknown): value is StatsSnapshot =>
@@ -122,15 +123,24 @@ function buildStatsReader(ctx: RemoteHost, remote: RemoteMounter): () => Promise
     }
     const namespace = ctx.get?.(STATS_SERVICE_KEY, false);
     if (!isStatsNamespace(namespace)) {
+      // 挂载成功但命名空间不见了：网关重连/贡献被丢弃后同一枚 mounted promise 不会再
+      // 触发一次 `$mount`，不清空就只能整页刷新才恢复（与下面挂载失败同一档瞬时故障）。
+      mounted = undefined;
       throw new Error(`${STATS_SERVICE_KEY} 未提供：宿主网关没有挂上这枚命名空间`);
     }
     const result = await namespace.stats();
     if (!result.ok) {
       // error 的形状由宿主侧实现交付，实现漂移时可能整体缺席——降级读取，而不是让
       // "读 undefined 的属性"的 TypeError 盖掉真正的失败原因。
-      const detail = isRecord(result.error)
-        ? `${result.error.code}: ${result.error.message}`
-        : "远端报告失败但未附错误详情";
+      // 字段按 unknown 收：缺位或类型漂移时退回中性文案，而不是把 undefined 打进用户可见文案。
+      let detail = "远端报告失败但未附完整错误详情";
+      const rawError: unknown = result.error;
+      if (isRecord(rawError)) {
+        const { code, message } = rawError;
+        if (typeof code === "string" && typeof message === "string") {
+          detail = `${code}: ${message}`;
+        }
+      }
       throw new Error(detail);
     }
     if (!isStatsSnapshot(result.value)) {
@@ -165,11 +175,7 @@ export function createStatsReader(ctx: RemoteHost): (() => Promise<StatsSnapshot
   return isRemoteMounter(remote) ? buildStatsReader(ctx, remote) : undefined;
 }
 
-/** 把一份快照折成一行行"面 · 次数"的读数（渲染归卡片，这里只做**排序与裁剪**的纯活）。
- *
- * 排序是刻意的：宿主侧的表是插入序（谁先命中谁在前），而卡片要的是"最常发生的先显示" ——
- * 一条统计里最该被看见的是**最大**的那几格。
- */
+/** 一行"面 · 次数"的读数（渲染归卡片）。 */
 export interface StatsLine {
   readonly label: string;
   readonly count: number;
@@ -184,8 +190,11 @@ const compareKeys = (left: string, right: string): number => {
   return left < right ? -1 : 1;
 };
 
-/** 按键的次数降序取前 `limit` 格（并列时按键码点序，保证同一份快照渲染稳定）。
- *  `limit` 只收正安全整数：其它取值按 0 处理交回空表——`slice` 对负数的"丢掉最后一格"
+/** 把一份快照折成一行行"面 · 次数"的读数（渲染归卡片，这里只做**排序与裁剪**的纯活）。
+ *
+ * 排序是刻意的：宿主侧的表是插入序（谁先命中谁在前），而卡片要的是"最常发生的先显示" ——
+ * 一条统计里最该被看见的是**最大**的那几格。并列时按键码点序，保证同一份快照渲染稳定。
+ * `limit` 只收正安全整数：其它取值按 0 处理交回空表——`slice` 对负数的"丢掉最后一格"
  *  与 NaN 的"全丢"都是静默的错位语义，调用方将来不一定是常量。 */
 export function topLines(counts: Readonly<Record<string, number>>, limit: number): StatsLine[] {
   const take = Number.isSafeInteger(limit) && limit > 0 ? limit : 0;

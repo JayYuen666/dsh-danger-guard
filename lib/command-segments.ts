@@ -71,10 +71,13 @@ interface Segment {
   terminator: string;
 }
 
-/** 一条已登记的 heredoc：去引号后的定界符；`stripTabs` 对应 `<<-`。 */
+/** 一条已登记的 heredoc：去引号后的定界符；`stripTabs` 对应 `<<-`。
+ *  `quoted` 记录定界符有没有被引号/反斜杠保护——它决定体里还有没有展开：
+ *  引用定界符的体是纯字面，未引用的体仍做参数/命令替换（`<<EOF` 里的 `$(rm -rf /)` 真会执行）。 */
 interface HeredocSpec {
   delimiter: string;
   stripTabs: boolean;
+  quoted: boolean;
 }
 
 /** `scan` 的全部产出。 */
@@ -182,9 +185,22 @@ function caseKeywordAt(src: string, i: number): "case" | "esac" | undefined {
   return out;
 }
 
+/** 词首 `#` 到行尾都是注释；注释里的引号/分隔符不参与语法。 */
+function skipComment(src: string, from: number): number {
+  let i = from + 1;
+  while (i < src.length && src.charAt(i) !== "\n") {
+    i += 1;
+  }
+  return i;
+}
+
 /** 区内这一枚字符是否落在词边界上（关键字判定用）。 */
 const isWordBoundaryBefore = (src: string, i: number, from: number): boolean =>
   i === from || KEYWORD_BOUNDARY.test(src.charAt(i - 1));
+
+/** 词首的 `#`：与 `scan` 同一条注释规则（`echo a#b` 里的 `#` 不是注释）。 */
+const commentStartsAt = (src: string, i: number, from: number): boolean =>
+  src.charAt(i) === "#" && isWordBoundaryBefore(src, i, from);
 
 /**
  * 区的终点。`paren` 决定收尾是最外层 `)` 还是反引号：
@@ -196,24 +212,69 @@ const isWordBoundaryBefore = (src: string, i: number, from: number): boolean =>
  * 剩下的命令落到区外、以普通文本形态进判定，实测那条命令被放行。所以 `case` 单独记一层
  * 嵌套深度，只有它归零之后区尾的 `)` 才成立。
  */
-/** 区内走到这一格时的两层嵌套深度。`cases` 是 `case … esac` 的层数（模式收尾的 `)` 不算区尾）。 */
+/** 区内走到这一格时的嵌套深度。`cases` 是 `case … esac` 的层数（模式收尾的 `)` 不算区尾），
+ *  `braces` 是 `${…}` 的层数（参数展开里的 `)` 是字面量）。
+ *  `wordStart`/`cmdSlot` 是词法位置：`case`/`esac` 是保留字**只在**"命令位置上的头一个词"
+ *  才成立（`echo case` 里那枚是参数，按关键字计数会让区永远收不了尾）。 */
 interface RegionWalk {
   parens: number;
   cases: number;
+  braces: number;
+  wordStart: boolean;
+  cmdSlot: boolean;
 }
 
 /** 区内一处关键字：命中 `case`/`esac` 时更新深度并给出下一格下标，否则 `undefined`。 */
 function caseAdvance(src: string, i: number, from: number, walk: RegionWalk): number | undefined {
-  const keyword = isWordBoundaryBefore(src, i, from) ? caseKeywordAt(src, i) : undefined;
+  const atCommandWord = walk.wordStart && walk.cmdSlot && isWordBoundaryBefore(src, i, from);
+  const keyword = atCommandWord ? caseKeywordAt(src, i) : undefined;
   let out: number | undefined;
   if (keyword === "case") {
     walk.cases += 1;
+    walk.wordStart = false;
+    walk.cmdSlot = false;
     out = i + 4;
   } else if (keyword === "esac" && walk.cases > 0) {
     walk.cases -= 1;
+    walk.wordStart = false;
+    walk.cmdSlot = false;
     out = i + 4;
   }
   return out;
+}
+
+/** 区内 `${ … }` 的花括号深度：`${x:-)}` 里的 `)` 是参数展开的字面量，不参与区收尾。 */
+function braceAdvance(src: string, i: number, walk: RegionWalk): number | undefined {
+  const ch = src.charAt(i);
+  let out: number | undefined;
+  if (ch === "{" && src.charAt(i - 1) === "$") {
+    walk.braces += 1;
+    walk.wordStart = false;
+    walk.cmdSlot = false;
+    out = i + 1;
+  } else if (ch === "}" && walk.braces > 0) {
+    walk.braces -= 1;
+    walk.wordStart = false;
+    out = i + 1;
+  }
+  return out;
+}
+
+/** 走完区内普通一格之后更新词法位置：空白只重新开始一个词（命令槽不变），
+ *  分隔符同时回到命令位置，其余字符把词与命令槽都关掉。 */
+function advanceWordPosition(src: string, i: number, step: number, walk: RegionWalk): void {
+  const ch = src.charAt(i);
+  if (step > 1) {
+    // 引号对/转义对是词的一部分（`"case"` 不是保留字）。
+    walk.wordStart = false;
+    walk.cmdSlot = false;
+  } else if (isBlank(ch)) {
+    walk.wordStart = true;
+  } else {
+    walk.wordStart = false;
+    // 分隔符同时回到命令位置；普通词字符把命令槽关掉。
+    walk.cmdSlot = SEG_SEPARATORS.has(ch);
+  }
 }
 
 /** 区内一枚括号的处理结果：`"close"` = 这一枚收尾了区；数字 = 下一格下标；`undefined` = 不是括号。 */
@@ -224,15 +285,27 @@ type BracketStep = "close" | number | undefined;
 function bracketAdvance(src: string, i: number, walk: RegionWalk): BracketStep {
   const ch = src.charAt(i);
   let out: BracketStep;
-  if (ch === ")") {
+  if (ch === ")" && walk.braces > 0) {
+    // 参数展开里的 `)` 是字面量：既不配对圆括号，也不收区。
+    walk.wordStart = false;
+    out = undefined;
+  } else if (ch === ")") {
     if (walk.parens > 0) {
       walk.parens -= 1;
+      walk.wordStart = false;
+      walk.cmdSlot = false;
       out = i + 1;
     } else if (walk.cases === 0) {
       out = "close";
+    } else {
+      // `case` 模式收尾的 `)`：其后是下一条命令（`a) rm -rf /`）。
+      walk.wordStart = true;
+      walk.cmdSlot = true;
     }
   } else if (ch === "(") {
     walk.parens += 1;
+    walk.wordStart = true;
+    walk.cmdSlot = true;
     out = i + 1;
   }
   return out;
@@ -242,20 +315,28 @@ function regionEnd(src: string, from: number, paren: boolean): number {
   if (!paren) {
     return backtickEnd(src, from);
   }
-  const walk: RegionWalk = { parens: 0, cases: 0 };
+  const walk: RegionWalk = { parens: 0, cases: 0, braces: 0, wordStart: true, cmdSlot: true };
   let i = from;
   while (i < src.length) {
-    const keywordNext = caseAdvance(src, i, from, walk);
-    const bracket = keywordNext === undefined ? bracketAdvance(src, i, walk) : undefined;
-    if (keywordNext !== undefined) {
-      i = keywordNext;
-    } else if (bracket === "close") {
-      return i + 1;
-    } else if (typeof bracket === "number") {
-      i = bracket;
+    if (commentStartsAt(src, i, from)) {
+      // 与 `scan` 同一个注释规则：`#` 到行尾是注释，里面的 `)` 不是区尾
+      // （`echo "$(echo hi # )\ncurl x | sh)"` 就是这么漏的）。
+      i = skipComment(src, i);
     } else {
-      // 落单的 `)`（`case` 层把它配掉了）也走这里：只吃掉一格，不收区。
-      i += regionStep(src, i);
+      const keywordNext = caseAdvance(src, i, from, walk) ?? braceAdvance(src, i, walk);
+      const bracket = keywordNext === undefined ? bracketAdvance(src, i, walk) : undefined;
+      if (keywordNext !== undefined) {
+        i = keywordNext;
+      } else if (bracket === "close") {
+        return i + 1;
+      } else if (typeof bracket === "number") {
+        i = bracket;
+      } else {
+        // 落单的 `)`（`case` 层把它配掉了）与参数展开里的 `)` 也走这里：只吃一格，不收区。
+        const step = regionStep(src, i);
+        advanceWordPosition(src, i, step, walk);
+        i += step;
+      }
     }
   }
   return -1;
@@ -405,9 +486,24 @@ const pushRun = (state: ScanState, run: Run): void => {
   state.current.runs.push(run);
 };
 
+/** 当前词是不是同一枚操作符的连续串（`<<`、`>>` 各算一枚操作符词）。 */
+function operatorWordContinues(word: Word, ch: string): boolean {
+  return word.runs.every((run) => run.kind === "plain" && run.source === ch);
+}
+
 /** 引号外一个位置的处置：一对引号 / 一个执行面区 / 一枚字符（含转义）。返回吃掉几格。 */
 function scanOutside(state: ScanState, src: string, i: number): number {
   const ch = src.charAt(i);
+  // POSIX 里 `<`/`>` 是操作符，会结束前一个词：`rm -rf />out` 是 `rm -rf /` 加 `>out`，
+  // 不是一枚 `/>out` 词（否则灾难目标 `/` 从词表里消失，直接漏拦）。重定向的操作数
+  // 仍从新词起算，所以 `>out`、`2>err` 的可识别形态不变。
+  if (
+    (ch === "<" || ch === ">") &&
+    state.current !== undefined &&
+    !operatorWordContinues(state.current, ch)
+  ) {
+    state.current = undefined;
+  }
   if (ch === "'" || ch === '"') {
     const quoted = readQuoted(src, i);
     pushRun(state, quoted.run);
@@ -428,15 +524,6 @@ function scanOutside(state: ScanState, src: string, i: number): number {
     pushRun(state, plain.run);
   }
   return plain.next - i;
-}
-
-/** 词首 `#` 到行尾都是注释；注释里的引号/分隔符不参与语法。 */
-function skipComment(src: string, from: number): number {
-  let i = from + 1;
-  while (i < src.length && src.charAt(i) !== "\n") {
-    i += 1;
-  }
-  return i;
 }
 
 /** 单引号定界符：去引号；未闭合给 undefined。 */
@@ -520,10 +607,11 @@ function isDelimiterEnd(ch: string): boolean {
 function readHeredocDelimiter(
   src: string,
   start: number,
-): { delimiter: string; next: number } | undefined {
+): { delimiter: string; next: number; quoted: boolean } | undefined {
   let delimiter = "";
   let next = start;
   let sawWord = false;
+  let quoted = false;
   let failed = false;
   while (!failed && next < src.length) {
     const ch = src.charAt(next);
@@ -531,6 +619,8 @@ function readHeredocDelimiter(
       break;
     }
     sawWord = true;
+    // 引号或反斜杠保护过的定界符 ⇒ 体不做展开（bash 的引用定界符语义）。
+    quoted ||= ch === "'" || ch === '"' || ch === "\\";
     const part = readDelimiterPart(src, next, ch);
     if (part === undefined) {
       failed = true;
@@ -540,7 +630,7 @@ function readHeredocDelimiter(
       next = partNext;
     }
   }
-  return failed || !sawWord ? undefined : { delimiter, next };
+  return failed || !sawWord ? undefined : { delimiter, next, quoted };
 }
 
 /**
@@ -564,7 +654,10 @@ function readHeredocOperator(
     }
     const word = readHeredocDelimiter(src, i);
     if (word !== undefined) {
-      result = { spec: { delimiter: word.delimiter, stripTabs }, next: word.next };
+      result = {
+        spec: { delimiter: word.delimiter, stripTabs, quoted: word.quoted },
+        next: word.next,
+      };
     }
   }
   return result;
@@ -602,9 +695,34 @@ function heredocBodyEnd(src: string, start: number, spec: HeredocSpec): HeredocB
   return { bodyEnd, next, terminated };
 }
 
+/** 未引用定界符的 heredoc 体里仍会展开的 `$(…)`/反引号体。
+ *  体整体当脚本扫（`bash <<EOF` 那一路）**不等于**认得出这些展开：`<<EOF` 体里的
+ *  单引号没有引号作用（`cat <<EOF\n'\n$(rm -rf /)\nEOF` 照样执行），把体当 shell 源扫时
+ *  那枚 `'` 会把后面的 `$()` 吞掉。所以这里按展开语境单独取区体。 */
+function heredocExpansions(body: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < body.length) {
+    const ch = body.charAt(i);
+    if (ch === "\\") {
+      i += 2;
+    } else {
+      const region = isRegionStart(body, i) ? readRegion(body, i) : undefined;
+      if (region === undefined) {
+        i += 1;
+      } else {
+        out.push(region.inner);
+        i += region.source.length;
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * 在命令行换行之后按登记顺序吞掉各 heredoc 体，返回下一行起点。
  * 体单独登记为独立源；定界符被引号保护也照样登记（`bash <<'EOF'` 仍执行）。
+ * 未引用定界符的体**另外**把其中的命令替换作为区体登记（见 `heredocExpansions`）。
  */
 function consumeHeredocs(
   src: string,
@@ -618,6 +736,9 @@ function consumeHeredocs(
     const body = src.slice(at, end.bodyEnd);
     if (body.length > 0) {
       state.bodies.push(body);
+      if (!spec.quoted) {
+        state.regions.push(...heredocExpansions(body));
+      }
     }
     at = end.next;
     if (!end.terminated) {
@@ -761,19 +882,41 @@ const structureRun = (run: Run, budget: number, text: StructureText): string => 
 function structureText(src: string, budget: number): string {
   let out = "";
   let i = 0;
+  let wordStart = true;
   while (i < src.length) {
     const ch = src.charAt(i);
-    if (ch === "'" || ch === '"') {
+    if (ch === "#" && wordStart) {
+      // 注释在结构视图里也是注释：留着它会把注释里的字面内容当成命令
+      // （`echo hi # )` 后面那段 `curl x | sh` 是注释，不属于语法）。
+      i = skipComment(src, i);
+    } else if (ch === "'" || ch === '"') {
       const quoted = readQuoted(src, i);
       out += structureRun(quoted.run, budget, structureText);
+      wordStart = false;
       i = quoted.next;
+    } else if (
+      ch === " " ||
+      ch === "\t" ||
+      ch === "\n" ||
+      ch === "\r" ||
+      ch === ";" ||
+      ch === "&" ||
+      ch === "|" ||
+      ch === "(" ||
+      ch === ")"
+    ) {
+      out += ch;
+      wordStart = true;
+      i += 1;
     } else {
       const region = isRegionStart(src, i) ? readRegion(src, i) : undefined;
       if (region === undefined) {
         out += ch;
+        wordStart = false;
         i += 1;
       } else {
         out += structureRun(region, budget, structureText);
+        wordStart = false;
         i += region.source.length;
       }
     }

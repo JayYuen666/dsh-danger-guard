@@ -1,6 +1,36 @@
-# Changelog
+## 0.1.11
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+一轮跨面审查修复：shell 词法与包装词判据重建、沙箱让路前提收紧、事实门与预检读面收口，扩展密钥模式补上上报与保存回路；发布链与 CI 同步加固。默认配置不变；需要留意的行为变化是 read-only 档的管道命令与自动审查硬拦范围这两处收紧。
+
+### Added
+
+- **扩展密钥模式模块**：新增 `lib/secret-patterns.ts`（扩展密钥模式的校验、编译与缓存）与 `lib/secret-pattern-report.ts`（去重点名上报）；编译按清单内容记账复用，非法模式在设置装配时与拦截前各补报一次、同一串只报一次。设置卡保存消费受理位，被拒绝时翻译为 rejection 并保留草稿。
+- **前缀词数据表**：新增 `lib/prefix-tables.ts`，`pipeShell` 与 `runPrefix` 共用唯一的前缀词/取值旗标表。
+- **测试层**：新增 fast-check 属性测试两件（danger-rules、segments）与逐条点名 OCR 编号的 `test/ocr-fixes.test.ts`；新增 secret-patterns、settings-read、setup-logs、lesson-report、disaster-target、danger-regexes 六个单测文件；约 50 个既有测试文件加固。
+
+### Changed
+
+- **档位处置两处收紧**：read-only 档 `pipeShell` 由 allow 改 ask；自动审查硬拦由两条扩为三条（加 `noVerify`）且先于 `!askable` 判；unknown 档不再吃沙箱让路。README 档位表同步。
+- **发布链加固**（`.github/workflows/publish.yml`）：发布闸比完整 ref、token 清洗抽到 `.github/scripts/normalize-token.sh` 且不落盘跨步传、registry 读取加超时与重试、预检改判「本地要发的版本已存在」、发布后轮询 5 分钟、pnpm 加 cache；actionlint 改 `-config-file` 按文件豁免；codeql 超时 120 分钟并取消同 PR 旧分析；scorecard 加 concurrency；dependabot 分组改 `*`。
+- **构建与元数据**：host 产物构建结果按进程缓存，类型零声明即失败；author 改对象形；`@deepseek-ai/schemastery` peer 放宽为 `^3.18.6-alpha.1`；catalog 的 shared 抬到 0.2.2；devDependencies 新增 fast-check 4.10.2。
+- **体积预算棘轮上调**：HOST 117,400→125,500、SETTINGS 3,500→5,100 字节。
+
+### Fixed
+
+- **shell 词法与包装词**：补 `timeout 5 sh`、`sudo -u root sh`、`eval "$(curl…)"`、`${IFS}` 归一前置等漏拦；`case`/`esac` 只在命令位置计深度；`#` 注释、`${x:-)}`、未引用 heredoc 体展开、`\` 续行、`rm -rf />out` 的 `<`/`>` 断词等区尾与断词缺陷逐条修（`lib/danger-rules.ts`、`lib/command-segments.ts`）。
+- **家目录直系判据**：先折 `//` 与 `.` 段再判深度，`$HOME//Documents`、`~/Documents/` 不再被当深层放行；`{a..z..2}` 支持步长。
+- **误报两处**：`terraform -auto-approve=false` 不再判成跳过确认；`git config core.hooksPath` 纯读值不再算写入。
+- **容器工具判据**（`lib/container-rules.ts`）：`--dry-run` 跳独立取值，补 TLS 三件套、kubectl 日志旗标与 `buildx prune`。
+- **爆炸半径**（`lib/blast-radius.ts`）：`git clean -x/-X` 短旗标簇不再跑预演后盲问；新增 `cd`/`pushd`/`popd`/`env --chdir` 离开 cwd 子树的判据；预演输出的 `truncated`/`aborted` 非布尔真值按形状不符退回盲问。
+- **灾难目标**（`lib/disaster-target.ts`）：盘符 `C:` 与 UNC `//` 词面判不透明；空词面、`$HOME` 未设置时不再编造落点。
+- **沙箱让路前提**（`lib/sandbox-scope.ts`、`lib/effective-disposition.ts`）：workspaceRoot 读不出时整份根表不留；`resolve`/`canonicalize` 抛错按读不到处理；灾难目标折规范形再比，symlink 前缀（`/tmp`→`/private/tmp`）不再误判「盖得住」。
+- **事实门基线**（`lib/read-basis.ts`）：无暂存不落读取基线；基线结算移到 `next()` 之后并带 `blocked` 位；pre/post-execute 各段包 try，装配抛错只撤本层补充不炸瀑布。
+- **自写证明**（`lib/self-write-proof.ts`）：先 `isFile()`（FIFO 不再阻塞主路径）、改有界读、空写入按「不知」。
+- **写载荷识别**（`lib/edit-targets.ts`）：键名折 snake_case、普通对象也算写，`newContent`/`patch:{hunks}` 等不再漏判目标。
+- **预检**（`lib/preflight-scan.ts`）：`scanned` 只计真读到正文；`size` 缺席时多读 1 字节判截断；断链改标 `incomplete` 与预算截断分离；零命中补「没读成正文」文案。
+- **投影读口**（`lib/projection-reader.ts`）：先判 handle 后判 disposer，可调用 handle 不再读错来源；`stateOf`/`dispose` 抛错收口、disposer 幂等闸门。
+- **设置值面**（`lib/settings-read.ts`）：`numOf` 收紧为正安全整数并单源导出；`strArray` 按字段去重告警、非数组也告警；读数口抛错回落内置基线。
+- **健壮性散修**：`MTIME_UNKNOWN` 改 `-Infinity`；tool-ledger 逐个比较防 RangeError；judge-stats/lesson-report/stats-remote 上报链路异常隔离；`askable` 白名单只认 `"ask"`。
 
 ## 0.1.10
 
@@ -13,7 +43,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
-- **开发基线抬到 `0.2.2-alpha.2`，宿主支持窗口写成 `^0.2.1-rc.3`**（`engines.dsh` 与裸宿主 peer 同一条范围；`devDependencies` 仍精确钉住开发基线）。窗口内 `0.2.1-rc.3` / `0.2.1-rc.4` / `0.2.2-alpha.2` 列入支持范围。
+- **开发基线抬到 `0.2.2-alpha.2`，宿主支持窗口写成 `^0.2.1-rc.3`**（`engines.dsh` 与 `@deepseek-ai/dsh*` peer 同一条范围；`devDependencies` 仍精确钉住开发基线）。窗口内 `0.2.1-rc.3` / `0.2.1-rc.4` / `0.2.2-alpha.2` 列入支持范围。
 - **会话投影注册改为双协议**：`await register()` 之后按 disposer / handle 形状分流；注册成功后才发布台账读口，卸载先撤读口再释放。
 - **投递位次改读 `Session.seq`**：只需要日志长度，不再为它折叠整份台账（`calls` / `results` 的数组分配随之消失）。
 - **设置卡迁到共享 `./lib/card-ui`**；统计快照的形状守卫改由 zod schema 承担，`zod` 在客户端产物中按宿主 `PLATFORM_MODULES` 外置。
@@ -488,6 +518,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   顺带发现 `test/fixtures/local-fs-face.ts` 的 `abortAfterLstat` 选项**从未被任何用例用过**
   （一枚死夹具），现在有了；`ancestorLevelsOf` 因此导出**只为可测**（照 host 的 `noteJudgeCost`
   先例，写明理由）：它的两条边界只有"目标直接在 `/` 下"与"目标不在 root 之下"才走到。
+- **`isAncestorDirOf` 对根目录的判定是个安全 bug**：它用 `"${candidate}/"` 拼前缀，`candidate = "/"`
+  时得到 `"//"`，`startsWith` 恒假 —— 于是 `rm -rf /` 会被新加的沙箱让路判据判成"包不住可写根"
+  而**放行一次全盘删除**。修法与用例在某单测里各钉一处（该用例专测这一支）。
+- **`preflightSignalOf` 不容缺席的调用方信号**：官方 `ToolExecution` 把它标为必填，而该函数
+  抛在 `confirmFactory` 里、**不在任何 try 之内** —— "宿主送来一枚没带 signal 的执行面"会被
+  变成"整次工具调用成异常"。一句可选的测量读数不该有那个权力，现在缺席只留墙钟。
+- **`clipBlast` 的"被收紧"判据拿原文 `trim()` 比**：porcelain 输出的**前导空格是有意义的**
+  （` M a.ts` = 工作区已改），trim 之后比会把"只是行首有空格"判成被截断，于是给用户添一句假话。
+  改成按"我们真的丢没丢东西"算。
+- 两处新增的**死分支**按本仓纪律消掉而不是补用例：`word.split("=")[0] ?? word` 的 `??`
+  （`split` 必返回至少一个元素）与 `bashJudgeOf` 里永远取不到的方言回落项。
 
 ### Changed
 
@@ -543,19 +584,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   **结构性**的：看 chunk 的 `moduleIds` 里有没有依赖表的包（负向对照实测会红）。客户端的同类判据
   （`test/build-client.test.ts`）改成按**属性名与字面量**判（引号容忍三种形态）。
 - 三条体积预算按新实测重定：host 92,000 / settings 3,050 / client 24,500 字节。
-### Fixed
-
-- **`isAncestorDirOf` 对根目录的判定是个安全 bug**：它用 `"${candidate}/"` 拼前缀，`candidate = "/"`
-  时得到 `"//"`，`startsWith` 恒假 —— 于是 `rm -rf /` 会被新加的沙箱让路判据判成"包不住可写根"
-  而**放行一次全盘删除**。修法与用例在某单测里各钉一处（该用例专测这一支）。
-- **`preflightSignalOf` 不容缺席的调用方信号**：官方 `ToolExecution` 把它标为必填，而该函数
-  抛在 `confirmFactory` 里、**不在任何 try 之内** —— "宿主送来一枚没带 signal 的执行面"会被
-  变成"整次工具调用成异常"。一句可选的测量读数不该有那个权力，现在缺席只留墙钟。
-- **`clipBlast` 的"被收紧"判据拿原文 `trim()` 比**：porcelain 输出的**前导空格是有意义的**
-  （` M a.ts` = 工作区已改），trim 之后比会把"只是行首有空格"判成被截断，于是给用户添一句假话。
-  改成按"我们真的丢没丢东西"算。
-- 两处新增的**死分支**按本仓纪律消掉而不是补用例：`word.split("=")[0] ?? word` 的 `??`
-  （`split` 必返回至少一个元素）与 `bashJudgeOf` 里永远取不到的方言回落项。
 
 ### Tests
 
@@ -680,7 +708,7 @@ ask 通道、沙箱读法、两族新规则的用例。
 - `THIRD_PARTY_NOTICES.md` 随包发出（已列入 `files`——npm 不自动附带 NOTICE 类文件，实测只无条件附带 `package.json`、`README*` 与 `LICENSE`）。`LICENSE` 尾部增加一段指引。内容是**机制来源与致谢**，不是法定声明：本包移植 ECC 的事实门与四类命令拦截的**机制**，未搬运其代码、词表或文案，文件内附逐项比对依据。
 - `test/dist-size.test.ts`：产物体积预算门禁，拦截半 / 设置半 / 客户端半 / 声明入口各一条，预算取实测值上浮约 25%。
 - 发布流水线加固：`concurrency` 防两个 runner 并行发同一版本；三个 action 由 tag 改为钉 commit SHA；`--provenance`（此前 `id-token: write` 是空转的）；`--publish-wait-timeout` 让「发出去了但装不上」在 workflow 里就红；预检补读本包自身（此前只查依赖库，于是「版本号没进 main 就触发 workflow」这个最常见的失败模式预检发现不了）；`NPM_TOKEN` 在预检与发布两步用同一份清洗口径（此前 workflow 自己打印「已剔除后使用」，发布那步却传的是裸 secret）。
-- 发布面门禁新增五条：归属声明必须在 `files`、声明入口存在且 `types/` 真的产出、声明不比它派生的源码旧、声明不含本机绝对路径或 `.pnpm` 内部路径、声明里的相对说明符都指向产物后缀。
+- 发布面门禁新增六条：归属声明必须在 `files`、声明入口存在且 `types/` 真的产出、声明不比它派生的源码旧、声明不含本机绝对路径或 `.pnpm` 内部路径、声明里的相对说明符都指向产物后缀，以及包根每一份 `.md` 都在发布面（npm 只自动附带 `README*` 与 `LICENSE`，`THIRD_PARTY_NOTICES.md` / `CHANGELOG.md` 都要自己列）。
 
 ### Fixed
 
@@ -697,80 +725,6 @@ ask 通道、沙箱读法、两族新规则的用例。
 - **判定节的篇幅不动。** 那 44KB 里 96% 是规则本身（按赛道分档的阈值、旗标拼写形态、例外情形），只有 4% 是机制考据；规则删一条，使用者就少知道一种自己会不会被拦的形态。真正的篇幅浪费在别处：两份 README 各有约一半字符是 markdown 表格的对齐填充空格，已去除且内容逐字符未变。
 - `./client` 与 `./cordis.patch.yml` 仍在 `exports` 里但不提供声明。前者是浏览器 UMD 外壳（Node 侧 import 会撞 `window is not defined`），后者由宿主 loader 当文件读。
 - 运行时依赖仍是四枚。经 `@jayyuen66/dsh-plugin-shared` 传递引入的约 30 个包来自上游的依赖分类，本包改不动。
-
-## 0.1.2
-
-这一版把「编辑前先把证据取到手里」落地：预检分 A/B 两面挂进官方两条瀑布——引用面随读取结果
-出去（A 面），盲改被带证据的拒绝拦下、原样重试凭投递水位放行（B 面）。支撑这套结论的是新加的
-两个真实宿主测试层（真 ToolRuntime / 真 AgentLoop + 真 SessionStore，只把模型换成脚本）：这一版
-多数修复不是读代码读出来的，是这两层跑出来的。
-
-### Added
-
-- **取证与真实路径改吃宿主官方通道**：宿主的 fs 是可插拔执行世界的（fs-sandbox / ssh / e2b），
-  旧写法用 `node:fs` 读预检证据，会把主机上同名文件当成「目标的当前正文」抄进模型上下文——既
-  给错证据又是一条外泄路径。`lib/preflight-scan.ts` 只收 FileSystem 投影（type-only）：软链不进
-  队列，正文走 `readByteRange`，缓存失效位换成后端给的 opaque `FsVersion`。真实路径变成三形并集
-  （声明形 / 本机形 / 官方形），官方形由 `fs/observed` 顺手记（零额外 I/O）。三形从不互相替换，
-  所以某一形缺席或陈旧只会少拦，不会多放。
-- **high 档不再因「层证据给不出」多拒一轮**：层结论与引用面共用同一趟走树派生；有一层没被覆盖
-  （预算截断、那层在起点之外、那层是软链）就整趟让路，绝不投半份「这层我探过了」。
-
-### Fixed
-
-- **引用扫描不再把凭据文件的正文抄进引用命中**（改 `token.ts` 时 `.env` 里正写着 token 是常态
-  而非边角）：复用密钥闸那把词表、整份不读（不是脱敏）；零命中那一支不再宣称「没有任何引用者」。
-- **拒绝理由不再点名这台宿主上根本没注册的检索工具**：`zg_search` 连同它的参数面出自同级插件
-  dsh-zvec-grep，装不装逐台不同；指令侧名单先过官方 `ToolRuntime.get` 的在位探测，缺席或抛错一律
-  算「在」（少点名一个真存在的工具是把模型要走的门关上）。
-- **`projectRootOf` 的项目根缓存键漏了会话目录**：两个会话会互相吃对方的根；pre-execute 的热路径
-  对没有声明目标的调用白烧一枚墙钟定时器；文件头与 README 那条「宿主另把 realpath 解析形送进
-  判定」的假前提按源码纠正，并改由两条行为断言钉住。
-
-## 0.1.2-rc
-
-宿主生态与工具链升到当前发布线，并把判据的目录基准换到宿主新增的 `ctx.workingDirectory` 上。
-判定规则、拦截面与默认配置未改，改的是「跟谁对齐」。
-
-### Changed
-
-- **`@deepseek-ai/dsh-*` 十九枚 + peer 的 `@deepseek-ai/dsh` + `engines.dsh` 同步到
-  0.2.1-alpha.2**（四处同值，由 publish-manifest 的「与 peer 同版本」门禁兜住）。cordis /
-  schemastery / cosmokit 那一组不动：那正是 alpha.2 自己钉的几枚。
-- **shared ^0.1.2 → ^0.1.4**。0.1.3 把宿主包从 shared 自己的 dependencies 挪进
-  peerDependencies——「装本插件会在 profile 里物化出第二份宿主类型面」到此才断根；0.1.4 再把
-  那几枚 peer 钉到同一个 0.2.1-alpha.2。
-
-### Fixed
-
-- **相对目标的目录基准跟着宿主走**：`SessionHeader.cwd` 从 alpha.2 起只是创建期快照，活目录搬到
-  `ctx.workingDirectory`。本包原先五处仍读 `header.cwd`，于是 `cd` 之后
-  `<当前目录>/.ssh/config` 会按 `<创建期目录>/.ssh/config` 判——该拦的拦不住。统一到
-  `effectiveCwdOf()`：服务在场且交出非空串即用，否则退回 `header.cwd`。
-- 两份 README 更正一处与实测不符的记录：宿主的 peer 门禁是拒绝安装并回滚 profile，不是「只记录
-  而非强制」。
-
-## 0.1.1
-
-发布形态整改。判定逻辑、拦截面与默认配置均未改动——变更全部落在「装出去之后」那一侧。
-
-### Added
-
-- **类型声明**：新增 `tsconfig.types.json` 与 `build-types.mjs`，产出 `types/` 声明树；包根与
-  `./settings` 两条导出各带 types 条件。此前 exports 暴露了可 import 的入口却无任何类型。
-- **`THIRD_PARTY_NOTICES.md` 与 `CHANGELOG.md`** 并列入 files：npm 只无条件附带 package.json、
-  README* 与 LICENSE，其余都要自行列出。NOTICE 是机制来源与致谢，不是法定声明——本包未搬运
-  ECC 的代码、词表或文案。
-- **发布面门禁六条**，其中「包根每个 `.md` 都在发布面」一次性封住 npm 不自动附带这一类陷阱。
-
-### Changed
-
-- `publish.yml`：concurrency 防并行发同一版本；三个 action 改为钉 commit SHA；加 `--provenance`
-  与 `--publish-wait-timeout`；`NPM_TOKEN` 在预检与发布两步统一清洗口径。删除 `prepare`（与
-  prepack 同内容，在 registry 安装时无用却让 npm 11+ 的消费方每次看到 install-scripts 警告）。
-- 修正 `.d.ts` 被误判为源码；修正 ALWAYS_SHIPPED 把未附带文件算进去导致门禁自身放松；补本机
-  绝对路径门禁并修掉已随包泄露的构建机用户名。两份 README 补齐 Node 下限、ESM-only、类型可用性
-  与发布物清单。
 
 ## 0.1.0
 

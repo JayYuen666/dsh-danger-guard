@@ -32,7 +32,9 @@ const pkgDir = path.join(import.meta.dirname, "..");
  */
 const FORBIDDEN_IN_COMMENTS: readonly RegExp[] = [
   /\b(?:19|20)\d{2}-\d{2}-\d{2}\b/u,
-  /\/(?:Users|home)\/[\w.-]+/u,
+  // 绝对路径才禁：前一位不是词字符或点号，避免把合法的相对说明符 `./home/…` 判成本机路径。
+  /(?<![\w.])\/(?:Users|home|root|mnt)\/[\w.-]+/u,
+  /\b[A-Za-z]:[\\/](?:Users|Documents and Settings)[\\/][\w.-]+/u,
 ];
 
 /** `publishConfig` 里唯一允许出现的字段：可见性与源，都不是入口面。 */
@@ -136,6 +138,34 @@ function asRelative(target: string): string {
   return target.replace(/^\.\//u, "");
 }
 
+/** `exports` 里的通配目标（值含 `*` 的字符串）：label 是说明符，pattern 去掉 `./`。 */
+function wildcardTargetsOf(manifest: Manifest): readonly { label: string; pattern: string }[] {
+  const collect = (value: unknown): string[] => {
+    if (typeof value === "string") {
+      return value.includes("*") ? [value] : [];
+    }
+    if (typeof value === "object" && value !== null) {
+      return Object.values(value as Record<string, unknown>).flatMap((nested) => collect(nested));
+    }
+    return [];
+  };
+  return Object.entries(manifest.exports ?? {}).flatMap(([label, value]) =>
+    collect(value).map((pattern) => ({ label, pattern: asRelative(pattern) })),
+  );
+}
+
+/** 展开只含一枚 `*` 的包内模式（本包的 `locale/*.json` 这一形）。 */
+async function expandWildcard(pattern: string): Promise<string[]> {
+  const star = pattern.indexOf("*");
+  if (star === -1 || pattern.includes("*", star + 1)) {
+    throw new TypeError(`不支持的 exports 通配模式（只认一枚 *）：${pattern}`);
+  }
+  const dir = path.posix.dirname(pattern);
+  const suffix = pattern.slice(star + 1);
+  const names = await readdir(path.join(pkgDir, dir));
+  return names.filter((name) => name.endsWith(suffix)).map((name) => path.posix.join(dir, name));
+}
+
 /**
  * manifest 里全部需要落地的入口文件：main、types 与每个 exports 具体目标。
  *
@@ -229,11 +259,68 @@ async function collectSources(dir: string, prefix: string): Promise<string[]> {
  * @param text - 文件全文
  * @returns 参与门禁的行
  */
+/** 字符串内的一步：转义对与闭合引号各自一步，内容一律抹成空格。 */
+function stepQuoted(
+  text: string,
+  i: number,
+  quote: string,
+): { text: string; next: number; quote: string } {
+  const ch = text[i] ?? "";
+  if (ch === "\\") {
+    return { text: "  ", next: i + 2, quote };
+  }
+  return { text: ch === "\n" ? "\n" : " ", next: i + 1, quote: ch === quote ? "" : quote };
+}
+
+/** 把字符串与模板字面量内容换成空格（保留换行），供注释提取使用。 */
+function blankStrings(text: string): string {
+  let out = "";
+  let quote = "";
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i] ?? "";
+    if (quote !== "") {
+      const { text: masked, next, quote: nextQuote } = stepQuoted(text, i, quote);
+      out += masked;
+      i = next;
+      quote = nextQuote;
+    } else if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      out += " ";
+      i += 1;
+    } else {
+      out += ch;
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/** 提取行注释与块注释（输入里的字符串内容已抹空）。 */
+function commentsOf(code: string): string[] {
+  const comments: string[] = [];
+  // 先摘出块注释：注释正文保留给日期/路径判据，原位置抹成空格以免影响行注释定位。
+  const withoutBlocks = code.replaceAll(/\/\*[\s\S]*?\*\//gu, (match) => {
+    comments.push(...match.split("\n").map((line) => line.replaceAll(/^\/\*+|\*+\/$/gu, "")));
+    return match.replaceAll(/[^\n]/gu, " ");
+  });
+  for (const line of withoutBlocks.split("\n")) {
+    const at = line.indexOf("//");
+    if (at !== -1) {
+      comments.push(line.slice(at));
+    }
+  }
+  return comments.filter((comment) => comment.trim() !== "");
+}
+
 function commentLines(file: string, text: string): string[] {
   if (file.endsWith(".md")) {
     return text.split("\n");
   }
-  return text.split("\n").filter((line) => /^\s*(?:\/\/|\/\*|\*|#)/u.test(line));
+  if (/\.ya?ml$/u.test(file)) {
+    return text.split("\n").filter((line) => /^\s*#/u.test(line));
+  }
+  return commentsOf(blankStrings(text));
 }
 
 describe("发布形态", () => {
@@ -246,6 +333,24 @@ describe("发布形态", () => {
         shipped.has(asRelative(target.file)),
         `${target.label} 指向 ${target.file}，但它不在 files 覆盖范围内`,
       ).toBe(true);
+    }
+  });
+
+  it("通配 exports 的每个实际命中文件都在发布面里", async () => {
+    // `./locale/*.json` 这类目标没有单个固定文件；新增一份 locale 却忘了写进 files 时，
+    // 消费方 import 该文件会解析失败，而入口面只查具体目标的断言看不到它。
+    const { manifest, shipped } = await readSurface();
+    const expanded = await Promise.all(
+      wildcardTargetsOf(manifest).map(async ({ label, pattern }) => ({
+        label,
+        matches: await expandWildcard(pattern),
+      })),
+    );
+    for (const { label, matches } of expanded) {
+      expect(matches.length, `${label} 的通配没有命中任何文件`).toBeGreaterThan(0);
+      for (const file of matches) {
+        expect(shipped.has(file), `${label} 命中 ${file}，但它不在 files 覆盖范围内`).toBe(true);
+      }
     }
   });
 
@@ -308,8 +413,13 @@ describe("发布形态", () => {
     // 反过来依赖 build 已经跑过；而 `vitest run` 单跑时产物可能压根不存在。
     // 试过按导出名比，失败得更早也更没道理：模块的具名导出是 apply / ConfigSchema / default，
     // 与文件名 settings 毫无对应关系，按文件名推出来的导出名是假的。
-    const declaredAt = statSync(path.join(pkgDir, DECLARATION_ENTRY)).mtimeMs;
-    // 声明的依赖面：产出 host.d.ts 的那批输入。lib/ 下任一文件变新都算过期。
+    const produced = await listDeclarations(path.join(pkgDir, "types"), "");
+    expect(produced.length, "types/ 至少该产出一个声明文件").toBeGreaterThan(0);
+    // 取最旧的一份：只看 host.d.ts 时，settings-host.d.ts 或 lib 下的声明单独过期会被漏掉。
+    const declaredAt = Math.min(
+      ...produced.map((file) => statSync(path.join(pkgDir, "types", file)).mtimeMs),
+    );
+    // 声明的依赖面：产出这批声明的那批输入。lib/ 下任一文件变新都算过期。
     const sources = [
       "host.ts",
       "settings-host.ts",
@@ -331,7 +441,9 @@ describe("发布形态", () => {
     // 包管理器内部路径：`.pnpm/` 是 pnpm 的内容寻址目录名，出现在声明里说明类型是从
     // 硬链接路径解析来的，消费方在自己机器上解析不到。
     const forbidden: readonly RegExp[] = [
-      /\/(?:Users|home)\//u,
+      // 只认绝对路径：前一位不是词字符或点号，避免误伤合法的相对说明符 `./home/…`。
+      /(?<![\w.])\/(?:Users|home|root|mnt)\//u,
+      /\b[A-Za-z]:[\\/](?:Users|Documents and Settings)[\\/]/u,
       /\.pnpm[\\/]/u,
       /node_modules[\\/]\.pnpm/u,
     ];
@@ -404,7 +516,8 @@ describe("宿主依赖的版本形状（升级防线）", () => {
     // 过滤出违规项再一次性断言，而不是在循环里按条件 expect：失败时 diff 直接列出
     // 「哪个包钉成了什么」，比逐条抛错更好读。
     const ranged = Object.entries(manifest.devDependencies ?? {}).filter(
-      ([name, range]) => name.startsWith(DSH_PREFIX) && !/^\d+\.\d+\.\d+-/u.test(range),
+      ([name, range]) =>
+        name.startsWith(DSH_PREFIX) && !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(range),
     );
     expect(ranged, "这些 dsh-* 开发依赖没有精确钉住版本").toStrictEqual([]);
   });
@@ -421,6 +534,14 @@ describe("宿主依赖的版本形状（升级防线）", () => {
     const baseline = dshDev[0]?.[1];
     const drifted = dshDev.filter(([, range]) => range !== baseline);
     expect(drifted, `这些 dsh-* 与 ${baseline} 不同版本`).toStrictEqual([]);
+  });
+
+  it("schemastery 的 peer 写支持窗口，devDependency 仍是精确基线", async () => {
+    // schemastery 是宿主 fork：peer 钉精确值等于要求宿主的版本号完全相等，宿主升级即冲突。
+    // devDependencies 服务本地类型检查与构建，仍按开发基线精确钉。
+    const { manifest } = await readSurface();
+    expect(manifest.peerDependencies?.["@deepseek-ai/schemastery"]).toMatch(/^\^/u);
+    expect(manifest.devDependencies?.["@deepseek-ai/schemastery"]).toMatch(/^\d+\.\d+\.\d+/u);
   });
 
   it("peerDependencies 里的 dsh 家族写支持窗口范围，与裸 dsh 逐条同一条", async () => {

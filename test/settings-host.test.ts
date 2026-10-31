@@ -12,6 +12,8 @@ import assert from "node:assert/strict";
 import settingsPlugin from "../settings-host.ts";
 import type { SettingsReader } from "../settings-host.ts";
 import { BUILTIN_BASE, SETTINGS_READER } from "../lib/settings-schema.ts";
+import { reportRejectedSecretPatterns } from "../lib/secret-pattern-report.ts";
+import { loggedText } from "./setup-logs.ts";
 import type { Config, ConfigRefs } from "../lib/settings-schema.ts";
 
 /** 一字段一枚 `Volatile` 引用：宿主交进 apply 的就是这个形状（cosmokit createVolatile 只有一个 get()）。 */
@@ -50,12 +52,14 @@ function createSettingsCtx(): {
   const ctx: MockCtx = {
     settings: {
       configure(presentation, owner) {
-        configured.push({ presentation, owner: owner ?? {} });
-        // disposer 的契约是「调用即清理」：直接清 configured。此前写成"再往 disposers
-        // 里塞一层闭包"，靠测试遍历时边遍历边追加的意外才清到——替身自己先违约，
-        // 断言的绿色就不由被测行为保证了。
+        const entry = { presentation, owner: owner ?? {} };
+        configured.push(entry);
+        // 真实 disposer 只撤自己那一条：整表清空会让「撤错条目」的实现也显绿。
         return (): void => {
-          configured.length = 0;
+          const index = configured.indexOf(entry);
+          if (index !== -1) {
+            configured.splice(index, 1);
+          }
         };
       },
     },
@@ -67,9 +71,13 @@ function createSettingsCtx(): {
     },
     fiber: { id: "settings-fiber" },
     provide(name, value) {
-      provided.push([name, value]);
+      const entry: [string, unknown] = [name, value];
+      provided.push(entry);
       return (): void => {
-        provided.length = 0;
+        const index = provided.indexOf(entry);
+        if (index !== -1) {
+          provided.splice(index, 1);
+        }
       };
     },
   };
@@ -152,7 +160,8 @@ describe("danger-guard 设置条目（settings-host.ts）", () => {
         () => {
           settingsPlugin.apply(bad as never, refsFrom(live));
         },
-        /settings entry/u,
+        (error: unknown): boolean =>
+          error instanceof Error && error.message.startsWith("[danger-guard] settings entry:"),
         `坏 ctx 形状：${JSON.stringify(bad)}`,
       );
     }
@@ -219,6 +228,30 @@ describe("danger-guard 设置条目（settings-host.ts）", () => {
     // BUILTIN_BASE——那条回落路径由 test/host.test.ts 与 bulkhead-isolation.test.ts 钉。
   });
 
+  it("值面形状齐但 get() 抛错 ⇒ apply 阶段点名，不拖到第一次工具调用", () => {
+    const { ctx } = createSettingsCtx();
+    const refs = refsFrom(live) as unknown as Record<string, { get: () => unknown }>;
+    refs["maxDenies"] = {
+      get: (): unknown => {
+        throw new Error("value face drifted");
+      },
+    };
+    assert.throws(() => {
+      settingsPlugin.apply(ctx as never, refs as never);
+    }, /config values unreadable/u);
+  });
+
+  it("运行期值面漂移时读数口回落底座，闸门不因一次坏设置抛错", () => {
+    const { ctx, provided } = createSettingsCtx();
+    settingsPlugin.apply(ctx as never, refsFrom(live));
+    const entry = provided.find(([name]) => name === SETTINGS_READER);
+    assert.ok(entry !== undefined && isReader(entry[1]), "读数口已挂出");
+    live["extraTestDirs"] = undefined;
+    const read = entry[1].read();
+    assert.deepEqual(read.extraTestDirs, BUILTIN_BASE.extraTestDirs);
+    assert.equal(read.enabled, BUILTIN_BASE.enabled);
+  });
+
   it("bUILTIN_BASE 是冻结的：降级路径把它直接交给下游，就地改写当场暴露而不是静默生效", () => {
     assert.equal(Object.isFrozen(BUILTIN_BASE), true, "对象本体冻结");
     for (const value of Object.values(BUILTIN_BASE)) {
@@ -232,5 +265,33 @@ describe("danger-guard 设置条目（settings-host.ts）", () => {
     assert.equal(typeof settingsPlugin.apply, "function");
     assert.equal(settingsPlugin.inject.join(","), "settings");
     assert.equal(Object.hasOwn(settingsPlugin, "Config"), true, "严格 schema 挂在设置条目上");
+  });
+});
+
+describe("设置条目 apply 时就点名非法密钥模式（#22）", () => {
+  it("坏模式在装配这一刻出声，合法的那条不被牵连", () => {
+    const { ctx } = createSettingsCtx();
+    const live = { ...BUILTIN_BASE, extraSecretPatterns: ["[unclosed", "^ok-secret$"] };
+    settingsPlugin.apply(ctx as never, refsFrom(live));
+    const text = loggedText();
+    assert.match(text, /extraSecretPatterns 无效，本条未生效: \[unclosed/u);
+    assert.doesNotMatch(text, /ok-secret/u, "合法模式不该被点名");
+  });
+
+  it("同一串只响一次：装配报过之后判定链的补报不重复", () => {
+    const { ctx } = createSettingsCtx();
+    const bad = "(a";
+    const live = { ...BUILTIN_BASE, extraSecretPatterns: [bad] };
+    settingsPlugin.apply(ctx as never, refsFrom(live));
+    reportRejectedSecretPatterns([bad]);
+    const hits = loggedText().split("本条未生效").length - 1;
+    assert.equal(hits, 1, "去重表由两处调用点共用");
+  });
+
+  it("全合法时一声不响", () => {
+    const { ctx } = createSettingsCtx();
+    const live = { ...BUILTIN_BASE, extraSecretPatterns: ["^token$", "^secret/"] };
+    settingsPlugin.apply(ctx as never, refsFrom(live));
+    assert.equal(loggedText().includes("本条未生效"), false);
   });
 });

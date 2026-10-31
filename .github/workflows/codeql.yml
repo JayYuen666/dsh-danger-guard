@@ -16,7 +16,7 @@ on:
   schedule:
     - cron: "23 4 * * 1"
 # 组键带事件名：周度扫描与 main 上的 push 落在不同组，前者不会因为一次 push 被取消。
-# 取消只留给同分支的 push。
+# 取消同时覆盖 push 与 pull_request：同一 PR 的新提交应取消上一轮仍在跑的分析。
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
@@ -27,7 +27,9 @@ jobs:
   analyze:
     name: analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 30 分钟对 CodeQL 偏短：冷缓存下 TypeScript/JavaScript 的索引与查询包初始化可能更久，
+    # 超时会被直接判失败。留到 120 分钟，仍低于官方单 job 的 6 小时上限。
+    timeout-minutes: 120
     permissions:
       # 上传 SARIF 到 code scanning 面板所必需。
       security-events: write

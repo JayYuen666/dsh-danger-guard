@@ -39,6 +39,10 @@ const rmrfWith = (offending: string[]): BashVerdict => ({
   fix: { role: "disasterTarget", offending },
 });
 
+/** 模拟 darwin 上 `/tmp` → `/private/tmp`。 */
+const privatePrefixed = (absolute: string): string =>
+  absolute.startsWith("/private") ? absolute : `/private${absolute}`;
+
 describe("effectiveDispositionOf：惰性与覆盖", () => {
   it("非沙箱覆盖键不碰宿主服务面：shellRaw / policyRaw 一次都不调", () => {
     let reads = 0;
@@ -87,6 +91,89 @@ describe("effectiveDispositionOf：惰性与覆盖", () => {
     assert.equal(outcome.facts.sandboxCovers, true);
   });
 
+  it("策略面同样只读一次（排序与收口共用同一份缓存）", () => {
+    let reads = 0;
+    const effective = effectiveDispositionOf({
+      facts: FACTS,
+      session: undefined,
+      cwd: undefined,
+      shellRaw: confiningHost.shellRaw,
+      policyRaw: () => {
+        reads += 1;
+        return confiningHost.policyRaw();
+      },
+      canonicalize: confiningHost.canonicalize,
+      tempDir: confiningHost.tempDir,
+    });
+    assert.equal(effective.dispositionOf(rmrfWith(["/etc/foo"])), "allow");
+    assert.equal(
+      effective.verdictOf("rmrf", { role: "disasterTarget", offending: ["/etc/foo"] }).verdict,
+      "allow",
+    );
+    assert.equal(reads, 1, "策略解析也只读一次");
+  });
+
+  it("宿主实现抛错 ⇒ 排序与收口都按不让路兜底（异常不外冒）", () => {
+    const throwOnPolicy = effectiveDispositionOf({
+      facts: FACTS,
+      session: undefined,
+      cwd: undefined,
+      shellRaw: confiningHost.shellRaw,
+      policyRaw: () => {
+        throw new Error("policy getter failed");
+      },
+      canonicalize: confiningHost.canonicalize,
+      tempDir: confiningHost.tempDir,
+    });
+    assert.equal(throwOnPolicy.dispositionOf(rmrfWith(["/etc/foo"])), "deny");
+    const throwOnResolve = effectiveDispositionOf({
+      facts: FACTS,
+      session: undefined,
+      cwd: undefined,
+      shellRaw: confiningHost.shellRaw,
+      policyRaw: () => ({
+        resolve: () => {
+          throw new Error("resolve failed");
+        },
+      }),
+      canonicalize: confiningHost.canonicalize,
+      tempDir: confiningHost.tempDir,
+    });
+    assert.equal(throwOnResolve.dispositionOf(rmrfWith(["/etc/foo"])), "deny");
+    const outcome = throwOnResolve.verdictOf("rmrf", {
+      role: "disasterTarget",
+      offending: ["/etc/foo"],
+    });
+    assert.equal(outcome.verdict, "deny");
+    assert.equal(outcome.facts.sandboxCovers, false);
+  });
+
+  it("多目标的聚合是 every：任一目标包住可写根就整体不让路", () => {
+    const effective = effectiveDispositionOf({
+      facts: FACTS,
+      session: undefined,
+      cwd: undefined,
+      ...confiningHost,
+    });
+    assert.equal(
+      effective.dispositionOf(rmrfWith(["/etc/foo", "/var/x"])),
+      "allow",
+      "全部都不包住可写根 ⇒ 让路",
+    );
+    assert.equal(
+      effective.dispositionOf(rmrfWith(["/ws", "/etc/foo"])),
+      "deny",
+      "任一目标包住可写根 ⇒ 整条不让路",
+    );
+    assert.equal(
+      effective.dispositionOf(rmrfWith(["/etc/foo", "/ws"])),
+      "deny",
+      "顺序无关（every 的两个方向）",
+    );
+    assert.equal(effective.dispositionOf(rmrfWith([])), "deny", "空目标集合不让路");
+    assert.equal(effective.coveredFactsOf("rmrf", undefined), FACTS, "没有 fix 时不构造空目标集");
+  });
+
   it("目标包住可写根 ⇒ 不让路：`rm -rf ~` 一类仍然 deny", () => {
     const effective = effectiveDispositionOf({
       facts: FACTS,
@@ -115,6 +202,41 @@ describe("effectiveDispositionOf：惰性与覆盖", () => {
       tempDir: "/tmp",
     });
     assert.equal(effective.dispositionOf(rmrfWith(["/extra/granted"])), "deny");
+    assert.equal(effective.dispositionOf(rmrfWith(["/etc/foo"])), "allow");
+  });
+
+  it("非灾难目标的 fix（或没有 fix）不折规范形，原样交给沙箱判据", () => {
+    const effective = effectiveDispositionOf({
+      facts: FACTS,
+      session: undefined,
+      cwd: undefined,
+      ...confiningHost,
+    });
+    // 只有 disasterTarget 的**绝对词面**需要折；别的 role 折它等于凭空造出一份删除目标，
+    // 而覆盖判据会照着那份假清单放行。
+    assert.equal(
+      effective.coveredFactsOf("rmrf", { role: "bypassFlag", offending: ["--force"] }),
+      FACTS,
+      "bypassFlag 的词面不是删除目标 ⇒ 覆盖判据拿不到目标，保守不放行",
+    );
+    assert.equal(effective.coveredFactsOf("rmrf", undefined), FACTS, "没有 fix 同判");
+  });
+});
+
+describe("effectiveDispositionOf：灾难目标先折规范形再比可写根（#394）", () => {
+  it("符号链接前缀下 rm -rf /tmp/x 仍判不让路", () => {
+    const effective = effectiveDispositionOf({
+      facts: FACTS,
+      session: undefined,
+      cwd: undefined,
+      shellRaw: () => ({ sandboxMode: WORKSPACE_MODE }),
+      policyRaw: () => ({ resolve: () => ({ mode: WORKSPACE_MODE, workspaceRoot: "/tmp/x" }) }),
+      canonicalize: privatePrefixed,
+      tempDir: "/tmp",
+    });
+    // 词法形 /tmp/x 与规范根 /private/tmp/x 互不包含；目标侧不折规范形时会误判"盖得住"。
+    assert.equal(effective.dispositionOf(rmrfWith(["/tmp/x"])), "deny", "目标就是工作区根");
+    assert.equal(effective.dispositionOf(rmrfWith(["/tmp/x/src"])), "deny", "目标落在工作区内");
     assert.equal(effective.dispositionOf(rmrfWith(["/etc/foo"])), "allow");
   });
 });
@@ -154,5 +276,16 @@ describe("effectiveDispositionFactory：cwd 的铸造边界", () => {
     const effective = effectiveDispositionFactory(confiningHost)(undefined, "/elsewhere", FACTS);
     // `/elsewhere` 之下没有任何可写根（根只有 /ws 与 /tmp 系）→ 让路。
     assert.equal(effective.dispositionOf(rmrfWith(["."])), "allow");
+  });
+
+  it("cwd 先折规范形：符号链接工作区里的 rm -rf . 不会落进另一个路径世界", () => {
+    const host: EffectiveDispositionHost = {
+      shellRaw: () => ({ sandboxMode: WORKSPACE_MODE }),
+      policyRaw: () => ({ resolve: () => ({ mode: WORKSPACE_MODE, workspaceRoot: "/tmp/proj" }) }),
+      canonicalize: privatePrefixed,
+      tempDir: "/tmp",
+    };
+    const effective = effectiveDispositionFactory(host)(undefined, "/tmp/proj", FACTS);
+    assert.equal(effective.dispositionOf(rmrfWith(["."])), "deny");
   });
 });

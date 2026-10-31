@@ -7,13 +7,13 @@
 //
 // 夹具用真实 Context（不是手写 mock）：卸载兜底挂在 ctx.effect 上，只有真的 dispose
 // 一条 fiber 才会跑到 disposer，手写 mock 的 effects 数组验不了这条链。
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it, beforeAll, afterAll, afterEach } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 import { Context } from "@deepseek-ai/cordis";
+import type { Events } from "@deepseek-ai/cordis";
 import plugin, { BUILTIN_BASE } from "../host.ts";
 import type { Config } from "../host.ts";
 import { SETTINGS_READER } from "../lib/settings-schema.ts";
@@ -24,12 +24,13 @@ import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events"
 const FACT_GATE_MARK = /fact-gate/u;
 /** 层探查缺口在文案里的措辞：层存在但没被探到时才会出现。 */
 const TEST_LAYER_GAP = /test 层触达探查/u;
-/** 会话销毁事件名：会话键台账的回收信号。 */
-const SESSION_DISPOSED = "session/disposed";
+/** 会话销毁事件名：会话键台账的回收信号。`satisfies` 让事件改名在编译期就红。 */
+const SESSION_DISPOSED = "session/disposed" satisfies keyof Events;
 
-/** 等一轮 fiber 生命周期：cordis 的 `_reload()` 首行就是 `await Promise.resolve()`，
- *  装载是微任务级的，不等一拍就取 guard 谓词只会拿到空壳。 */
-const settle = (): Promise<void> => sleep(0);
+/** 会话销毁事件只在这里构造载荷：`as never` 的逃逸点收在一处，改名由上面的 satisfies 兜住。 */
+function disposeSession(ctx: Context, id: string): void {
+  ctx.emit(SESSION_DISPOSED, { id } as never);
+}
 
 describe("派生台账的生命周期", () => {
   /** 真实临时项目：projectRootOf 认 package.json，层探查要真的摸 fs——替身路径探不出
@@ -38,6 +39,8 @@ describe("派生台账的生命周期", () => {
   let target: string;
   /** 本次用例挂载的 guard 谓词：每个用例各自装载，predicate 随之换新。 */
   let predicate: ((exec: Record<string, unknown>) => string | undefined) | undefined;
+  /** 本文件开出的 Context：断言失败也不会跳过释放（见 afterEach）。 */
+  const mounted: Context[] = [];
 
   beforeAll(async () => {
     root = await mkdtemp(path.join(tmpdir(), "dg-ledger-"));
@@ -47,21 +50,30 @@ describe("派生台账的生命周期", () => {
     await writeFile(target, "export const a = 1;\n");
   });
 
+  afterEach(async () => {
+    const pending = mounted.splice(0);
+    const results = await Promise.allSettled(pending.map(async (ctx) => ctx.fiber.dispose()));
+    const failed = results.filter((settled) => settled.status === "rejected");
+    assert.equal(failed.length, 0, "afterEach 回收 Context 失败");
+  });
+
   afterAll(async () => {
     await rm(root, { recursive: true, force: true });
   });
 
   /** 组装一个「像 dsh 那样」的 root ctx：tools + settings，设置读数口给 strictMode。
-   *  返回前已 settle，装配完成即谓词在册。
+   *  返回前已 await 装载，装配完成即谓词在册。
    *  strictMode 让 tierOf 升到 high → collectLayerVerdicts 才跑，层缺口才会出现在
    *  文案里——那正是本文件观察层缓存的窗口。 */
   async function mount(): Promise<Context> {
     const ctx = new Context();
+    // 上一代已卸载时这里的残留必须清零：拿旧谓词判新用例是「红/绿都与台账回收无关」。
+    predicate = undefined;
     ctx.provide("tools", {
       guard(registered: (exec: Record<string, unknown>) => string | undefined) {
         predicate = registered;
         return (): void => {
-          predicate = (): undefined => undefined;
+          predicate = undefined;
         };
       },
     });
@@ -73,9 +85,27 @@ describe("派生台账的生命周期", () => {
     });
     const value: Config = { ...BUILTIN_BASE, strictMode: true };
     ctx.provide(SETTINGS_READER, { read: (): Config => value });
-    ctx.plugin({ name: "danger-guard-ledger", inject: ["tools", "settings"], apply: plugin.apply });
-    await settle();
+    await ctx.plugin({
+      name: "danger-guard-ledger",
+      inject: ["tools", "settings"],
+      apply: plugin.apply,
+    });
+    assert.equal(
+      typeof predicate,
+      "function",
+      "插件装配后 guard 谓词必须已在册（装配失败不能被后续用例当成放行）",
+    );
+    mounted.push(ctx);
     return ctx;
+  }
+
+  /** 释放一台 Context，并把它从 afterEach 的待收清单里摘掉（显式释放不重复做）。 */
+  async function dispose(ctx: Context): Promise<void> {
+    const index = mounted.indexOf(ctx);
+    if (index !== -1) {
+      mounted.splice(index, 1);
+    }
+    await ctx.fiber.dispose();
   }
 
   /** 一次 edit 调用：会话带 cwd 与空事件流（层存在性与层探查结论都由此产出）。 */
@@ -103,9 +133,9 @@ describe("派生台账的生命周期", () => {
   describe("会话销毁按会话键回收", () => {
     it("只清掉本会话的分片：s1 销毁不连坐 s10 的会话键基线", async () => {
       // 黑盒判别：s10 的 seenLen/mtime 基线是否被 s1 的销毁连坐清掉，唯一可观察面是
-      // 「外部改动基准取哪一位」。首评日志 4 位（基线=4）；复评日志 6 位、新 read 的
-      // 结果位在 5——基线在位时 5 > 4，read 仍算数 → 放行；基线被清（前缀少 `|` 的
-      // 连坐）时基准退到当前日志末尾 6，5 > 6 不成立 → 判"被会话外改过" → 拒绝。
+      // 「外部改动基准取哪一位」。首评日志 4 位（基线=4）；复评日志 7 位、新 read 的
+      // 调用位在 5（结果位 6）——基线在位时 5 > 4，read 仍算数 → 放行；基线被清（前缀少
+      // `|` 的连坐）时基准退到当前日志末尾 7，5 > 7 不成立 → 判"被会话外改过" → 拒绝。
       const ctx = await mount();
       const readArgs = JSON.stringify({ file_path: target });
       const grepArgs = JSON.stringify({ pattern: "policy-mod", path: root });
@@ -120,7 +150,7 @@ describe("派生台账的生命周期", () => {
       assert.match(editOn("s1"), FACT_GATE_MARK, "s1 首次编辑被拦（无取证）");
 
       await utimes(target, 2_000_000_000, 2_000_000_000);
-      ctx.emit(SESSION_DISPOSED, { id: "s1" } as never);
+      disposeSession(ctx, "s1");
 
       // s10 复评（必须在 s1 的冒烟之前：s1 的再评估会把全局 mtimes 基线刷到 T2，
       // 全局兜底会把"基线是否还在"的差异整个抹平——那是这个用例的判别窗口）。
@@ -139,19 +169,19 @@ describe("派生台账的生命周期", () => {
       );
       // s1 自己的闸门照常。
       assert.match(editOn("s1"), FACT_GATE_MARK, "s1 销毁后闸门照常（分片已清，重新过门）");
-      await ctx.fiber.dispose();
+      await dispose(ctx);
     });
 
     it("重复 dispose 同一会话是空操作", async () => {
       const ctx = await mount();
       assert.match(editOn("s-dup"), FACT_GATE_MARK, "首拒");
-      ctx.emit(SESSION_DISPOSED, { id: "s-dup" } as never);
-      ctx.emit(SESSION_DISPOSED, { id: "s-dup" } as never);
+      disposeSession(ctx, "s-dup");
+      disposeSession(ctx, "s-dup");
       // 分片已清：重新从首拒计数——第二次 dispose 既没有二次伤害（闸门照常），
       // 也没有把计数保留下来（那才是"清错了"的信号）。
       assert.doesNotMatch(editOn("s-dup"), /第 2 轮/u, "重复销毁后从首拒重新计数");
       assert.match(editOn("s-dup"), /第 2 轮/u, "计数随后正常连续（幂等的正向对照）");
-      await ctx.fiber.dispose();
+      await dispose(ctx);
     });
   });
 
@@ -160,17 +190,21 @@ describe("派生台账的生命周期", () => {
       const testDir = path.join(root, "test");
       // 第一代：磁盘上还没有 test 层 → 层探查结论（空）被缓存。
       const first = await mount();
-      assert.doesNotMatch(editOn("s-unload"), TEST_LAYER_GAP, "磁盘上本就没有 test 层");
+      const firstDenial = editOn("s-unload");
+      assert.notEqual(firstDenial, "", "首次编辑必须先被拦（否则下面的负向断言空转）");
+      assert.doesNotMatch(firstDenial, TEST_LAYER_GAP, "磁盘上本就没有 test 层");
 
       await mkdir(testDir, { recursive: true });
       // 同一代内磁盘变了，层缓存仍持上一次探查的结论 → 新层漏掉（这正是缓存本来的取舍）。
-      assert.doesNotMatch(editOn("s-unload"), TEST_LAYER_GAP, "同代内层缓存不重探（取舍，非缺陷）");
-      await first.fiber.dispose();
+      const sameGeneration = editOn("s-unload");
+      assert.notEqual(sameGeneration, "", "第二次仍必须是拒绝态");
+      assert.doesNotMatch(sameGeneration, TEST_LAYER_GAP, "同代内层缓存不重探（取舍，非缺陷）");
+      await dispose(first);
 
       // 第二代：层缓存已随卸载清空，重新探盘 → 看到了第一代之后才建出来的 test 层。
       const second = await mount();
       assert.match(editOn("s-unload"), TEST_LAYER_GAP, "卸载后新一代重新探到了 test 层");
-      await second.fiber.dispose();
+      await dispose(second);
 
       await rm(testDir, { recursive: true, force: true });
     });

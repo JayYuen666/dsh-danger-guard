@@ -31,20 +31,22 @@ const MESSAGES_ZH = MESSAGES.zh;
 /** 英文文案表（双语断言用）。 */
 const MESSAGES_EN = MESSAGES.en;
 
-/** 全部 `NeedWhy` 字面量（镜像类型，缺一个就把该组合当"兜底"测）。 */
-const ALL_NEED_WHY = [
-  "never",
-  "external",
-  "failed",
-  "narrow",
-] as const satisfies readonly NeedWhy[];
+/** `NeedWhy` 的穷尽表：新增字面量而不补这一格时，`Record` 让这里当场编译错误。
+ *  中文与英文两组全组合用例都从它派生，不会只剩一侧漏测。 */
+const NEED_WHY_SET: Record<NeedWhy, true> = {
+  never: true,
+  external: true,
+  failed: true,
+  narrow: true,
+};
+const ALL_NEED_WHY = Object.keys(NEED_WHY_SET) as NeedWhy[];
 /** 每个 need 应当产出的操作词——缺了说明文案退化成空串/纯标签。 */
 const OPERABLE: Record<FactNeed, RegExp> = {
   read: /read/iu,
-  refs: /grep|glob|zg_search|探查|引用/iu,
-  test: /搜|探查|触达/u,
-  e2e: /搜|探查|触达/u,
-  docs: /搜|探查|触达/u,
+  refs: /grep|glob|zg_search|probe|search|探查|引用/iu,
+  test: /probe|search|搜|探查|触达/iu,
+  e2e: /probe|search|搜|探查|触达/iu,
+  docs: /probe|search|搜|探查|触达/iu,
 };
 
 // FactDecision 是判别联合（kind: allow|quota|deny|indeterminate）：放行 = allow/quota 两态。
@@ -98,7 +100,19 @@ const refsLine = (policy: RefSearchPolicy | undefined, why: NeedWhy = "never"): 
 
 /** 模板里的 {占位符} 名字清单（不捕获外层变量，故置于模块级）。 */
 function placeholders(template: string): Set<string> {
-  return new Set(template.split(/[{}]/u).filter((piece) => /^\w+$/u.test(piece)));
+  // 只认 `{name}` 字形：按花括号切分会把「整句恰好是一个单词」的普通文案也当成占位符。
+  const found = new Set<string>();
+  for (const piece of template.matchAll(/\{[^{}]+\}/gu)) {
+    found.add(piece[0].slice(1, -1));
+  }
+  return found;
+}
+
+/** 带 `{占位符}` 的模板键从文案表现量派生：手写清单漏掉新增模板时这条安全网会静默失效。 */
+function templateKeysOf(): (keyof DangerGuardMessages)[] {
+  return (Object.keys(MESSAGES.zh) as (keyof DangerGuardMessages)[]).filter(
+    (key) => placeholders(MESSAGES.zh[key]).size > 0 || placeholders(MESSAGES.en[key]).size > 0,
+  );
 }
 
 /** 事实门夹具的目标文件（状态机那组用例七次问的都是它）。 */
@@ -586,9 +600,10 @@ describe("引用探查指令从生效策略派生（指令与实际认的工具�
     assert.match(line, /相对路径/u, "严格口径的相对路径要求必须写给模型");
   });
 
-  it("空名单：指令说明「refSearchTools 为空」这条真实原因，而不是给出不存在的工具", () => {
+  it("空名单：指令说明「未配置或配置的工具不可用」两种可能，而不是断言 refSearchTools 为空", () => {
     const line = refsLine(refSearchPolicyOf([], []));
     assert.match(line, /refSearchTools/u);
+    assert.match(line, /不可用/u);
     assert.match(line, /policy-mod\.ts/u);
     assert.doesNotMatch(line, /grep|glob|zg_search/u);
   });
@@ -600,9 +615,9 @@ describe("引用探查指令从生效策略派生（指令与实际认的工具�
     assert.doesNotMatch(line, /grep|glob|zg_search/u);
   });
 
-  it("narrow + 空名单：指令说明「谁都不认」的真实原因，而不是渲染成空项", () => {
+  it("narrow + 空名单：指令说明「当前没有可用的检索工具」，而不是渲染成空项或断言配置为空", () => {
     const line = refsLine(refSearchPolicyOf([], []), "narrow");
-    assert.match(line, /refSearchTools/u, "空名单不是「没说」，而是点名配置面");
+    assert.match(line, /当前可用的检索工具/u, "空名单不是「没说」，而是点名当前可用集合");
     assert.doesNotMatch(line, /grep|glob|zg_search/u);
   });
 
@@ -766,34 +781,12 @@ describe("factGate：会话键与会话分片容量", () => {
 describe("取证指令双语（文案表按语言渲染）", () => {
   /** 汉字区段：en 文案里出现即说明有句子没翻。 */
   const HAN = /\p{Script=Han}/u;
-  /** 带 `{占位符}` 的模板键（两语占位符集合必须一致，否则翻译漏掉插值）。 */
-  const TEMPLATE_KEYS = [
-    "headRetry",
-    "confirmedLine",
-    "hintWrap",
-    "gapReadNever",
-    "gapReadExternal",
-    "gapReadFailed",
-    "gapReadNarrow",
-    "probePattern",
-    "probeStrict",
-    "gapRefsNever",
-    "gapRefsToolsEmpty",
-    "gapRefsNarrow",
-    "gapRefsFailed",
-    "gapRefsExternal",
-    "gapTestBase",
-    "gapTestNarrow",
-    "gapE2e",
-    "gapDocs",
-    // 出路那两枚也带 {values}，同样要过"两语占位符集合一致"这道（否则 en 侧会把
-    // 词面原样插进去、模型看到的是一段没被替换的 `{values}`）。
-    "fixBypassFlag",
-    "fixDisasterTarget",
-  ] as const;
 
   it("两语模板的 {占位符} 集合一致（翻译不会漏掉插值）", () => {
-    for (const key of TEMPLATE_KEYS) {
+    const keys = templateKeysOf();
+    // 派生逻辑失效（例如文案表整体被换形状）时不让这条用例空转通过。
+    assert.ok(keys.length >= 10, `只派生到 ${keys.length} 个带占位符的模板键`);
+    for (const key of keys) {
       assert.deepEqual(
         placeholders(MESSAGES.en[key]),
         placeholders(MESSAGES.zh[key]),
@@ -804,7 +797,7 @@ describe("取证指令双语（文案表按语言渲染）", () => {
 
   it("en：每个 need × 每个 why 都产出具操作性、不含汉字的文案", () => {
     for (const need of NEED_ORDER) {
-      for (const why of ["never", "external", "failed", "narrow"] as const) {
+      for (const why of ALL_NEED_WHY) {
         const line = gapLine(
           { need, why },
           { targetName: "a.ts", searchPath: "/w/proj" },
@@ -812,6 +805,7 @@ describe("取证指令双语（文案表按语言渲染）", () => {
         );
         assert.ok(line.length > 4, `gapLine(${need},${why}) 为空/过短`);
         assert.match(line, /a\.ts/u, `gapLine(${need},${why}) 未落到目标名`);
+        assert.match(line, OPERABLE[need], `gapLine(${need},${why}) 缺操作词`);
         assert.ok(!HAN.test(line), `gapLine(${need},${why}) 的英文文案混进汉字`);
       }
     }

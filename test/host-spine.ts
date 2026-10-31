@@ -116,7 +116,10 @@ let spineCount = 0;
 export type ScriptedReply = readonly StreamChunk[];
 
 const PROJECT_MARKER = "package.json";
-const SECRET_SENTINEL = "OPENAI_API_KEY=sk-test-sentinel-do-not-emit";
+/** 凭据值（用例断言"没有泄进模型上下文"时引用它，不另抄字形）。 */
+export const SECRET_TOKEN = "sk-test-sentinel-do-not-emit";
+/** `.env` 里那一整行（文件内容断言用）。 */
+export const SECRET_SENTINEL = `OPENAI_API_KEY=${SECRET_TOKEN}`;
 const MAIN_BODY =
   "export const value = 1;\nexport function helper(x: number) {\n  return x + 1;\n}\n";
 const MAIN_IMPORT = `import { value } from "../src/main.ts";\nconsole.log(value);\n`;
@@ -380,6 +383,9 @@ export async function bootSpine(
   row: Record<string, unknown> = {},
   options: { localePreference?: string; approval?: ApprovalSpy } = {},
 ): Promise<Spine> {
+  // 工程目录先建：它不依赖 ctx，放在装配之后会让它一失败就留下已挂的 fiber、harness 与
+  // 一份没被回收的 mkdtemp 目录（函数 reject 时拿不到 Spine，也就没人能 dispose）。
+  const project = await makeProject();
   const ctx = new Context();
   // 描述符按官方 `SettingsDescriptor` 的**必填位**给齐（ns/autoGenerate/schema/value/revision/
   // applies）：本包只读 ns 与 value，但桩少给一位就是"桩比官方松"，而那正是漂移的入口。
@@ -433,7 +439,7 @@ export async function bootSpine(
   return {
     ctx,
     harness,
-    project: await makeProject(),
+    project,
     sessionId: `spine-${spineCount}`,
     guardFiber,
     settingsFiber,
@@ -585,19 +591,25 @@ export async function runTurn(spine: Spine, agent: Agent, prompt: string): Promi
   // 等一枚官方事件必然是 deferred promise：`agent/status` 是事件而不是 promise，宿主没有可
   // 复用的等待原语。超时也不自建——交给 vitest 的 testTimeout，回合挂住就该红在超时上。
   // oxlint-disable-next-line promise/avoid-new -- 理由见上一行
-  const idle = new Promise<void>((resolve) => {
+  const idle = new Promise<void>((resolve, reject) => {
     const off = spine.ctx.on("agent/status", ({ agent: candidate, status }) => {
       if (candidate === agent && status === "idle") {
         off();
         resolve();
       }
     });
-    agent.followup(
-      createUserMessage({
-        content: [{ type: TEXT_BLOCK, text: prompt }],
-        source: { kind: "user" },
-      }),
-    );
+    try {
+      // 官方签名回 `void`（不是 Promise）：这里只需接住同步抛错，并保证监听器一定撤下。
+      agent.followup(
+        createUserMessage({
+          content: [{ type: TEXT_BLOCK, text: prompt }],
+          source: { kind: "user" },
+        }),
+      );
+    } catch (error: unknown) {
+      off();
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
   });
   await idle;
 }
@@ -678,6 +690,9 @@ export function preflightNotices(agent: Agent): string[] {
     .map((event) => event.data.content.map(flattenBlock).join(" "));
 }
 
+/** mid 档盲改写进磁盘的正文（"放行即真落盘"的断言引用它，不另抄字形）。 */
+export const MID_BLIND_NEW_STRING = `const padded = "${"x".repeat(230)}";`;
+
 /** mid 档的盲改参数（写面 >200 字节、两侧都不碰导出面/签名关键字）。
  *  ⚠ old_string 里出现 `export`/`function` 会因"替换掉一枚导出"而升 high 档——那是真判据
  *  （改导出面确实更危险），但 mid 档的用例就会莫名其妙走清单而不是递证据。 */
@@ -685,31 +700,47 @@ export function midBlind(filePath: string): Record<string, unknown> {
   return {
     file_path: filePath,
     old_string: "const alpha = 1;",
-    new_string: `const padded = "${"x".repeat(230)}";`,
+    new_string: MID_BLIND_NEW_STRING,
   };
 }
 
 /** 高一档的盲改：触及导出面 ⇒ high ⇒ 缺项里多出"层"（test/e2e/docs）。B 面如今从**同一次**
  *  扫描派生层结论，所以这一档照样带证据拦；只有扫描跑不完时（见 capTree）才让路给行动清单——
  *  要读"指令点了哪些检索工具"、或要让事实门的拒绝轮次真推进，都得先把遍历预算吃光。 */
+/** high 档盲改写进磁盘的导出行；`tag` 与 highBlind 同一取值。 */
+export function highBlindNewString(tag: string): string {
+  return `export const probe${tag} = 1;`;
+}
+
 export function highBlind(filePath: string, tag: string): Record<string, unknown> {
   return {
     file_path: filePath,
     old_string: "const alpha = 1;",
-    new_string: `export const probe${tag} = 1;`,
+    new_string: highBlindNewString(tag),
   };
 }
 
 /** 带独占标签的文案（`[引用探查]` / `[目标内容]` / `[层探查]` / `[已截断]`）：标签本身就够判别，
  *  取到第一个空格为止。写在这里而不是各层各抄一份——抄开的两份正是下面那个坑的成因。 */
-export const markOf = (template: string): string => template.slice(0, template.indexOf(" "));
+export const markOf = (template: string): string => {
+  const at = template.indexOf(" ");
+  if (at === -1) {
+    // 没有空格 = 模板漂移：`slice(0, -1)` 会悄悄丢末字符，断言随之失配在别处。
+    throw new Error(`模板没有标签分隔空格：${template.slice(0, 60)}`);
+  }
+  return template.slice(0, at);
+};
 
 /** `[fact-gate]` 那三种口径的判别段。⚠ 前缀是**共用**的（行动清单 / 当场递证据 / 随读取附上
  *  都以 `[fact-gate] ` 开头），所以拿 `markOf` 去判等于什么都没断言：本轮真踩过——「走清单」与
  *  「递证据」两条互斥的断言同时为真，一层用例因此在错误的分支上全绿。
  *  跳过前缀取到第一个标点为止，那一句才是三种口径各自独有的话。 */
 export function gateMarkOf(template: string): string {
-  const body = template.slice(template.indexOf(" ") + 1);
+  const space = template.indexOf(" ");
+  if (space === -1) {
+    throw new Error(`模板没有标签分隔空格：${template.slice(0, 60)}`);
+  }
+  const body = template.slice(space + 1);
   const at = body.search(/[：（，。]/u);
   return at === -1 ? body : body.slice(0, at);
 }

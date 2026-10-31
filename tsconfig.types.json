@@ -7,6 +7,8 @@
 //     include 的递归通配对"将来新增到 lib 下的测试文件"没有防不住的能力，exclude 把
 //     这条约定固化——声明目录整目录进 package.json 的 `files`，把测试声明打进去等于
 //     把测试面公开发布。
+//   `./client` 入口不声明类型面：它由宿主按 bundle 载入，没有人 import 它；客户端源码
+//     的类型检查走 tsconfig.client.json，不在这里产声明。
 //   不开 `rewriteRelativeImportExtensions` —— 它只改写 JS 产物的说明符，对 emitDeclarationOnly
 //     是空操作。声明里的 `.ts` 后缀由 build-types.mjs 手工改写，原因见该文件。
 {

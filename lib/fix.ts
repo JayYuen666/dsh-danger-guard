@@ -16,7 +16,8 @@
  */
 export type FixRole = "bypassFlag" | "disasterTarget";
 
-/** 一条拒绝的出路。`offending` 恒非空（两处产出点各自的结构保证，见产出点的注释）。 */
+/** 一条拒绝的出路。`offending` 非空是**产出方契约**：两处产出点各自在组装前判过长度，
+ *  类型本身允许空数组，新增产出点时由它负责。 */
 export interface Fix {
   role: FixRole;
   /** 点名的词面，按首次出现序、去重。 */

@@ -7,6 +7,10 @@
 // 「可调用 + 可等待」的合成值，旧宿主那份的 `fiber.effect` 结果同样带 `then`。所以在 await
 // 之前比较 `typeof`、查 `.then`、或 `instanceof Promise` 都分不开；await 之后旧版得到
 // disposer（函数）、新版得到带 `stateOf`/`dispose` 的对象，那才是可靠的分流点。
+//
+// ⚠ 分流**先判 handle**：`isDisposer` 只认"是函数"，而 handle 的判据要求两个方法都在。
+// 反过来判时，一个可调用的 handle 会先命中旧协议分支，读口落到新版注册表上已弃用的
+// `stateOf(session, key)`，读错来源且不报错。
 
 import { asLedger, LEDGER_KEY, toolLedgerProjection } from "./tool-ledger.ts";
 
@@ -28,9 +32,12 @@ interface ProjectionHandle {
 /** 旧版注册的结果就是 disposer 本身。 */
 const isDisposer = (value: unknown): value is () => void => typeof value === "function";
 
-/** 新版注册的结果：可读、可释放。 */
+/** 新版注册的结果：可读、可释放。判据只看这两位方法在不在，**不看可调用性**——宿主当前的
+ *  handle 是对象，但可调用性本是旧协议（disposer）的唯一判据，把它同时当成排除条件时，
+ *  一份「可调用 + 带 stateOf/dispose」的合成值会掉进旧读口，去调注册表上已弃用的
+ *  `stateOf(session, key)`，读错来源且不报错。 */
 const isProjectionHandle = (value: unknown): value is ProjectionHandle =>
-  typeof value === "object" &&
+  (typeof value === "object" || typeof value === "function") &&
   value !== null &&
   typeof (value as { stateOf?: unknown }).stateOf === "function" &&
   typeof (value as { dispose?: unknown }).dispose === "function";
@@ -59,33 +66,79 @@ export async function mountLedgerReader(
   registry: ProjectionsRegistry,
   face: LedgerReadFace,
 ): Promise<void> {
-  let read: (session: unknown) => unknown;
-  let release: () => void;
+  let ready: unknown;
   try {
-    const ready: unknown = await registry.register(toolLedgerProjection);
-    if (isDisposer(ready)) {
-      read = (session) => registry.stateOf(session, LEDGER_KEY);
-      release = ready;
-    } else if (isProjectionHandle(ready)) {
-      read = (session) => ready.stateOf(session);
-      // 新版释放是异步的，但这条路径上没有任何东西需要等它：`dispose()` 的拒绝由宿主那一侧
-      // 自己报告，这里显式丢弃 promise（`void` 是 lint 认可的写法）。要等它的场合在官方那边
-      // 是「卸载完成」的语义，本插件卸载时已经没有后续判定了。
-      release = () => {
-        void ready.dispose();
-      };
-    } else {
-      throw new TypeError("sessionProjections.register 交回了既非 disposer 也非 handle 的形状");
-    }
+    ready = await registry.register(toolLedgerProjection);
   } catch (error) {
     console.warn(
       `[danger-guard] sessionProjections register failed, falling back to log scan: ${String(error)}`,
     );
     return;
   }
-  face.publish((session) => asLedger(read(session)));
-  face.effect(() => () => {
+  // 先判更强的形状：新版 handle 必须带两个方法，而"可调用"只说明它是函数。宿主若交回
+  // 一个**同时可调用**的 handle（函数对象上挂着 stateOf/dispose），先判 `isDisposer` 会
+  // 把它当旧协议，转去调 `registry.stateOf(session, key)` —— 新版注册表上那一位是已弃用
+  // 的兼容读口，读错来源也不会有任何报错。
+  if (!isProjectionHandle(ready) && !isDisposer(ready)) {
+    // 形状不符与注册抛错是两种故障：分开记，排障时才分得清"宿主换了协议"与"注册真的报错"。
+    console.warn(
+      "[danger-guard] sessionProjections.register returned neither a disposer nor a handle, falling back to log scan",
+    );
+    return;
+  }
+  let read: (session: unknown) => unknown;
+  let release: () => void;
+  if (isProjectionHandle(ready)) {
+    read = (session) => ready.stateOf(session);
+    // 新版释放是异步的：拒绝要接住并记录。调用本身留在当前拍上（卸载顺序要可观察），
+    // 同步抛出与异步拒绝都在这里收口，不把异常留给外层卸载清理链路。
+    release = () => {
+      void (async () => {
+        try {
+          await ready.dispose();
+        } catch (error) {
+          console.warn(`[danger-guard] sessionProjections dispose failed: ${String(error)}`);
+        }
+      })();
+    };
+  } else {
+    read = (session) => registry.stateOf(session, LEDGER_KEY);
+    release = ready;
+  }
+  // 读口本身也要兜底：宿主 `stateOf` 抛错时交回"没有可信台账"，让判定照常回退扫描，
+  // 而不是把异常冒进同步判定链。
+  face.publish((session) => {
+    try {
+      return asLedger(read(session));
+    } catch (error) {
+      console.warn(
+        `[danger-guard] sessionProjections stateOf threw, falling back to log scan: ${String(error)}`,
+      );
+      return asLedger(undefined);
+    }
+  });
+  try {
+    face.effect(() => {
+      // 一次性闸门：宿主重复调用 disposer 时不能二次撤口/二次释放。
+      let released = false;
+      return () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        try {
+          face.publish(undefined);
+        } finally {
+          release();
+        }
+      };
+    });
+  } catch (error) {
+    // 卸载收尾没挂上：读口已经发布，必须自己撤下并释放，否则插件卸载后仍参与判定。
     face.publish(undefined);
     release();
-  });
+    console.warn(
+      `[danger-guard] sessionProjections effect registration failed, reader withdrawn: ${String(error)}`,
+    );
+  }
 }

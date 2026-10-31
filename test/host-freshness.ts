@@ -26,7 +26,7 @@
 // 引入非确定性，改为规范哈希比较并在 build-host.mjs 里输出 canonical 形态。
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -52,19 +52,28 @@ export interface HostFreshnessOptions {
 const DEFAULT_BUILDER = "buildHost";
 const DEFAULT_ARTIFACT = "host.js";
 
-/** 磁盘上没有这份产物时的占位正文：让门禁红在比对里，而不是红在 ENOENT 的栈里。 */
+/** 磁盘上没有这份产物时**印在比对文本里**的占位：让门禁红在比对里，而不是红在 ENOENT 的栈里。
+ *  注意它只出现在清单/证据文本里，不参与身份判定——缺失由 `readText` 交回 undefined 表达。 */
 const ABSENT = "[产物缺失：运行 node build-host.mjs]";
 
 /**
- * 读一份文本产物；不存在时交回缺失占位。
+ * 读一份文本产物；只有「文件不存在」交回 undefined，其余读失败带路径原样抛。
+ *
+ * 为什么不用 existsSync 先判：那是典型 TOCTOU 窗口，而且它只挡「不存在」——目录（EISDIR）、
+ * 权限（EACCES）都会以原始栈冒泡，与本文件「红在比对里，而不是红在 ENOENT 的栈里」的意图相反。
  * @param file - 绝对路径
- * @returns 正文，或 ABSENT
+ * @returns 正文，或 undefined（文件不存在）
  */
-function readText(file: string): string {
-  if (existsSync(file)) {
-    return readFileSync(file, "utf8");
+function readText(file: string): string | undefined {
+  let text: string | undefined;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== "ENOENT") {
+      throw new Error(`读不到产物 ${file}`, { cause: error });
+    }
   }
-  return ABSENT;
+  return text;
 }
 
 /**
@@ -82,11 +91,29 @@ function digestOf(text: string): string {
  * @returns package.json 的 name，抠不到时为 unknown
  */
 function packageNameOf(pkgDir: string): string {
-  return (
-    /"name":\s*"(?<pkgName>[^"]+)"/u.exec(readText(path.resolve(pkgDir, "package.json")))?.groups?.[
-      "pkgName"
-    ] ?? "unknown"
-  );
+  const file = path.resolve(pkgDir, "package.json");
+  const text = readText(file);
+  if (text === undefined) {
+    // 包根是靠「用例文件所在目录的上一级」硬推的：夹具被挪到 test/unit/ 这类更深目录时，
+    // 这里必须点出那条隐含约定，否则后面只会以 ERR_MODULE_NOT_FOUND 曝出来。
+    throw new TypeError(
+      `[门禁夹具] 在 ${file} 找不到 package.json：本夹具按「用例文件所在目录的上一级」推包根，` +
+        "所以它只能放在 <包根>/test/ 这一层。",
+    );
+  }
+  try {
+    const parsed: unknown = JSON.parse(text);
+    const name =
+      typeof parsed === "object" && parsed !== null
+        ? (parsed as { name?: unknown }).name
+        : undefined;
+    if (typeof name === "string" && name.length > 0) {
+      return name;
+    }
+  } catch {
+    // 落到 unknown：包名只用于错误信息，不该让门禁红在 package.json 的语法上。
+  }
+  return "unknown";
 }
 
 /**
@@ -101,7 +128,7 @@ function manifestOf(pkgDir: string, files: Map<string, string>, fromDisk: boolea
   for (const [file, code] of [...files.entries()].toSorted(([left], [right]) =>
     left.localeCompare(right),
   )) {
-    const identity = fromDisk ? digestOf(readText(file)) : digestOf(code);
+    const identity = digestOf(fromDisk ? (readText(file) ?? ABSENT) : code);
     rows.push(`${path.relative(pkgDir, file)}\t${identity}`);
   }
   return `${rows.join("\n")}\n`;
@@ -125,18 +152,49 @@ export async function hostFreshnessEvidence(
   // 动态导入 .mjs 对 TS 为 any，先收窄到调用面再 await（避免 no-unsafe-*）。
   // `import()` 只接受 URL 或相对说明符：喂裸绝对路径在 POSIX 上能跑，在 Windows 上盘符会被
   // 当成 URL scheme 解析并抛 ERR_UNSUPPORTED_ESM_URL_SCHEME。
-  const mod = (await import(
-    pathToFileURL(path.resolve(pkgDir, "build-host.mjs")).href
-  )) as unknown as Record<string, (() => Promise<BuiltArtifacts>) | undefined>;
+  const entry = pathToFileURL(path.resolve(pkgDir, "build-host.mjs")).href;
+  let mod: Record<string, (() => Promise<BuiltArtifacts>) | undefined>;
+  try {
+    const loaded: unknown = await import(entry);
+    mod = loaded as Record<string, (() => Promise<BuiltArtifacts>) | undefined>;
+  } catch (error) {
+    throw new TypeError(
+      `[${pkgName}] 加载不了 build-host.mjs：门禁夹具要求包根有一份可导入的 build-host.mjs。`,
+      { cause: error },
+    );
+  }
   const build = mod[builder];
   if (typeof build !== "function") {
     throw new TypeError(
       `[${pkgName}] build-host.mjs 没有可调用导出 ${builder}：门禁的 builder 选项必须指它真实导出的名字。`,
     );
   }
-  const built = await build();
+  let built: BuiltArtifacts;
+  try {
+    built = await build();
+  } catch (error) {
+    throw new TypeError(`[${pkgName}] ${builder}() 抛错`, { cause: error });
+  }
   if (typeof built === "string") {
-    return { pkgName, pkgDir, onDisk: readText(path.resolve(pkgDir, artifact)), built };
+    return { pkgName, pkgDir, onDisk: readText(path.resolve(pkgDir, artifact)) ?? ABSENT, built };
+  }
+  if (!(built instanceof Map)) {
+    // 形状不对必须点名：`build-host.mjs` 里还有 buildHostReport() 这类返回 { code, inlinedModules }
+    // 的导出，误传进来会一路走到 manifestOf 的 files.entries() 抛「不是函数」。
+    throw new TypeError(
+      `[${pkgName}] ${builder}() 的返回形状不对：门禁只认「单文件正文」或「落盘路径 → 正文」的 Map。`,
+    );
+  }
+  if (built.size === 0) {
+    throw new TypeError(
+      `[${pkgName}] ${builder}() 交回了空产物清单：两侧都会折成同一份空清单，门禁将永远绿（空转型假阴性）。`,
+    );
+  }
+  if (options.artifact !== undefined) {
+    throw new TypeError(
+      `[${pkgName}] 多产物形态不接受 artifact 选项（${artifact}）：这条分支比的是整份清单，` +
+        "指名单个产物会被静默忽略。",
+    );
   }
   return {
     pkgName,

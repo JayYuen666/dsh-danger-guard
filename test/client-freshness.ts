@@ -20,28 +20,49 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-/** 指纹门禁：磁盘 client.js 必须与最新构建逐字节一致。 */
+/** 指纹门禁：磁盘 client.js 必须与最新构建逐字节一致。
+ *
+ *  注册是同步的：`test()` 必须在收集阶段就登记完。读取 package.json 若排在注册之前，
+ *  调用方漏写 `await` 时用例会整条漏跑（或被报成"收集结束后不能再加用例"），
+ *  而漏跑与通过在看板上是同一个绿色。包名取目录名（与本包 package.json 同名），
+ *  读取延后到用例体内，于是调用方不需要任何异步前置。 */
 export async function declareClientFreshness(testFileUrl: string): Promise<void> {
   const testDir = path.dirname(fileURLToPath(testFileUrl));
   const pkgDir = path.resolve(testDir, "..");
-  const pkgJson = await readFile(path.resolve(pkgDir, "package.json"), "utf8");
-  const nameMatch = /"name":\s*"(?<name>[^"]+)"/u.exec(pkgJson);
-  const pkgName = nameMatch?.groups?.["name"] ?? "unknown";
+  const pkgName = path.basename(pkgDir);
 
   test(`${pkgName}: client.js 与最新构建逐字节一致（改 src 后必须 node build-client.mjs）`, async () => {
-    const buildMod = (await import(
-      pathToFileURL(path.resolve(pkgDir, "build-client.mjs")).href
-    )) as {
-      buildClient: () => Promise<string>;
-    };
-    const expected = await buildMod.buildClient();
-    const onDisk = await readFile(path.resolve(pkgDir, "client.js"), "utf8");
+    let buildMod: { buildClient: () => Promise<string> };
+    try {
+      buildMod = (await import(pathToFileURL(path.resolve(pkgDir, "build-client.mjs")).href)) as {
+        buildClient: () => Promise<string>;
+      };
+    } catch (error) {
+      throw new Error(`[${pkgName}] 加载 build-client.mjs 失败（包配置或构建脚本缺失）`, {
+        cause: error,
+      });
+    }
+    let expected: string;
+    try {
+      expected = await buildMod.buildClient();
+    } catch (error) {
+      throw new Error(`[${pkgName}] buildClient() 执行失败（构建脚本内部错误）`, { cause: error });
+    }
+    let onDisk: string;
+    try {
+      onDisk = await readFile(path.resolve(pkgDir, "client.js"), "utf8");
+    } catch (error) {
+      throw new Error(
+        `[${pkgName}] 读取 client.js 失败（产物未生成？先跑 node build-client.mjs）`,
+        {
+          cause: error,
+        },
+      );
+    }
     assert.equal(
       onDisk,
       expected,
-      onDisk === expected
-        ? "fresh"
-        : `[${pkgName}] client.js 已过期：src/client-entry.ts（或其依赖）变更后未重建。请运行：cd ${pkgDir} && node build-client.mjs`,
+      `[${pkgName}] client.js 已过期：src/client-entry.ts（或其依赖）变更后未重建。请运行：cd ${pkgDir} && node build-client.mjs`,
     );
   });
 }

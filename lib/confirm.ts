@@ -17,7 +17,7 @@
 
 import { bashVerdictOf } from "./danger-rules.ts";
 import type { BashDenialKey, BashDangerOptions } from "./danger-rules.ts";
-import { modeNoteKeyOf, severityResolverOf } from "./mode-policy.ts";
+import { modeNoteApplies, modeNoteKeyOf, severityResolverOf } from "./mode-policy.ts";
 import type { PolicyFacts } from "./mode-policy.ts";
 import { lruPut } from "./lru.ts";
 import { MESSAGES } from "./messages.ts";
@@ -49,11 +49,13 @@ function displayReasonWithNote(
   key: BashDenialKey,
   facts: PolicyFacts,
 ): { en: string; [locale: string]: string } {
-  const noteKey = modeNoteKeyOf(facts);
+  // 档位说明只在**这一档的成因与这条规则有关**时才接：把删除那段话接在 `noVerify` 后面，
+  // 等于让用户去考虑一个与本条无关的方面（判据与 `policy-deny` 同一份，见 `NOTE_APPLIES`）。
+  const noteKey = modeNoteApplies(facts, key) ? modeNoteKeyOf(facts) : undefined;
   // `en` 只是类型占位：循环覆盖 `MESSAGES` 的全部语言（含 en），逐语言映射只写一遍。
   const out: { en: string; [locale: string]: string } = { en: "" };
   for (const [locale, table] of Object.entries(MESSAGES)) {
-    out[locale] = `${table[key]}\n${table[noteKey]}`;
+    out[locale] = noteKey === undefined ? table[key] : `${table[key]}\n${table[noteKey]}`;
   }
   return out;
 }
@@ -103,7 +105,9 @@ export function askRequestOf(
       // 看到的那句说的是同一件事，不会一方说"需确认"、另一方说"已拒绝"。
       // 档位说明两处都接上：模型侧读得到"这是哪一档、为什么这一档要问"，用户在弹窗里
       // 也读得到——只接 `reason` 会让弹窗那一面退回旧文案。
-      reason: `${messages[key]}\n${messages[modeNoteKeyOf(facts)]}`,
+      reason: modeNoteApplies(facts, key)
+        ? `${messages[key]}\n${messages[modeNoteKeyOf(facts)]}`
+        : messages[key],
       displayReason: displayReasonWithNote(key, facts),
     };
   }

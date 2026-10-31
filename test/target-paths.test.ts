@@ -3,7 +3,7 @@
 // 这个文件盯的是两张**模型能影响的表**：解析形表的键是模型给的目标字符串，
 // 官方路径缓存的键是归一后的目标。两者都曾被当成"反正就是个 Record"：
 // 前者在 `__proto__` 上改的是原型而不是加键，后者让同一枚文件的四种写法各占一格。
-import { describe, it } from "vitest";
+import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 
@@ -47,6 +47,11 @@ describe("resolvedFormsOf：键是模型给的目标字符串，不能让原型�
 });
 
 describe("resolveTarget：绝对形也折成规范形（它同时是缓存的键）", () => {
+  // 缓存是模块级的：任何一条用例失败也不能带着 REAL_PATH 残留进后续用例。
+  afterEach(() => {
+    clearOfficialPaths();
+  });
+
   it("绝对形折掉 `.`、`..` 与尾分隔符", () => {
     const expected = path.join(W_ROOT, KEY_PATH);
     assert.equal(resolveTarget(`${W_ROOT}/./${KEY_PATH}`, W_ROOT), expected);
@@ -64,13 +69,16 @@ describe("resolveTarget：绝对形也折成规范形（它同时是缓存的键
   });
 
   it("各种写法算出来的键相同 ⇒ 官方那一形对四种写法都读得到", () => {
-    clearOfficialPaths();
     const declared = `${W_ROOT}/${KEY_PATH}`;
     rememberOfficialPath(declared, W_ROOT, REAL_PATH);
-    for (const written of [declared, `${W_ROOT}/./${KEY_PATH}`, `${W_ROOT}/x/../${KEY_PATH}`]) {
+    for (const written of [
+      declared,
+      `${W_ROOT}/./${KEY_PATH}`,
+      `${W_ROOT}/x/../${KEY_PATH}`,
+      `${W_ROOT}/${KEY_PATH}/`,
+    ]) {
       assert.equal(officialPathOf(written, W_ROOT), REAL_PATH, `${written} 应当读到同一格`);
     }
-    clearOfficialPaths();
   });
 
   it("空串原样交回：模型没给目标（`edit`/`write` 之外的工具会带空 path）", () => {
@@ -82,5 +90,18 @@ describe("resolveTarget：绝对形也折成规范形（它同时是缓存的键
     assert.equal(officialPathKeyOf("a/.env", undefined), "a/.env");
     // 绝对形与 cwd 无关，仍然归一。
     assert.equal(officialPathKeyOf(`${W_ROOT}/./a/.env`, undefined), path.join(W_ROOT, "a/.env"));
+  });
+
+  it("cwd 是空串时与缺席同视：不能落到插件进程自己的目录", () => {
+    assert.equal(officialPathKeyOf("a/.env", ""), "a/.env");
+    assert.equal(resolveTarget("a/.env", ""), "a/.env");
+  });
+});
+
+describe("rememberOfficialPath：空值不是一形", () => {
+  it("后端交回空串时什么都不记，读侧仍判官方那一形缺席", () => {
+    clearOfficialPaths();
+    rememberOfficialPath(KEY_PATH, W_ROOT, "");
+    assert.equal(officialPathOf(KEY_PATH, W_ROOT), undefined);
   });
 });

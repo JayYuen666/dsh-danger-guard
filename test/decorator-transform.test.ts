@@ -73,7 +73,9 @@ describe("产物后缀：按源后缀找 tsc 真正写出的那一份", () => {
   it(".mts 输入能降级成功（照 .js 找会 ENOENT）", async () => {
     const { file, cleanup } = await tempSource("a.mts", DECORATED_METHOD_SOURCE);
     try {
-      const out = lowerStandardDecorators(DECORATED_LINE, file);
+      // 传给转换的 code 必须与写盘的源一致：它会进源映射（sourcesContent），
+      // 不一致时用例验的是另一份内容而毫无察觉。
+      const out = lowerStandardDecorators(DECORATED_METHOD_SOURCE, file);
       assert.ok(out.code.length > 0, "应当产出编译后的代码");
       assert.ok(out.code.includes("__esDecorate"), "装饰器应当被降级成调用");
       assert.notEqual(out.map, null, ".mts 同样要带源映射");
@@ -85,7 +87,7 @@ describe("产物后缀：按源后缀找 tsc 真正写出的那一份", () => {
   it(".cts 输入能降级成功", async () => {
     const { file, cleanup } = await tempSource("a.cts", DECORATED_SOURCE);
     try {
-      assert.ok(lowerStandardDecorators(DECORATED_LINE, file).code.length > 0);
+      assert.ok(lowerStandardDecorators(DECORATED_SOURCE, file).code.length > 0);
     } finally {
       await cleanup();
     }
@@ -93,28 +95,40 @@ describe("产物后缀：按源后缀找 tsc 真正写出的那一份", () => {
 });
 
 describe("失败诊断：产物没出来时要说得出为什么", () => {
-  it("源文件不存在时抛错，消息里点名产物与源路径，并带上 stderr 段", () => {
-    const missing = path.join(tmpdir(), "dg-deco-does-not-exist.mts");
-    // 用 try/catch 取错误本体而不是给 assert.throws 传校验回调：后者是本仓
-    // `promise/prefer-await-to-callbacks` 明确要避免的回调形。
-    let caught: unknown;
+  it("源文件不存在时抛错，消息里点名产物与源路径，并带上 stderr 段", async () => {
+    // 在 mkdtemp 出来的空目录里取一个必然不存在的路径：固定 tmpdir() 下会被上一次残留
+    // 或别的机器上的同名文件带偏。
+    const dir = await mkdtemp(path.join(tmpdir(), TMP_PREFIX));
+    const missing = path.join(dir, "does-not-exist.mts");
     try {
-      lowerStandardDecorators(DECORATED_LINE, missing);
-    } catch (error: unknown) {
-      caught = error;
+      // 用 try/catch 取错误本体而不是给 assert.throws 传校验回调：后者是本仓
+      // `promise/prefer-await-to-callbacks` 明确要避免的回调形。
+      let caught: unknown;
+      try {
+        lowerStandardDecorators(DECORATED_LINE, missing);
+      } catch (error: unknown) {
+        caught = error;
+      }
+      assert.ok(caught instanceof Error, "源文件不存在时必须抛错");
+      assert.match(caught.message, /装饰器降级没有产出/u);
+      assert.match(caught.message, /does-not-exist\.mjs/u, "消息按 .mts 推出 .mjs");
+      assert.match(caught.message, /tsc stderr：/u, "必须保留 stderr 段");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
-    assert.ok(caught instanceof Error, "源文件不存在时必须抛错");
-    assert.match(caught.message, /装饰器降级没有产出/u);
-    assert.match(caught.message, /does-not-exist\.mjs/u, "消息按 .mts 推出 .mjs");
-    assert.match(caught.message, /tsc stderr：/u, "必须保留 stderr 段");
   });
 
-  it("stderr 为空时说明是空而不是留一个空白段", () => {
-    const missing = path.join(tmpdir(), "dg-deco-empty-stderr.ts");
-    assert.throws(
-      () => lowerStandardDecorators(DECORATED_LINE, missing),
-      /tsc stderr：（tsc 没有输出 stderr）/u,
-    );
+  it("stderr 为空时说明是空而不是留一个空白段", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), TMP_PREFIX));
+    const missing = path.join(dir, "empty-stderr.ts");
+    try {
+      assert.throws(
+        () => lowerStandardDecorators(DECORATED_LINE, missing),
+        /tsc stderr：（tsc 没有输出 stderr）/u,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -123,9 +137,10 @@ describe("vite 钩子：带 query 的 id 要剥掉 query 再当路径", () => {
     const plugin = viteDecorators();
     const { file, cleanup } = await tempSource("q.mts", DECORATED_SOURCE);
     try {
-      const out = plugin.transform(DECORATED_LINE, `${file}?import`);
+      const out = plugin.transform(DECORATED_SOURCE, `${file}?import`);
       assert.notEqual(out, undefined, "带 query 的 id 也应当命中");
       assert.ok(out !== undefined && out.code.length > 0);
+      assert.ok(out.code.includes("__esDecorate"), "钩子确实执行了降级，而不是原样回吐原文");
     } finally {
       await cleanup();
     }
@@ -141,7 +156,7 @@ describe("metadata 发布句：整条语句才裁，多行形态当场报错", (
   it("类装饰器产物的那条发布句也被裁掉（接收者不是 this 时同样要认出来）", async () => {
     const { file, cleanup } = await tempSource("m.mts", DECORATED_METHOD_SOURCE);
     try {
-      const out = lowerStandardDecorators(DECORATED_LINE, file);
+      const out = lowerStandardDecorators(DECORATED_METHOD_SOURCE, file);
       assert.equal(out.code.includes("Symbol.metadata, {"), false, "发布句必须被裁掉");
       assert.ok(out.code.includes("__esDecorate("), "注入的调用本身保留");
     } finally {

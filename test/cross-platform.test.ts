@@ -20,8 +20,10 @@ const posixPath = (...parts: readonly string[]): string => path.posix.join(...pa
 /**
  * 判据本体：`candidate` 是否为 `target` 的祖先目录（含"补平台分隔符"这一步）。
  *
- * 与产品实现同构（`host.ts` 的 `isAncestorDirOf` / `lib/sandbox-scope.ts` 的同一判据），
- * 但这里**按传入的分隔符**求值，于是同一份逻辑能在两种语义下被检验。
+ * ⚠ 这里是**历史前缀实现的模型**（拼分隔符 + `startsWith`），不代表产品现在的判据：
+ * 产品已改为 `lib/target-paths.ts` 的 `isInside`（用 `path.relative` 判越界，空串与 `..` 都单独处理）。
+ * 所以本文件钉的是「同一份前缀逻辑在两种分隔符语义下的差异」，**不**能覆盖产品回归。
+ * 仍保留的理由：这些用例独立写死了 POSIX 与 Windows 两种期望值，改动前是产品的同构模型。
  */
 const isAncestorWith = (candidate: string, target: string, sep: string): boolean => {
   const last = candidate.at(-1);
@@ -30,7 +32,7 @@ const isAncestorWith = (candidate: string, target: string, sep: string): boolean
 };
 
 describe("前缀包含判据：平台分隔符 vs 写死 '/'", () => {
-  it("pOSIX 语义：两种写法都得 true（本机跑的就是这一侧）", () => {
+  it("posix 语义：两种写法都得 true（本机跑的就是这一侧）", () => {
     const root = posixPath("/", "w");
     const child = posixPath("/", "w", "proj");
     assert.equal(isAncestorWith(root, child, path.posix.sep), true);
@@ -87,7 +89,7 @@ describe("层级链：dirname 逐级上溯到文件系统根", () => {
     assert.equal(slashPrefixed, "", "对照：写死 '/' 切出空串");
   });
 
-  it("pOSIX：同样上溯到 `/`", () => {
+  it("posix：同样上溯到 `/`", () => {
     const start = posixPath("/", "w", "proj", "src", "a", "mod.ts");
     const levels = chainOf(start, (item) => path.posix.dirname(item));
     assert.equal(levels.at(-1), "/");
@@ -107,9 +109,18 @@ describe("家目录子路径拼接：词面的 '/' 不改变宿主的分隔符�
 
 describe("防回归：仓库里不许再出现写死分隔符的前缀比较", () => {
   // 判据是**源码扫描**而不是跑一次某个函数：这一类缺陷的本性就是"在本机跑不出来"。
-  // 只扫产品源码（lib/ 与 host.ts）：`lib/danger-rules.ts` 是**刻意**用 posix 语义解析 shell
-  // 命令文本的，它在白名单里；其余位置出现 `startsWith(..."/")` 形式就是漏改。
-  const PRODUCT = ["host.ts", "lib/confirm.ts", "lib/preflight-scan.ts", "lib/sandbox-scope.ts"];
+  // 只扫产品源码（lib/ 与 host.ts）：`lib/danger-rules.ts` **未列入扫描清单**（它按 posix 语义
+  // 解析 shell 命令文本，不是宿主路径判据）；其余位置出现 `startsWith(..."/")` 形式就是漏改。
+  // ⚠ 这是一份硬编码清单：新增带前缀比较的产品文件时必须评估是否入单。
+  // `lib/target-paths.ts` 必须入单：`isInside` / `isAncestorDirOf` / `toPosixRelative` / `underLayer`
+  // 这四个跨平台判据已从 host.ts 搬到那里，清单不跟着走就等于把最该扫的四个函数漏在扫描面之外。
+  const PRODUCT = [
+    "host.ts",
+    "lib/confirm.ts",
+    "lib/preflight-scan.ts",
+    "lib/sandbox-scope.ts",
+    "lib/target-paths.ts",
+  ];
 
   /** 允许写死 `/` 的**唯一**一类：两枚入参都已经是 `toPosixRelative` 的产物（统一 `/` 形）。
    *

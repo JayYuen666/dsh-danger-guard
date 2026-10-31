@@ -1,3 +1,4 @@
+import { defineConfig } from "vitest/config";
 import { viteDecorators } from "./decorator-transform.mjs";
 import { definePackageConfig } from "@jayyuen66/dsh-plugin-shared/config/vitest.base";
 
@@ -20,7 +21,7 @@ const base = definePackageConfig({
 // 为什么非有它不可：官方 Typert Remote 只能用标准装饰器声明，而管线的解析器（oxc）不降级它 ——
 // 少了这一步，测试**连文件都加载不了**。为什么是 spawn `tsc` 而不是进程内转换（本仓 TS 7 的
 // JS 面上没有转换 API）：理由全在 decorator-transform.mjs 的文件头。
-export default {
+export default defineConfig({
   ...base,
   plugins: [...(base.plugins ?? []), viteDecorators()],
-};
+});

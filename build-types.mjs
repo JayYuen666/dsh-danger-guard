@@ -46,6 +46,10 @@ export async function buildTypes() {
 
 async function main() {
   const files = await buildTypes();
+  if (files.length === 0) {
+    // 0 份声明仍退出 0 会让 `types: ./types/host.d.ts` 指向一个不存在的文件；构建必须当场失败。
+    throw new Error("types/ 一个声明都没产出：检查 tsconfig 的 include / rootDir");
+  }
   console.info("types/ written:", files.length, "files");
 }
 

@@ -21,25 +21,22 @@ updates:
     open-pull-requests-limit: 3
     groups:
       # 本仓引用的 action 全部放进一组，避免每个 action 各占一个 PR 去抢同一个名额。
-      # 模式按 `<owner>/<repo>` 写：通配符覆盖该仓库下的全部条目（codeql-action 的 init、
-      # analyze、upload-sarif 就是三条不同的引用），跨仓库不会互相匹配，所以两个 owner 各列一条。
+      # 模式用 `*` 而不是逐个 owner 手抄：新增的 action 引用会自动进组，不会静默掉到
+      # 「无分组」路径去挤 open-pull-requests-limit 的名额。
       # 补丁与次版本进一组：它们可以一起评审、一起回滚，钉了 SHA 的引用逐条 diff 就够看。
       # 大版本单独一组并**显式**写 update-types —— 不写的话分组会重新收录全部更新类型，组名与
       # 实际内容不符；而跨大版本的破坏性变更还会拖着整组安全补丁一起排队。
+      # applies-to 显式限定为版本更新：安全更新不受这两组的 update-types 影响。
       actions:
+        applies-to: version-updates
         patterns:
-          - "actions/*"
-          - "pnpm/*"
-          - "github/codeql-action*"
-          - "ossf/scorecard-action*"
+          - "*"
         update-types:
           - "minor"
           - "patch"
       actions-major:
+        applies-to: version-updates
         patterns:
-          - "actions/*"
-          - "pnpm/*"
-          - "github/codeql-action*"
-          - "ossf/scorecard-action*"
+          - "*"
         update-types:
           - "major"

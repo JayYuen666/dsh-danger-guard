@@ -21,7 +21,12 @@
    `DENY → FORCE → ALLOW`：拒绝模型的第一次编辑，要求它先给出具体事实而非自我评估，
    补齐后放行。上游把这一点写在 `skills/gateguard/SKILL.md` 的 "Core Concept" 一节。
 2. **危险命令拦截的四个类目**（`lib/danger-rules.ts`）——git 钩子绕过、灾难性删除、
-   下载即执行、长驻 dev server。上游对应 `scripts/hooks/` 下的三个 hook。
+   下载即执行、长驻 dev server。上游对应两处 hook 加一处同文件判据：git 钩子绕过见
+   `scripts/hooks/block-no-verify.js`，长驻 dev server 见
+   `scripts/hooks/pre-bash-dev-server-block.js`，灾难性删除是
+   `scripts/hooks/gateguard-fact-force.js` 中由 `skills/gateguard/SKILL.md` 的
+   “Destructive Bash Gate” 一节描述的判据。下载即执行没有对应的上游文件，是本包
+   按同一判定框架扩展出的类目。
 
 本包在这两处都做了**扩展与改写**，与上游存在实质差异：
 
@@ -36,20 +41,27 @@
 ### 移植的**不是**什么
 
 本包**不包含上游的代码、词表或文案**。这一点是逐项比对得出的，不是声明式的说法；比对
-方式与结论一并记录在此，读者可自行复核：
+方式与结论一并记录在此，读者可自行复核。
 
-- **代码行**：上游上述文件去注释后共 1394 条代码行，本包相关源码为 3194 条。逐字相同的
-  共 25 条，**全部是 JavaScript 语言样板**（`return false;`、`} else {`、`let i = 0;`
-  一类），无一条是上游的业务逻辑。
-- **标识符级 6-gram 重叠**：276 / 33,996，约 0.81%，抽样全部为语言构造
-  （`} else if ( /`、`. length ) { const ch` 一类）。
-- **正则字面量**：上游三个文件去重后 49 个、本包相关源码 59 个，**完全相同 0 个**。
-  双方都使用正则字面量书写（上游 89 处字面量，仅 2 处改用 `new RegExp`），差别在规则内容
-  而不在书写风格。
-- **词表**：4 处成员重合，且全部是由外部事实唯一确定的枚举——git 支持 `--no-verify` 的
-  子命令表（`commit` / `push` / `merge` / `cherry-pick` / `rebase` / `am`）、POSIX shell
-  名、包管理器名、`kill` 的 POSIX 标准选项。这些列表由 git 的 CLI、POSIX 标准和包管理器
-  注册名决定，不是上游的创作。
+比对固定在上游 commit `b38be6a7f6350964d59328b52f0624e1d1d552d1` 的 `scripts/hooks/`
+三份文件（`gateguard-fact-force.js`、`block-no-verify.js`、`pre-bash-dev-server-block.js`）；
+本包侧取参与这两处机制的 11 个模块：`lib/danger-rules.ts`、`lib/fact-gate.ts`、
+`lib/gap-directives.ts`、`lib/command-segments.ts`、`lib/danger-regexes.ts`、
+`lib/container-rules.ts`、`lib/disaster-target.ts`、`lib/edit-targets.ts`、
+`lib/prefix-tables.ts`、`lib/secret-patterns.ts`、`lib/ref-search-policy.ts`。复核方式：
+按该 commit 取文件，去掉注释后比较去掉首尾空白的非空行；标识符 6-gram 取标识符序列；
+正则字面量按源码逐字比较。以下读数是写下这段时的快照（本包 0.1.11 工作区）；本包源码
+此后增长不改变结论，复核时按同一方法重算即可。
+
+- **代码行**：上游 3185 行、本包 3695 行（去注释后的非空行）。逐字相同的 625 行里，长度
+  超过 20 字符的只有 `for (const segment of segments) {` 一条，其余全部是标点、
+  `return false;`、`let i = 0;` 一类语言样板；没有上游的业务谓词或规则内容。
+- **标识符级 6-gram 重叠**：13 / 11,128，约 0.12%。全部落在由外部事实唯一确定的枚举上：
+  git 支持 `--no-verify` 的子命令表（`commit` / `push` / `merge` / `cherry-pick` /
+  `rebase` / `am`）、POSIX shell 名、包管理器名、`kill` 的 POSIX 标准选项。这些列表由
+  git 的 CLI、POSIX 标准和包管理器注册名决定，不是上游的创作。
+- **正则字面量**：上游去重后 75 个、本包 71 个，逐字比较没有一条内容相同。双方都使用
+  正则字面量书写（上游 75 处里只有 2 处改用 `new RegExp`），差别在规则内容而不在书写风格。
 
 因此本包以 MIT 发布、未按上游许可分发其代码，是**基于上述比对结论**的判断。若你认为该
 结论有误，请以 issue 反馈，届时按上游许可条款补齐随包分发。
@@ -100,18 +112,20 @@ SOFTWARE.
 其中 `@deepseek-ai/dsh-brand` 虽看似只服务于类型，**仍必须是运行期依赖**：宿主类型面用
 品牌串做名义类型（nominal typing），构造品牌需要真实函数值而没有 type-only 的构造途径。
 若把它降为 `devDependencies`，打包器会把构造函数体内联进产物，于是每个包各得一份官方
-构造函数，单例语义随之失效。`build-host.mjs` 的外部化清单只读 `dependencies` ∪
-`peerDependencies`，`test/build-host.test.ts` 对此有断言钉住。
+构造函数，单例语义随之失效。外部化清单由 `@jayyuen66/dsh-plugin-shared/lib/build-host`
+从 `dependencies` ∪ `peerDependencies` 折出（`build-host.mjs` 只声明产物表）；
+`test/build-host.test.ts` 独立读 `package.json` 取同一份包名表，断言其中没有任何一个
+出现在产物的 `inlinedModules` 里。
 
 `@deepseek-ai/dsh-llm` 由预检以值引入（`createUserMessage`，注入给模型的消息），同一条口径：
 落 `peerDependencies`、产物里保持裸说明符 —— 内联等于每包各持一份官方的消息铸造与深冻结。
 
 `@deepseek-ai/dsh-typert-protocol` 由判定统计读数面（`lib/stats-remote.ts`）以值引入：要
 `extends TypertRemoteService` 并用 `@Remote` 标记端点，**两枚都是值，没有 type-only 的构造途径**
-（与 `brandNumber` 同族）。同样落 `peerDependencies`，产物里保持裸说明符；`build-host.mjs` 的
-外部化清单只读 `dependencies` ∪ `peerDependencies`，而 `test/build-host.test.ts` 另有一条
-**结构性**断言钉住"依赖表里的包一个都没被内联"（看 chunk 的 `moduleIds`，不看函数名 —— 产物开了
-minify，内联体里的标识符会被 mangle）。
+（与 `brandNumber` 同族）。同样落 `peerDependencies`，产物里保持裸说明符；外部化清单
+由 shared 的 `buildHostEntries` 从 `dependencies` ∪ `peerDependencies` 折出，而
+`test/build-host.test.ts` 另有一条**结构性**断言钉住"依赖表里的包一个都没被内联"
+（看 chunk 的 `moduleIds`，不看函数名 —— 产物开了 minify，内联体里的标识符会被 mangle）。
 
 `zod` 由 `lib/tool-ledger.ts`（其 `stateSchema`）与设置卡的 `src/stats-reader.ts`（快照形状守卫）
 以值引入，同样只能是运行期依赖；client 产物按宿主的 `PLATFORM_MODULES` 保持 `require("zod")`

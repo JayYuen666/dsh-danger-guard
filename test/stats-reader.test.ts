@@ -88,11 +88,28 @@ describe("客户端读面：ctx.get 取远程面、挂载一次、按 remote.<ns
     // 命名空间服务的键就是 `remote.<namespace>`（gateway 的 remoteServiceKey），且用**非严格**读
     // ——它是挂载后才出现的服务，严格读会在"还没挂上"的窗口里抛。可选读显式传 false
     // （与 createStatsReader 取远程面那一处同形），"没装远程面要降级、不要抛"在代码上自证。
-    assert.deepEqual(host.reads, [
-      "remote:false",
-      "remote.dangerGuardStats:false",
-      "remote.dangerGuardStats:false",
-    ]);
+    // 语义断言而不是整组快照：远程面取一次（可选读）；每次刷新都要重读命名空间服务。
+    assert.equal(host.reads[0], "remote:false", "远程面按可选读取一次");
+    const namespaceReads = host.reads.slice(1);
+    assert.ok(namespaceReads.length >= 2, "两次刷新至少重读命名空间两次");
+    assert.deepEqual(
+      [...new Set(namespaceReads)],
+      ["remote.dangerGuardStats:false"],
+      "命名空间按 remote.<ns> 且同为可选读",
+    );
+  });
+
+  it("远程面晚到：读取器在创建时就取定，不做二次解析（已知限制，卡片刷新才恢复）", () => {
+    // 与 src/client-entry.ts 的 apply 期创建一致：remote 不 inject，晚于本插件激活时
+    // 当时读到 undefined，读取器就是 undefined。这里把限制显式钉住；若将来改成延迟解析，
+    // 这条用例会红，提醒同时更新卡片侧的降级语义。
+    const remote: { value: unknown } = { value: undefined };
+    const ctx = {
+      get: (name: string): unknown => (name === "remote" ? remote.value : undefined),
+    };
+    assert.equal(createStatsReader(ctx), undefined, "创建时缺席 ⇒ 没有读取器");
+    remote.value = { $mount: () => Promise.resolve() };
+    assert.notEqual(createStatsReader(ctx), undefined, "晚到后重新创建才拿得到读取器");
   });
 
   it("命名空间没挂上 → 抛出点明键名的错误（不是静默 undefined）", async () => {
@@ -146,15 +163,35 @@ describe("客户端读面：ctx.get 取远程面、挂载一次、按 remote.<ns
     const host = fakeHost({ namespace: namespaceOf({ ok: false }) });
     const read = createStatsReader(host.ctx);
     assert.ok(read !== undefined);
-    await assert.rejects(read(), /未附错误详情/u);
+    await assert.rejects(read(), /未附完整错误详情/u);
+  });
+
+  it("失败响应的 error 字段类型漂移 → 退回中性文案，不渲染 [object Object]", async () => {
+    const host = fakeHost({
+      namespace: namespaceOf({ ok: false, error: { code: 7, message: null } }),
+    });
+    const read = createStatsReader(host.ctx);
+    assert.ok(read !== undefined);
+    await assert.rejects(read(), /未附完整错误详情/u);
   });
 
   it("快照形状不符 → 按读取失败抛出（不把垃圾交给渲染期炸）", async () => {
-    const garbage: unknown[] = [undefined, 7, {}, { calls: "no" }, { calls: { bash: Number.NaN } }];
+    const garbage: unknown[] = [
+      undefined,
+      7,
+      {},
+      { calls: "no" },
+      { calls: { bash: Number.NaN } },
+      // 非有限数（Infinity）与 null 都必须是形状不符：`z.number().int().nonnegative()`
+      // 是跨进程边界的最后一道，放过去就会在渲染期变成 null/NaN。
+      { window: Number.POSITIVE_INFINITY },
+      { window: null },
+      { calls: { bash: null } },
+    ];
     // 不在循环里 await：一口气发出去再逐个收（断言的形状与逐条 await 相同）。
     await Promise.all(
-      garbage.map((value) =>
-        assert.rejects(readerFor(value)(), /形状不符/u, `garbage case ${garbage.indexOf(value)}`),
+      garbage.map((value, index) =>
+        assert.rejects(readerFor(value)(), /形状不符/u, `garbage case ${String(index)}`),
       ),
     );
   });

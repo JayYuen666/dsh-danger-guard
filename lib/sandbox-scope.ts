@@ -19,6 +19,7 @@ import type { OsPath, PathApi } from "./path-format.ts";
 import type { BashDenialKey } from "./danger-rules.ts";
 import { SANDBOX_COVERED, disasterTargetPathOf } from "./danger-rules.ts";
 import type { Fix } from "./fix.ts";
+import { knownGuardModeOf } from "./mode-policy.ts";
 import type { PolicyFacts } from "./mode-policy.ts";
 
 /** 规范形折法：宿主用自己的同步解析实现注入。解析不出来交回 `undefined`。 */
@@ -59,13 +60,6 @@ export interface SandboxScope {
   readonly roots: readonly OsPath[];
 }
 
-/** `candidate` 是否为 `target` 的**祖先目录**（目标自身不算）。
- *
- *  ⚠ 根目录那一路要单独处理：`"${candidate}/"` 对 `candidate = "/"` 拼出 `"//"`，
- *  于是 `target.startsWith("//")` 恒假 —— `rm -rf /` 会被判成"包不住可写根"而让路，
- *  那是**放行一次全盘删除**。目录候选带尾斜杠（`/a/`）时同理。
- *  host 的 `projectRootOf` 那条同形不变式不走这一支（它比的是工程标记目录），
- *  但这里比的是**沙箱根**，根目录是最该拦的那种目标，必须自足。 */
 /**
  * `path` 是否就是 `root` 或落在它之下（照官方 `workspace-changes/src/paths.ts` 的 `isInside`）。
  *
@@ -91,6 +85,8 @@ function isInside(pathApi: PathApi, root: string, candidate: string): boolean {
   );
 }
 
+/** `candidate` 是否为 `target` 的**祖先目录**（目标自身不算）。根目录与带尾斜杠的候选
+ *  都由 `isInside` 的 `path.relative` 判据覆盖，不需要按前缀另开一条分支。 */
 const isAncestorDirOf = (pathApi: PathApi, candidate: string, target: string): boolean =>
   candidate !== target && isInside(pathApi, candidate, target);
 
@@ -156,6 +152,12 @@ function additionalRootsOf(value: unknown): readonly string[] | undefined {
  *
  * `workspace-write` = 工作区根 + 显式授予的额外目录 + `/tmp` + 平台临时区
  *（官方 `writableRoots` 的语义）。
+ *
+ * `workspaceRoot` 读不出（非字符串 / 空串）时交回 `undefined`：根表缺了工作区根，
+ * 工作区里的目标会显得"谁都没包住"，于是被判成沙箱完全覆盖而让路——而那正是
+ * `workspace-write` 允许真实删完的地方。`/tmp` 与平台临时区照常可算，但它们**不能**
+ * 代替工作区根，所以这里不按"其余照常"处理（见 `additionalRootsOf` 的同一条口径）。
+ *
  * 规范化失败的口径与官方一致：**解析不出来就不算可写**
  *（官方原话 "a missing root matches nothing until it exists — the conservative outcome"）。
  */
@@ -164,22 +166,23 @@ function writableRootsOf(
   additionalWritableRoots: readonly string[],
   canonicalize: Canonicalize,
   tempDir: string,
-): OsPath[] {
-  const roots: OsPath[] = [];
-  for (const candidate of [workspaceRoot, ...additionalWritableRoots, "/tmp", tempDir]) {
-    // 非字符串/空串不算一枚根（`workspaceRoot` 来自宿主服务的原始值）。
-    // 解析不出来时按 `path.resolve` 形保留，**不丢这一枚**：宿主的 `realpathOf` 在整条
-    // 前缀都不存在时才回 `undefined`，而灾难目标那一侧同样出自 `path.resolve` 的世界，
-    // 保留 resolve 形才让两侧同世界。丢掉这一枚的后果是**反方向**的：它底下的目标
-    // 看起来"谁都没包住"，于是被判成沙箱覆盖而让路——实测 `rm -rf .` 会因此变成放行。
-    const branded =
-      typeof candidate === "string" && candidate.length > 0
-        ? asOsPath(canonicalize(candidate) ?? path.resolve(candidate))
-        : undefined;
-    // 这里的每一枚都是宿主真实路径（工作区根、临时区、规范化后的形），
-    // 标成 `OsPath` 让下游的包含性判据只能收同一个世界的东西。
-    if (branded !== undefined && !roots.includes(branded)) {
-      roots.push(branded);
+): OsPath[] | undefined {
+  let roots: OsPath[] | undefined;
+  if (typeof workspaceRoot === "string" && workspaceRoot.length > 0) {
+    roots = [];
+    for (const candidate of [workspaceRoot, ...additionalWritableRoots, "/tmp", tempDir]) {
+      // 解析不出来时按 `path.resolve` 形保留，**不丢这一枚**：宿主的 `realpathOf` 在整条
+      // 前缀都不存在时才回 `undefined`，而灾难目标那一侧同样出自 `path.resolve` 的世界，
+      // 保留 resolve 形才让两侧同世界。丢掉这一枚的后果是**反方向**的：它底下的目标
+      // 看起来"谁都没包住"，于是被判成沙箱覆盖而让路——实测 `rm -rf .` 会因此变成放行。
+      const branded = asOsPath(canonicalize(candidate) ?? path.resolve(candidate));
+      // 这里的每一枚都是宿主真实路径（工作区根、临时区、规范化后的形），
+      // 标成 `OsPath` 让下游的包含性判据只能收同一个世界的东西。灾难目标那一侧必须
+      // 同样折成规范形再比（见 `effective-disposition` 的 `canonicalFixOf`）：只在这一侧
+      // 登记词法形会同时改变「目标落在根之内」的判定，工作区里的删除会被误判成可让路。
+      if (!roots.includes(branded)) {
+        roots.push(branded);
+      }
     }
   }
   return roots;
@@ -209,11 +212,13 @@ function scopeOfResolvedPolicy(
     };
     if (typeof mode === "string" && CONFINING_MODES.has(mode)) {
       const additional = additionalRootsOf(additionalWritableRoots);
-      // 根表**至少一枚**：`/tmp` 与 `tempDir` 是模块自己的常量，即使宿主给的
-      // `workspaceRoot` 形状不对，这两枚仍会进表（规范化失败时退 `path.resolve` 形）。
-      // 所以这里不再判空——那条判据在实现上一格都走不到，留着只会让覆盖率门禁永远差一分支。
-      if (additional !== undefined) {
-        scope = { mode, roots: writableRootsOf(workspaceRoot, additional, canonicalize, tempDir) };
+      const roots =
+        additional === undefined
+          ? undefined
+          : writableRootsOf(workspaceRoot, additional, canonicalize, tempDir);
+      // 两处读不全都按"这趟不让路"处理：半份根表推出来的"沙箱盖得住"是放行方向。
+      if (roots !== undefined) {
+        scope = { mode, roots };
       }
     }
   }
@@ -233,7 +238,14 @@ export function sandboxScopeOf(
   // ② 策略确实能解析出在拦的 mode。只看 ② 时，一个自报"不沙箱"的执行器配上一条
   // 说自己在拦的策略就能骗到让路——而让路之后没人再兜底。
   if (confiningShellModeOf(shellRaw) !== undefined && isSandboxPolicyFace(policyRaw)) {
-    scope = scopeOfResolvedPolicy(policyRaw, session, canonicalize, tempDir);
+    // `resolve` 与 `canonicalize` 都是宿主注入的实现。这里兜住异常并按"读不到"处理：
+    // 本函数的调用点一处在扫描排序的热路径上、一处在同步 guard 谓词里，一次抛错会中断
+    // 整趟判定，而两种情况下正确的降级都是"不让路"。
+    try {
+      scope = scopeOfResolvedPolicy(policyRaw, session, canonicalize, tempDir);
+    } catch {
+      scope = undefined;
+    }
   }
   return scope;
 }
@@ -279,19 +291,14 @@ export function sandboxDropsOf(
   );
 }
 
-/** 宿主全部三种沙箱模式（含 `danger-full-access`）。 */
-const ALL_MODES: ReadonlySet<string> = new Set([
-  "read-only",
-  "workspace-write",
-  "danger-full-access",
-]);
-
 /**
  * 这次调用**实际处在哪个沙箱模式**（按权限档位分叉的判定要它，见 `lib/mode-policy.ts`）。
  *
  * 与 `sandboxScopeOf` 的分工：那个只回"沙箱**确实在拦**"的两档（`danger-full-access` 不在
  * 列，因为它绕开限制），用途是"该不该让路"；本函数回**原始模式**，用途是"该按哪一列处置"。
- * 两者读同一对服务面与同一份 `resolve`，所以不会出现"一边说不沙箱、另一边按沙箱档判"。
+ * 两者读同一对服务面，前提也一致：执行器自报 `danger-full-access` 时它不拦文件效应，
+ * 策略侧再解析出什么模式都不改变这一点——本函数据自报返回 `danger-full-access`，
+ * 而不是返回一个与实际环境不符的受限档位。
  *
  * @param shellRaw  `ctx.get("shell")` 的原始值。
  * @param policyRaw `ctx.get("sandboxPolicy")` 的原始值。
@@ -303,19 +310,26 @@ export function sandboxModeOf(
   policyRaw: unknown,
   session: unknown,
 ): string | undefined {
-  let mode: unknown;
   // 执行器自报"不沙箱"（或读不到）⇒ 没有模式可读，和 `sandboxScopeOf` 同一条前提。
-  if (
-    isShellFace(shellRaw) &&
-    shellRaw.sandboxMode !== undefined &&
-    isSandboxPolicyFace(policyRaw)
-  ) {
-    const resolved: unknown = policyRaw.resolve(session === undefined ? {} : { session });
-    if (typeof resolved === "object" && resolved !== null) {
-      ({ mode } = resolved as { mode?: unknown });
+  const shellMode = isShellFace(shellRaw) ? knownGuardModeOf(shellRaw.sandboxMode) : undefined;
+  let mode: string | undefined;
+  if (shellMode === "danger-full-access") {
+    // 自报完全权限：执行器自己说它不拦文件效应，策略侧的 mode 不再是实际所处环境，
+    // 按自报返回（`sandboxScopeOf` 同样不会在这种组合下让路）。
+    mode = shellMode;
+  } else if (shellMode !== undefined && isSandboxPolicyFace(policyRaw) && session !== null) {
+    try {
+      const resolved: unknown = policyRaw.resolve(session === undefined ? {} : { session });
+      if (typeof resolved === "object" && resolved !== null) {
+        mode = knownGuardModeOf((resolved as { mode?: unknown }).mode);
+      }
+    } catch {
+      // 宿主实现抛错按"读不到模式"处理（调用方落 `unknown` 保守列），
+      // 不让异常穿进同步 guard 谓词。
+      mode = undefined;
     }
   }
-  return typeof mode === "string" && ALL_MODES.has(mode) ? mode : undefined;
+  return mode;
 }
 
 /**

@@ -6,7 +6,8 @@
 #   4) 长驻 dev server（vite/cargo watch/npm run dev*）拦截——防挂死会话；
 #   5) 密钥/凭据路径编辑拦截（.ssh/id_rsa/*.pem/*.keystore）；
 #   6) gateguard 事实门：每文件首次编辑强制取证（列 import 者/受影响公共接口/
-#      引用用户指令），ECC A/B 实测 +2.25 分的机制；测试/文档面豁免。
+#      引用用户指令），ECC A/B 实测 +2.25 分的机制；**只**豁免文档扩展名
+#      （md/markdown/rst/adoc），test/ 目录不豁免。
 # 全部挂 ctx.tools.guard（同步谓词，拒绝=模型收到 Error: <指令> 的可行动反馈）。
 # 设置卡：enabled + factGateEnabled 双开关。
 #

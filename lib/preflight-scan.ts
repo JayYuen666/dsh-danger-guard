@@ -166,7 +166,11 @@ interface ScanState {
    *  命中隔离词表的文件可以任意多，`unread` 跟着无界增长。 */
   candidates: number;
   dirs: number;
+  /** 遍历被预算截断：后续层不再走（再走也读不到）。 */
   capped: boolean;
+  /** 有层没列出来（断链/权限/后端错误）：结论不算完整，但**其余层照走**——
+   *  与 `capped` 分开，否则一条断链会让整趟扫描在它那一层停住。 */
+  incomplete: boolean;
   quarantined: number;
   /** 真展开过的目录（相对起点），随结果交回用于层覆盖判定。 */
   readonly walked: string[];
@@ -253,11 +257,23 @@ async function listChildren(ctx: ScanCtx, item: ScanItem): Promise<ScanItem[]> {
   try {
     entries = await ctx.fs.listDir(item.target, ctx.signal);
   } catch {
-    ctx.state.capped = true;
+    // 只标"不完整"，不置 `capped`：后者是"预算用尽、后续层不必再走"，拿它表示失败会让
+    // 一条断链把上层尚未走过的层一起停掉。
+    ctx.state.incomplete = true;
     return out;
   }
   for (const entry of entries) {
     if (ctx.signal.aborted) {
+      return out;
+    }
+    // 预算已满就别再往下枚举：`listDir` 会把整层物化，只查 aborted 会让一条巨大目录
+    // 把条目全列出来（文件预算要到 scanOneFile 才生效，那时已经晚了）。
+    if (
+      ctx.state.capped ||
+      ctx.state.candidates >= PREFLIGHT_MAX_FILES ||
+      ctx.state.dirs >= PREFLIGHT_MAX_DIRS
+    ) {
+      ctx.state.capped = true;
       return out;
     }
     // 依赖/产物目录与点开头目录根本不展开（连 lstat 都不必花一次）
@@ -316,15 +332,20 @@ function collectFindings(rel: string, text: string, ctx: ScanCtx): void {
 async function scannableText(ctx: ScanCtx, item: ScanItem): Promise<string | undefined> {
   let bytes: Uint8Array | undefined;
   try {
+    // 多读 1 字节用来判「被截断」：`entry.size` 缺失时（目录项没带 size），只读
+    // PREFLIGHT_MAX_BYTES 分不出「整份读完」与「只读了前 64KB」，半份内容会被当成
+    // 完整扫描、`complete` 仍为 true。超限一律按「没读成正文」处理（走 unread 面）。
     bytes = await ctx.fs.readByteRange(
       item.target,
-      { offset: 0, length: PREFLIGHT_MAX_BYTES },
+      { offset: 0, length: PREFLIGHT_MAX_BYTES + 1 },
       ctx.signal,
     );
   } catch {
     ctx.state.capped = true;
   }
-  return bytes === undefined || bytes.includes(0) ? undefined : decodeText(bytes);
+  return bytes === undefined || bytes.length > PREFLIGHT_MAX_BYTES || bytes.includes(0)
+    ? undefined
+    : decodeText(bytes);
 }
 
 /** 扫一枚候选文件。回 `false` = 文件预算用尽，调用方应当就此收队（`capped` 已置位）。
@@ -347,7 +368,6 @@ async function scanOneFile(ctx: ScanCtx, item: ScanItem): Promise<boolean> {
     ctx.state.unread.push(item.rel);
     return true;
   }
-  ctx.state.scanned += 1;
   // 超大文件跳过而不是读前半（与迁移前同一条取舍）：半份内容给出的命中面更不完整，
   // 而"读到一半"会多出第二种语义（这份扫描结果到底覆盖了什么）。
   if (item.size !== undefined && item.size > PREFLIGHT_MAX_BYTES) {
@@ -363,6 +383,9 @@ async function scanOneFile(ctx: ScanCtx, item: ScanItem): Promise<boolean> {
     ctx.state.unreadNotQuarantined.push(item.rel);
     return true;
   }
+  // 只有**真读到正文**才算扫过：隔离 / 超大 / 读不动三种都不消耗 scanned，
+  // 否则 RefScan 里「scanned 是真实读过的文件数」这条契约就是假的。
+  ctx.state.scanned += 1;
   collectFindings(item.rel, text, ctx);
   return true;
 }
@@ -565,6 +588,7 @@ export async function scanReferences(request: ScanRequest): Promise<RefScan | un
       dirs: 0,
       findings: [],
       capped: false,
+      incomplete: false,
       quarantined: 0,
       walked: [],
       unread: [],
@@ -578,7 +602,7 @@ export async function scanReferences(request: ScanRequest): Promise<RefScan | un
         root,
         scanned: ctx.state.scanned,
         findings: ctx.state.findings,
-        complete: !ctx.state.capped,
+        complete: !ctx.state.capped && !ctx.state.incomplete,
         hitsCapped: ctx.state.findings.length >= PREFLIGHT_MAX_FINDINGS,
         quarantined: ctx.state.quarantined,
         dirs: ctx.state.walked,
@@ -639,12 +663,18 @@ async function readHeadBytes(
   return head;
 }
 
-/** 读到的头部 → 证据（正文 + 实际字节数 + 是否还有更多）。 */
-const targetContentOf = (head: Uint8Array): TargetContent => ({
-  text: decodeText(head),
-  bytes: head.length,
-  truncated: head.length > PREFLIGHT_MAX_BYTES,
-});
+/** 读到的头部 → 证据（正文 + 实际字节数 + 是否还有更多）。
+ *  多读的那 1 字节只用于判截断：`text` 与 `bytes` 都必须停在 `PREFLIGHT_MAX_BYTES`，
+ *  否则正文比说明多一字节，模型会按 `bytes` 误判自己拿到了完整长度。 */
+const targetContentOf = (head: Uint8Array): TargetContent => {
+  const truncated = head.length > PREFLIGHT_MAX_BYTES;
+  const visible = truncated ? head.subarray(0, PREFLIGHT_MAX_BYTES) : head;
+  return {
+    text: decodeText(visible),
+    bytes: visible.length,
+    truncated,
+  };
+};
 
 /** 目标内容（read 证据）。回 undefined = 这一项拿不到（已取消 / 不存在 / 无权限 /
  *  非普通文件 / 二进制）。
@@ -666,6 +696,30 @@ export async function readTargetContent(
   return head === undefined || head.includes(0) ? undefined : targetContentOf(head);
 }
 
+/** 零命中那一支的选句与计数字段：扫完了没引用 / 没扫完 / 扫完了但有几份不许读 /
+ *  扫完了但有几份没读到。后两者都不能给全称结论：`complete` 只说明遍历没被预算截断，
+ *  说明不了「都读过了」——全称结论在这一支是假话，而模型会据它删文件。 */
+function refsNoneLineOf(messages: DangerGuardMessages, scan: RefScan): string {
+  const slots = {
+    root: scan.root,
+    scanned: String(scan.scanned),
+    limit: String(PREFLIGHT_MAX_FILES),
+    count: String(scan.quarantined),
+  };
+  if (!scan.complete) {
+    return fillTemplate(messages.preflightRefsNonePartial, slots);
+  }
+  if (scan.unreadNotQuarantined.length > 0) {
+    return fillTemplate(messages.preflightRefsNoneUnread, {
+      ...slots,
+      count: String(scan.unreadNotQuarantined.length),
+    });
+  }
+  const line =
+    scan.quarantined > 0 ? messages.preflightRefsNoneQuarantined : messages.preflightRefsNone;
+  return fillTemplate(line, slots);
+}
+
 /** 渲染引用块。零命中那一支按实际完成度说三句不同的话，不含糊：
  *  - 扫完且没隔离任何东西 → 全称结论"没有任何引用者"（空列表本身不是结论，这句话才是）；
  *  - 未扫完 → "已扫范围内零命中"并点名上限，全称结论在这一支是**假**的：
@@ -675,26 +729,7 @@ export async function readTargetContent(
  *  - 有命中 → 逐行列出，尾部按截断种类补行（遍历截断 / 命中达上限 / 有隔离面）。 */
 export function renderRefsBlock(messages: DangerGuardMessages, scan: RefScan): string {
   if (scan.findings.length === 0) {
-    const slots = {
-      root: scan.root,
-      scanned: String(scan.scanned),
-      limit: String(PREFLIGHT_MAX_FILES),
-      count: String(scan.quarantined),
-    };
-    // 零命中说的是四件事：扫完了没引用 / 没扫完 / 扫完了但有几份不许读 / 扫完了但有几份没读到。
-    // 后两者都不能给全称结论：`complete` 只说明遍历没被预算截断，说明不了「都读过了」。
-    let line = messages.preflightRefsNonePartial;
-    if (scan.complete) {
-      if (scan.unreadNotQuarantined.length > 0) {
-        line = messages.preflightRefsNoneUnread;
-        slots.count = String(scan.unreadNotQuarantined.length);
-      } else if (scan.quarantined > 0) {
-        line = messages.preflightRefsNoneQuarantined;
-      } else {
-        line = messages.preflightRefsNone;
-      }
-    }
-    return fillTemplate(line, slots);
+    return refsNoneLineOf(messages, scan);
   }
   const lines = [
     fillTemplate(messages.preflightRefsHead, {
@@ -717,6 +752,14 @@ export function renderRefsBlock(messages: DangerGuardMessages, scan: RefScan): s
     if (scan.hitsCapped) {
       lines.push(
         fillTemplate(messages.preflightRefsCapped, { limit: String(PREFLIGHT_MAX_FINDINGS) }),
+      );
+    }
+    // 扫完但有几份没读成正文（超大 / 读不动）：命中面同样不是全部，单独说一句。
+    if (scan.unreadNotQuarantined.length > 0) {
+      lines.push(
+        fillTemplate(messages.preflightRefsUnread, {
+          count: String(scan.unreadNotQuarantined.length),
+        }),
       );
     }
   } else {

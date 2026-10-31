@@ -7,12 +7,13 @@
 //
 // 本模块只有类型，所以它对产物字节数的贡献是零。
 
-/** 一份可读的判定统计快照：跨 Remote 边界只能是 JSON（见官方 `isRemoteJsonValue`），
- *  键一律是字符串，值一律是数字或对象。**生产侧必须只写有限整数**：`NaN`/`Infinity`
- *  在类型上放得过、却不是合法 JSON 数值，序列化会变 `null` 或被判假——计数面新增
- *  写入点时不要破坏这条约定。 */
+/** 一份可读的判定统计快照：跨 Remote 边界只能是 JSON，键一律是字符串，值一律是数字。
+ *  **生产侧必须只写有限非负整数**：`NaN`/`Infinity` 在类型上放得过、却不是合法 JSON
+ *  数值，序列化会变 `null`。消费侧的守卫在 `src/stats-reader.ts` 的
+ *  `STATS_SNAPSHOT_SCHEMA`（`z.number().int().nonnegative()`），计数面新增写入点时
+ *  不要破坏这条约定。 */
 export interface StatsSnapshot {
-  /** 判定次数（按面：`bash` / `secret` / `fact`）。 */
+  /** 判定次数（按面：`bash` / `secret`；面名由调用点的 `JudgeCost` 给出）。 */
   readonly calls: Readonly<Record<string, number>>;
   /** 其中的慢判定次数（≥ `slowMs`，按面）。 */
   readonly slow: Readonly<Record<string, number>>;
@@ -22,7 +23,7 @@ export interface StatsSnapshot {
    *  "用户被问过几次"——同一命令重复命中的那些次不算进来（见 `skipped`）。 */
   readonly asks: Readonly<Record<string, number>>;
   /** "看见了但没拦"的命中（按**规则键**；按档位汇总的是下一格）。这一格**不专指**
-   *  完全权限档的零兵底：自动审查档交给 reviewer 的命中、已退役规则（长驻服务器）
+   *  完全权限档的零兜底：自动审查档交给 reviewer 的命中、已退役规则（长驻服务器）
    *  的命中同样计入——读它是「这一档总共放过多少」，不是「用户选了完全不拦」。 */
   readonly allowed: Readonly<Record<string, number>>;
   /** 上面那一格按档位汇总（键是 `GuardMode` 的名字）。 */

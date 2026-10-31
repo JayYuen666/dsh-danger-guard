@@ -4,21 +4,44 @@
 # 这个"默认是 lf"是 oxfmt 自身的约定：本仓与 oxfmt 配置里都没有显式写 endOfLine，
 # 若将来在格式化配置里改成别的值，这里必须一起改，否则两边再次失配。
 * text=auto eol=lf
-# 二进制面显式声明：text=auto 靠"首 8KB 是否含 NUL"猜文本/二进制，猜不中的
-# 压缩/字体/图片格式会被当成文本做换行转换，内容就此损坏。
+# 二进制面必须显式列全：上面那行 `eol=lf` 已经让 git 走 CRLF 输入归一，`text=auto`
+# 的「首 8KB 含 NUL 判二进制」探测被绕过——未列出的二进制文件会被无条件当文本做
+# 换行转换，入库即损坏且没有告警。新增二进制资产时必须同步加一行。
 *.png binary
 *.jpg binary
 *.jpeg binary
 *.gif binary
 *.ico binary
 *.webp binary
+*.avif binary
+*.bmp binary
+*.psd binary
+*.sketch binary
 *.woff binary
 *.woff2 binary
 *.ttf binary
 *.otf binary
+*.eot binary
+*.pdf binary
+*.mp4 binary
+*.webm binary
+*.mov binary
+*.mp3 binary
+*.m4a binary
 *.zip binary
 *.gz binary
 *.tgz binary
+*.7z binary
+*.xz binary
+*.bz2 binary
+*.rar binary
+*.jar binary
+*.wasm binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.node binary
 # Windows 脚本依赖 CRLF：cmd.exe 对 goto/label 与多行括号块的解析在 LF 下不可靠。
 *.bat text eol=crlf
 *.cmd text eol=crlf

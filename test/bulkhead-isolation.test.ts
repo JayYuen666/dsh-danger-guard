@@ -11,9 +11,10 @@
 // 本文件用两个**兄弟** plugin fiber 复现 danger-guard 的 shipped 拓扑：
 //  danger-guard（拦截半，无 Config）+ danger-guard-settings（设置半，严格 Config）。
 //
-// 版本核对：本包 node_modules/@deepseek-ai/cordis/src/fiber.ts 与发布树
-// /Users/yuanjiang/Documents/development/deepseek-harness/vendor/cordis/src/fiber.ts
-// （dsh-v0.1.7-alpha.2）逐字节相同（`diff` 无输出），所以这里跑出来的就是发布行为。
+// 版本核对：本包 node_modules/@deepseek-ai/cordis/src/fiber.ts 与宿主发布树里的同名文件
+// （dsh-v0.1.7-alpha.2 的 vendor/cordis）逐字节相同，所以这里跑出来的就是发布行为。
+// ⚠ 那次比对是人工做过的：本机开发树路径不在仓库里、也无法在 CI 复跑，所以这句话只是背景，
+// 判据本体是下面的 FiberState 数值与 fiber.d.ts 的引用。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";

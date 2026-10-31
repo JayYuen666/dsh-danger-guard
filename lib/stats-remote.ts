@@ -27,7 +27,8 @@ import type { StatsSnapshot } from "./judge-stats.ts";
 
 /** 客户端侧的**服务键 = 线上命名空间**（`TypertGatewayBindingOptions.namespace` 缺省取服务键，
  *  所以这里只能有一个串）。它与设置命名空间、卡片槽位键各不相干。
- *  `src/client-entry.ts` 的读取器与 `$mount` 的 descriptor 都引它，改这里两处一起走。 */
+ *  读侧在 `src/stats-reader.ts`，它自己内联了同一个命名空间串（产物各自打包，本串无法
+ *  跨产物引用）；改这里时必须手工同步那一处，漏改的表现是读数"读不到"。 */
 export const STATS_SERVICE_KEY = "dangerGuardStats";
 
 /**
@@ -84,10 +85,12 @@ const hasServiceRegistry = (value: unknown): boolean => {
  * @returns 装上了没有（调用方不需要它 —— 返回它只是让这条路可断言；本包只作**可选**读面用）
  */
 export function installStatsRemote(ctx: Context): boolean {
-  if (!hasServiceRegistry(ctx)) {
-    return false;
-  }
   try {
+    // 能力探测也放进 try：`ctx.reflect` / `reflect.provide` 可能是抛错 getter，
+    // 探测本身抛错同样只该少一栏统计，不该把闸门一起打掉。
+    if (!hasServiceRegistry(ctx)) {
+      return false;
+    }
     // oxlint-disable-next-line eslint/no-new -- 见函数文档：构造即注册，返回值无意义
     new DangerGuardStatsService(ctx);
   } catch (error) {

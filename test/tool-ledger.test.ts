@@ -7,7 +7,7 @@
  * 「事件位 = 数组下标」，那正是官方 `seq = log.length` 连号契约下的同一个值。
  */
 
-import { describe, it } from "vitest";
+import { beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { scanToolEvents } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
@@ -18,13 +18,20 @@ import {
   resultsOf,
   toolLedgerProjection,
 } from "../lib/tool-ledger.ts";
-import type { LedgerCallRow, ToolLedger } from "../lib/tool-ledger.ts";
+import type { LedgerCallRow, LedgerResultRow, ToolLedger } from "../lib/tool-ledger.ts";
 import { foldLedger, INIT_PLACEHOLDER } from "./ledger-fold.ts";
 import { badEvent, call, ptcCall, ptcSettle, unrelated, result } from "./fixtures/events.ts";
 
 /** 单张台账的行数上限。写数字而不是引常量：下面那组窗口用例的价值就是把 2000 这档闸门
  *  钉住（超一行即作废、刚好一行不作废），lib 侧改窗口必须让这些用例一起红。 */
 const LEDGER_WINDOW = 2000;
+
+/** 一行缺 callId 的结算行（results 侧坏水位/行序用例的原料）。 */
+const resultRowAt = (seq: number): LedgerResultRow => ({
+  callId: null,
+  isError: false,
+  seq,
+});
 
 /** 一行缺 callId 的调用行（坏水位/行序用例的原料；seq 是唯一的可变位）。 */
 const callRowAt = (seq: number): LedgerCallRow => ({
@@ -37,6 +44,18 @@ const callRowAt = (seq: number): LedgerCallRow => ({
 
 // 事件先攒进本模块的数组，再由用例一次喂两条读法（夹具负责 seq/品牌位）。
 const collected: SessionEvent[] = [];
+
+/** 与 fixtures/events.ts 的 seq 归零同一条纪律：残留事件会和新事件撞事件位，
+ *  把一处失败放大成连环红。每个顶层 describe 各挂一次（钩子不能直接挂在文件根上）。 */
+const resetCollected = (): void => {
+  collected.length = 0;
+};
+
+/** JSON 往返：持久缓存那一层的真实路径。 */
+function jsonRoundTrip(value: unknown): unknown {
+  // oxlint-disable-next-line unicorn/prefer-structured-clone -- 判据要的正是 JSON 语义：undefined 键在 stringify 时整枚消失
+  return JSON.parse(JSON.stringify(value));
+}
 
 /** `read` 调用的**原始 arguments JSON 串**（官方 `tool/call.arguments` 是模型产出的字符串，
  *  不是对象）：十处日志夹具共用同一枚目标文件，散着写改一处就漏。期望值一侧写的是
@@ -66,6 +85,8 @@ function assertSameLedger(): ToolLedger {
 }
 
 describe("投影台账 ≡ scanToolEvents", () => {
+  beforeEach(resetCollected);
+
   it("空日志：两张表都空，logSeq 为 0", () => {
     const state = foldLedger([]);
     // 初态按字面写：这条钉的就是"空日志折出来长什么样"，拿实现算出来的值比即同义反复。
@@ -321,6 +342,8 @@ describe("投影台账 ≡ scanToolEvents", () => {
 });
 
 describe("采信门：什么时候不作废", () => {
+  beforeEach(resetCollected);
+
   it("事件位跳号（折叠起点不在日志开头）⇒ 作废，读侧交回 undefined", () => {
     const gap = badEvent({
       type: "tool/call",
@@ -386,7 +409,9 @@ describe("采信门：什么时候不作废", () => {
 });
 
 describe("stateOf 回填与单元形状", () => {
-  it("jSON 往返后的状态仍被采信（持久缓存那条路）", () => {
+  beforeEach(resetCollected);
+
+  it("json 往返后的状态仍被采信（持久缓存那条路）", () => {
     push(call("c1", "read", READ_ARGUMENTS_JSON), result("c1"));
     const state = foldLedger(pendingEvents());
     // 持久缓存那一层按 JSON 落盘，这条用例钉的就是那条路。
@@ -395,6 +420,18 @@ describe("stateOf 回填与单元形状", () => {
     assert.ok(restored !== undefined, "状态里没有 undefined 键可被 stringify 丢掉");
     assert.deepEqual(callsOf(restored), callsOf(state));
     assert.deepEqual(resultsOf(restored), resultsOf(state));
+  });
+
+  it("callId 为 null 的行经 JSON 往返仍是 null（哨兵位不会在 stringify 时整枚消失）", () => {
+    const state = {
+      calls: [callRowAt(0)],
+      results: [],
+      length: 1,
+      dropped: false,
+    };
+    const restored = asLedger(jsonRoundTrip(state));
+    assert.ok(restored !== undefined, "带 null callId 的行仍被采信");
+    assert.equal(callsOf(restored)[0]?.callId, undefined, "读侧按记录契约把 null 折成 undefined");
   });
 
   it("坏回填值一律 undefined", () => {
@@ -441,6 +478,26 @@ describe("stateOf 回填与单元形状", () => {
     };
     assert.equal(asLedger(staleLength), undefined, "length 不大于行内 seq ⇒ 水位错位，不采信");
     assert.ok(asLedger(shortLength) !== undefined, "合法形状（length > seq）仍采信");
+    // results 一侧的三条同判据：行序、重复 seq、只由 results 越水位。
+    assert.equal(
+      asLedger({ calls: [], results: [resultRowAt(1), resultRowAt(0)], length: 2, dropped: false }),
+      undefined,
+      "results 行序倒挂 ⇒ 不采信",
+    );
+    assert.equal(
+      asLedger({ calls: [], results: [resultRowAt(0), resultRowAt(0)], length: 1, dropped: false }),
+      undefined,
+      "results 重复 seq ⇒ 不采信",
+    );
+    assert.equal(
+      asLedger({ calls: [], results: [resultRowAt(3)], length: 3, dropped: false }),
+      undefined,
+      "只有 results 越水位 ⇒ 不采信",
+    );
+    assert.ok(
+      asLedger({ calls: [], results: [resultRowAt(2)], length: 3, dropped: false }) !== undefined,
+      "results 的合法水位仍采信",
+    );
   });
 
   it("重投递幂等：seq 已折过的同一事件再投一遍，行不重复追加（不提前撞窗口作废）", () => {
@@ -450,8 +507,12 @@ describe("stateOf 回填与单元形状", () => {
     const replayed = toolLedgerProjection.apply(state, first);
     assert.deepEqual(replayed.calls, state.calls, "重放不追加第二份拷贝");
     assert.equal(replayed.length, state.length, "长度也不前移");
+    // `tool/result` 的重放走同一分支：结算行同样不得重复追加。
+    const replayedResult = toolLedgerProjection.apply(replayed, settled);
+    assert.deepEqual(replayedResult.results, state.results, "结算行重放不追加");
+    assert.equal(replayedResult.length, state.length, "结算行重放长度也不前移");
     // 重放后的状态仍过得了采信门（schema 的行序不变量不被重放破坏）。
-    assert.ok(asLedger(replayed) !== undefined);
+    assert.ok(asLedger(replayedResult) !== undefined);
   });
 
   it("asLedger 按对象身份记忆化：同一份状态重复读取交回同一份解析结果", () => {

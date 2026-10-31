@@ -10,13 +10,8 @@
 
 import type { BashDenialKey } from "./danger-rules.ts";
 import type { Fix } from "./fix.ts";
-import {
-  AUTO_REVIEW_HARD_STOPS,
-  decideRule,
-  deniedByPolicy,
-  modeNoteKeyOf,
-} from "./mode-policy.ts";
-import type { GuardMode, PolicyFacts, RuleVerdict } from "./mode-policy.ts";
+import { decideRule, deniedByPolicy, modeNoteApplies, modeNoteKeyOf } from "./mode-policy.ts";
+import type { PolicyFacts, RuleVerdict } from "./mode-policy.ts";
 import { renderFix } from "./messages.ts";
 import type { DangerGuardMessages } from "./messages.ts";
 
@@ -31,25 +26,6 @@ export interface PolicyDenyTextInput {
   /** 当次语言的文案表（宿主在调用点现取）。 */
   readonly messages: DangerGuardMessages;
 }
-
-/** 每条档位说明**对哪几枚规则键**成立（其余键只出基础理由与出路，不接一段无关的成因）。
- *
- *  `read-only` 与 `unknown` 两段讲的是"这一层的定位"（谁负责写面、有没有沙箱兜底），
- *  对任何键都成立；工作区档那段讲的是删除的原子性，只有 `rmrf` 用得上；自动审查那段讲的是
- *  "为什么只留少数几条硬拦"，只在那几条硬拦真的被拒时才有意义。
- */
-const NOTE_APPLIES: Readonly<Record<GuardMode, (rule: BashDenialKey) => boolean>> = {
-  "read-only": () => true,
-  unknown: () => true,
-  "workspace-write": (rule) => rule === "rmrf",
-  // 与 mode-policy 的硬拦集合同源（从那里导入）：档位表改硬拦清单时，这段文案的
-  // 适用范围自动跟上，不会静默漂移。
-  "danger-full-access": (rule) => AUTO_REVIEW_HARD_STOPS.has(rule),
-};
-
-/** 这段档位说明对这条规则成不成立。 */
-const modeNoteApplies = (facts: PolicyFacts, rule: BashDenialKey): boolean =>
-  NOTE_APPLIES[facts.mode](rule);
 
 /**
  * 一次 `deny` 的完整文案。

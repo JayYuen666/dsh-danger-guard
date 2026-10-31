@@ -18,7 +18,7 @@
 // 为什么用真实临时目录：引用扫描与目标读取全靠 fs（`projectRootOf` 认工程标记、二进制靠
 //   NUL 字节、`isFile()` 判目录），替身路径探不出任何东西；`/w/proj/...` 那类假路径会让
 //   "扫到了什么"整段退化成空断言。
-import { describe, it, afterAll, beforeAll } from "vitest";
+import { describe, it, afterAll, beforeAll, vi } from "vitest";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -277,10 +277,10 @@ function mustDeny(reason: string | undefined, label: string): string {
   return reason;
 }
 
-/** 决定上附着的上下文清单（accept 与 block 三种臂都带得上这一位）。 */
 /** 决定里的拒绝理由（没拦就回空串）：上面那组用例只关心"给模型的那句长什么样"。 */
 const denyText = (decision: PreOutcome): string => denyReason(decision) ?? "";
 
+/** 决定上附着的上下文清单（accept 与 block 三种臂都带得上这一位）。 */
 const contextsOf = (decision: PostOutcome): readonly UserMessage[] =>
   decision.additionalContexts ?? [];
 
@@ -646,6 +646,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
         rootInvalidate,
         rootClean,
         rootOfficial,
+        rootTruncatedLayer,
       ].map((dir) => rm(dir, { recursive: true, force: true }).catch(() => null)),
     );
   });
@@ -1159,18 +1160,23 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       const session = fakeSession("s-layer-capped", []);
       // 这台夹具本来只有 300 层空目录（用来把遍历预算吃光）。再补一个真实 test/ 层，
       // 缺项里才有"层"这一项——而它恰好落在被截断的那部分扫描范围里。
+      // 用完即删：公共夹具留给后续用例的形状不能依赖本用例的执行。
       await mkdir(path.join(rootDirs, "test"), { recursive: true });
       await writeFile(path.join(rootDirs, "test", "cap-c.test.ts"), 'import "./cap-c";\n');
-      const args = editArgs(targetDirs);
-      const decision = await preflightOf(ctx, {
-        name: "edit",
-        arguments: args,
-        agent: fakeAgent(session),
-      });
-      assert.deepEqual(decision, ALLOW, "层没覆盖到就不投递：半份「这层我探过了」最糟");
-      const denied = guardOf(ctx, { name: "edit", args, session });
-      assert.ok(denied !== undefined, "guard 照旧要求取证");
-      assert.ok(denied.includes("test"), `拒绝理由里点名层目录，实际：${denied.slice(0, 200)}`);
+      try {
+        const args = editArgs(targetDirs);
+        const decision = await preflightOf(ctx, {
+          name: "edit",
+          arguments: args,
+          agent: fakeAgent(session),
+        });
+        assert.deepEqual(decision, ALLOW, "层没覆盖到就不投递：半份「这层我探过了」最糟");
+        const denied = guardOf(ctx, { name: "edit", args, session });
+        assert.ok(denied !== undefined, "guard 照旧要求取证");
+        assert.ok(denied.includes("test"), `拒绝理由里点名层目录，实际：${denied.slice(0, 200)}`);
+      } finally {
+        await rm(path.join(rootDirs, "test"), { recursive: true, force: true });
+      }
     });
 
     it("扫描跑得完、但门禁要的那层是软链（扫描不跟）⇒ 同样整趟让路", async () => {
@@ -1777,11 +1783,17 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
         1,
         `同一枚目标被问了不止一次，实际问的是：${asked.join(" , ")}`,
       );
+      // 除目标外，被问身份的是哪几层属于实现细节（自下而上缓存、批量解析都会改变顺序）；
+      // 这里钉集合与"都是目标的祖先"，不钉遍历次序。
       assert.deepEqual(
-        asked.slice(1),
-        [rootOfficial, path.dirname(target)],
+        asked.slice(1).toSorted(),
+        [rootOfficial, path.dirname(target)].toSorted(),
         `层身份问询的形状变了，实际问的是：${asked.join(" , ")}`,
       );
+      const ancestorDirs = new Set([rootOfficial, path.dirname(target)]);
+      for (const askedPath of asked.slice(1)) {
+        assert.ok(ancestorDirs.has(askedPath), `多问了非祖先目录：${askedPath}`);
+      }
     });
 
     it("没有声明目标的调用（bash / 缺路径键）⇒ 一枚 resolve 都不发（热路径不付无谓往返）", async () => {
@@ -1837,6 +1849,10 @@ describe("分层预算扫描（C）：近邻优先，预算不再被远处的兄
     );
   });
 
+  afterAll(async () => {
+    await rm(rootDeep, { recursive: true, force: true });
+  });
+
   it("预算先买到近邻：深目标的引用者被读到，far 兄弟层没读也不影响", async () => {
     const ctx = createMockCtx();
     ctx.value.smallEditChars = 10;
@@ -1882,6 +1898,10 @@ describe("分层遍历的两条保守出口：中途取消 与 层起点解析�
     await writeFile(target, "export const outlet = 1;\n");
   });
 
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
   it("遍历**中途**被取消 ⇒ 该层就地收手、整趟作废（合流信号可以随时中断）", async () => {
     // `abortAfterLstat` 这枚夹具选项没有任何用例用过（一枚死夹具）——
     // 而它守的那处检查（`listChildren` 逐项查取消）正是"信号随时可能中断"的兑现：
@@ -1909,26 +1929,90 @@ describe("分层遍历的两条保守出口：中途取消 与 层起点解析�
     );
   });
 
-  it("某一层起点解析不出来 ⇒ 遍历标成不完整（不是静默当它不存在），而 guard 照旧拒", async () => {
+  it("某一层起点解析不出来 ⇒ 遍历标成不完整（不是静默当它不存在），正文照给", async () => {
     const ctx = createMockCtx();
     ctx.value.smallEditChars = 10;
     // 目标所在目录那一层（level 0）解析失败：它的子树没被走过，所以这趟扫描不能算完整
     //（`capped` 必须被置位 —— 静默当它不存在就是让"零命中"冒充一条结论）。
-    ctx.fsFace = localFsFace({ resolveThrows: path.dirname(target) });
+    ctx.fsFace = localFsFace({
+      resolveThrowsAt: { path: path.dirname(target), message: "level 0 unreachable" },
+    });
     apply(ctx);
     const session = fakeSession("s-level-unresolvable", []);
     const args = editArgs(target);
-    // ⚠ 这里**不能**断言 B 面拒：扫描被截断且零命中 = "什么都没挣到"，B 面那一趟本来就
-    // 整趟让路（递一份"已扫范围内零命中"给模型的价值低于让它照旧走拒绝路径）。
-    // 要钉的是**下游**：让路之后 guard 照旧拒，而不是静默放行。
-    assert.deepEqual(
-      await preflightOf(ctx, { name: "edit", arguments: args, agent: fakeAgent(session) }),
-      ALLOW,
-      "什么都没挣到 ⇒ B 面让路",
-    );
-    assert.ok(
-      guardOf(ctx, { name: "edit", args, session }) !== undefined,
-      "层起点解析不出来 ⇒ 退回拒绝路径（而不是静默放行）",
-    );
+    // 正文这一半仍挣得到（目标自身可读），所以 B 面按"read 挣到、refs 未完成"递证据；
+    // 判据是正文随行 + 扫描的未完成说明必须出现在理由里，不能冒充零命中结论。
+    const reason = mustDeny(await editDenyOf(ctx, target, session), "层起点解析不出来");
+    assert.ok(reason.includes(READ_MARK), "正文随行（read 这一半是挣到的）");
+    const incomplete = fillTemplate(MESSAGES.zh.preflightRefsNonePartial, {
+      root,
+      scanned: "0",
+      limit: String(PREFLIGHT_MAX_FILES),
+    });
+    assert.ok(reason.includes(incomplete), `须点名扫描未完成，实际：${reason.slice(0, 240)}`);
+    const still = guardOf(ctx, { name: "edit", args, session });
+    assert.ok(still !== undefined, "refs 未挣到 ⇒ guard 仍拒");
+    assert.ok(still.includes("引用探查"), `拒绝理由是缺 refs，实际：${still.slice(0, 200)}`);
+  });
+});
+
+describe("预检接线：结算与请求装配各自抛错时只记一条告警", () => {
+  it("读取基线结算抛错 ⇒ 只记一条告警，下游决定原样交回", async () => {
+    const ctx = createMockCtx();
+    apply(ctx);
+    // `workingDirectory` 服务面换代：结算里那次 cwd 现取会抛，而这一趟仍必须走完。
+    const boom = new Error("workingDirectory 服务换代");
+    ctx.get = (name: string): unknown => {
+      if (name === "workingDirectory") {
+        throw boom;
+      }
+      return name === SETTINGS_READER ? { read: (): Config => ctx.value } : undefined;
+    };
+    // 静默：这一趟只数告警条数，别把整行日志刷进测试输出。
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {
+      /* 静默 */
+    });
+    try {
+      const decision = await postFlightOf(ctx, {
+        name: "read",
+        arguments: { file_path: targetMain },
+        agent: fakeAgent(fakeSession("s-settle-throws", [])),
+      });
+      assert.equal(decision.kind, "accept", "结算抛错不打断这条读取");
+      // 结算与随后的请求装配读的是同一枚服务面，所以这一趟两处各记一条；这里只要求
+      // "结算那一处的异常被接住并带上原错误"，别把条数钉成实现细节。
+      assert.ok(warn.mock.calls.length > 0, "结算那一处的异常被接住并出声");
+      assert.equal(warn.mock.calls[0]?.[1], boom, "告警里带的是原错误（不是新编的一句）");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("预检请求装配抛错 ⇒ 只是不附引用面，决定仍是下游", async () => {
+    const ctx = createMockCtx();
+    apply(ctx);
+    // 设置面读法换代：`settingsConfig` 在请求装配里现读，抛错不能变成"整次工具调用成异常"。
+    ctx.get = (name: string): unknown =>
+      name === SETTINGS_READER
+        ? {
+            read: (): Config => {
+              throw new Error("设置面换代");
+            },
+          }
+        : undefined;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {
+      /* 静默 */
+    });
+    try {
+      const decision = await postFlightOf(ctx, {
+        name: "read",
+        arguments: { file_path: targetMain },
+        agent: fakeAgent(fakeSession("s-req-throws", [])),
+      });
+      assert.equal(decision.kind, "accept", "请求装配抛错只丢引用面，不换决定");
+      assert.equal(warn.mock.calls.length, 1, "请求那一处只记一条告警");
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

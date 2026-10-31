@@ -14,7 +14,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { ancestorLevelsOf, scanReferences } from "../lib/preflight-scan.ts";
+import { PREFLIGHT_MAX_FILES, ancestorLevelsOf, scanReferences } from "../lib/preflight-scan.ts";
 import type { PreflightFs, RefScan, ScanRequest } from "../lib/preflight-scan.ts";
 import { localFsFace } from "./fixtures/local-fs-face.ts";
 
@@ -40,10 +40,10 @@ describe("引用扫描器：分层遍历（近邻优先）", () => {
 
   beforeAll(async () => {
     root = await mkdtemp(path.join(tmpdir(), "dg-scan-layer-"));
-    // 远处兄弟层：300 个无命中文件，足以吃光 256 的文件预算。
+    // 远处兄弟层：比文件预算多出 44 个无命中文件（预算数值从实现导入，不在这里抄一份）。
     await mkdir(path.join(root, "bulk"), { recursive: true });
     await Promise.all(
-      Array.from({ length: 300 }, (_unused, index) =>
+      Array.from({ length: PREFLIGHT_MAX_FILES + 44 }, (_unused, index) =>
         writeFile(path.join(root, "bulk", `f${index}.txt`), "no needle here\n"),
       ),
     );
@@ -71,7 +71,11 @@ describe("引用扫描器：分层遍历（近邻优先）", () => {
     const view = viewOf(scan);
     assert.deepEqual(view.hits, ["deep/mid/test/layermod.test.ts"]);
     assert.equal(view.complete, false, "远处那 300 个文件读不完 ⇒ 遍历确实被截断");
-    assert.equal(view.scanned, 256, "预算按文件数上限用满（近邻先读，所以它没被饿死）");
+    assert.equal(
+      view.scanned,
+      PREFLIGHT_MAX_FILES,
+      "预算按文件数上限用满（近邻先读，所以它没被饿死）",
+    );
   });
 
   it("目标**不在** root 之下 ⇒ 退回从 root 扫一遍（层级链为空那条出口）", async () => {
@@ -144,31 +148,63 @@ describe("引用扫描器：三条保守出口", () => {
     // 所以这里刻意摆**两个**文件，让取消落在"第一项读完之后、第二项开始之前"。
     await writeFile(path.join(root, "src", "second.ts"), "no needle\n");
     const controller = new AbortController();
-    let lstats = 0;
+    const lstats: string[] = [];
     const face = localFsFace();
     const abortMidList: PreflightFs = {
       ...face,
       lstat: (childPath, opts, signal) => {
-        lstats += 1;
-        // 第一次 lstat 之后取消：下一项进循环时就会撞上守卫。
-        if (lstats === 1) {
+        const name = path.basename(childPath);
+        lstats.push(name);
+        // 第二枚子项才取消：钉的是「同层逐项查取消」，不是「第一枚就停」。
+        if (name === "second.ts") {
           controller.abort();
         }
         return face.lstat(childPath, opts, signal);
       },
     };
     const scan = await scanReferences(requestOf(abortMidList, controller.signal));
-    assert.equal(lstats, 1, "取消之后同层其余子项一枚 lstat 都不该发");
+    assert.ok(lstats.length >= 2, `取消前应已逐项 lstat（实际 ${String(lstats.length)} 次）`);
+    assert.equal(lstats.at(-1), "second.ts", "取消落在第二枚子项上（首项之后、后续不再发）");
     assert.equal(scan, undefined, "信号中断 ⇒ 整趟作废（不是半份结果）");
   });
 
+  it("列目录期间取消 ⇒ 该层不再逐项枚举", async () => {
+    const controller = new AbortController();
+    const base = localFsFace();
+    const abortWhileListing: PreflightFs = {
+      ...base,
+      listDir: async (dirTarget) => {
+        const entries = await base.listDir(dirTarget);
+        controller.abort();
+        return entries;
+      },
+    };
+    const scan = await scanReferences(requestOf(abortWhileListing, controller.signal));
+    assert.equal(scan, undefined, "信号中断 ⇒ 整趟作废");
+  });
+
   it("目录列出失败 ⇒ 降级成不完整（一条断链不能让整个项目的预检从此失效）", async () => {
-    const broken = localFsFace({ listDirThrows: path.join(root, "src") });
+    // 夹具的 `listDirThrows` 是整层必抛的消息位，不能按路径注入；这里自带一层包装，
+    // 只让 `src` 这一层失败，其余层照常列——否则「只断一条链」根本没有被验证。
+    const base = localFsFace();
+    const broken: PreflightFs = {
+      ...base,
+      listDir: async (dirTarget) => {
+        if (path.basename(String(dirTarget.targetKey)) === "src") {
+          throw new Error("src list boom");
+        }
+        return base.listDir(dirTarget);
+      },
+    };
     const { signal } = new AbortController();
     const scan = await scanReferences(requestOf(broken, signal));
     const view = viewOf(scan);
     assert.equal(view.complete, false, "列不出来只降级，不整趟抛掉");
     assert.deepEqual(view.hits, []);
+    assert.ok(
+      view.dirs.some((dir) => !dir.startsWith("src")),
+      `其余层照常走（实际走过：${view.dirs.join(", ")}）`,
+    );
   });
 });
 

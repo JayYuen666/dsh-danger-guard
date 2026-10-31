@@ -23,22 +23,42 @@ const CLIENT_BUNDLE_SPEC = "../client.js";
 const INJECT_LIST = /\[\s*[`"']slots[`"']\s*,\s*[`"']configForms[`"']\s*,\s*[`"']locale[`"']\s*\]/u;
 
 /** 产物里 `configForms.get(<设置条目 id>)` 的那个实参（属性链不 mangle，字面量可查）。 */
-const CONFIG_FORM_LOOKUP = /\.configForms\.get\(\s*[`"'](?<id>[^`"']+)[`"']\s*\)/u;
+const CONFIG_FORM_LOOKUP = /\.configForms\.get\(\s*[`"'](?<id>[^`"']+)[`"']\s*\)/gu;
+
+/** YAML 标量去掉可选引号（本清单里只有单/双引号两种写法）。 */
+function unquoteYamlScalar(raw: string | undefined): string {
+  return raw === undefined ? "" : raw.replaceAll(/^["']|["']$/gu, "");
+}
 
 /**
- * 从 `cordis.patch.yml` 取**设置条目**的 id（它就是紧挨着 `name: "…/settings"` 的那一行 id）。
+ * 从 `cordis.patch.yml` 取**设置条目**的 id（`name` 以 `/settings` 结尾的那一行）。
  *
  * 为什么从组合清单里取而不是在用例里写死：这条判据要防的正是**两处漂开** —— 卡片按命名空间
  * 取表单，而那个命名空间必须是随包发布的组合清单里真正挂着 schema 的那一行。
  */
 function settingsEntryId(): string {
-  const patch = readFileSync(path.join(import.meta.dirname, "..", "cordis.patch.yml"), "utf8");
-  const id = /-\s*id:\s*(?<id>\S+)\s*\n\s*name:\s*"[^"]*\/settings"/u.exec(patch)?.groups?.["id"];
+  const patchPath = path.join(import.meta.dirname, "..", "cordis.patch.yml");
+  let patch: string;
+  try {
+    patch = readFileSync(patchPath, "utf8");
+  } catch (error) {
+    throw new Error(`读不到组合清单（设置条目 id 的唯一真源）：${patchPath}`, { cause: error });
+  }
+  // 按列表项切块：id 与 name 之间的注释或其它键不影响取值，标量引号可有可无。
+  const rows = patch.split(/^(?=\s*-\s+id:)/mu).map((block) => ({
+    id: unquoteYamlScalar(
+      /^\s*-\s+id:\s*(?<id>"[^"]*"|'[^']*'|[^\s#]+)/u.exec(block)?.groups?.["id"],
+    ),
+    name: unquoteYamlScalar(
+      /^\s+name:\s*(?<name>"[^"]*"|'[^']*'|[^\s#]+)/mu.exec(block)?.groups?.["name"],
+    ),
+  }));
+  const settingsRow = rows.find((row) => row.name.endsWith("/settings") && row.id !== "");
   assert.ok(
-    id !== undefined,
-    "cordis.patch.yml 里找不到设置条目（name 以 /settings 结尾的那一行）",
+    settingsRow !== undefined,
+    `cordis.patch.yml 里找不到设置条目（name 以 /settings 结尾的那一行）：${patchPath}`,
   );
-  return id;
+  return settingsRow.id;
 }
 
 await declareClientFreshness(import.meta.url);
@@ -92,11 +112,16 @@ describe("danger-guard client 构建", () => {
     // 取表单走 configForms.get(**设置条目 id**)——本包是 bulkhead，卡片写的命名空间是
     // danger-guard-settings（持有 Config 的那一行），不是拦截条目 danger-guard。
     // 这里把产物里的实参与 cordis.patch.yml 的那一行**对质**：两处漂开就是卡片静默读不到表单。
-    const idInBundle = CONFIG_FORM_LOOKUP.exec(text)?.groups?.["id"];
-    assert.equal(
-      idInBundle,
-      settingsEntryId(),
-      "product 里 configForms.get 的实参必须是设置条目 id",
+    // 收**全部**调用的实参：只看首处时，新增的第二张表单换错条目也查不出来。
+    const idsInBundle = Array.from(
+      text.matchAll(CONFIG_FORM_LOOKUP),
+      (match) => match.groups?.["id"],
+    );
+    assert.ok(idsInBundle.length > 0, "产物里必须至少有一处 configForms.get");
+    assert.deepEqual(
+      [...new Set(idsInBundle)],
+      [settingsEntryId()],
+      "product 里每一处 configForms.get 的实参都必须是设置条目 id",
     );
     // 表单是 provider 持有的共享对象，消费契约 ConfigForm 里没有 dispose
     //（installed config-form-types.d.ts 的 ConfigForm）：slot disposer 只注销登记。

@@ -12,7 +12,7 @@
   <a href="https://github.com/JayYuen666/dsh-danger-guard/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-danger-guard/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D22.12-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-0.2.1--rc.3%20%E2%86%92%200.2.2--alpha.2-658EFF?style=flat-square" alt="dsh 0.2.1-rc.3 to 0.2.2-alpha.2" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.3-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -88,10 +88,10 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 卸载：`dsh plugin --profile web remove @jayyuen66/dsh-danger-guard`。包在公共 npm 上，安装不需要凭据，也不需要配作用域源。
 
 - **要求 Node.js `>= 22.12`。** 本包是纯 ESM；正是这个下限让 ESM 入口的 `require()` 形式可用，所以声明了 `engines.node`。当前 `0.2.2-alpha.2` 宿主自身要求 Node `>= 24.9.0`；那一档来自宿主，不是本包的 `engines.node`。
-- **要求宿主 `dsh` 在 `0.2.1-rc.3` → `0.2.2-alpha.2` 窗口内。** 宿主真正读的是 `engines.dsh`（`^0.2.1-rc.3`），而且它**单独决定**：`evaluatePluginCompatibility` 在 `engines.dsh` 那一支就返回了，根本走不到读 `peerDependencies` 的那段——所以 `@deepseek-ai/dsh*` 那几枚 peer 在这里不参与兼容判定。预发布版本参与范围比较。宿主在 `0.2.1-rc.3` 到 `<0.3.0` 之间都满足；`0.3.0` 及以后不满足，要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。`@deepseek-ai/dsh*` 那几枚 peer 写同一条支持窗口范围，因为运行期那几份由宿主提供；`@deepseek-ai/schemastery` 仍钉宿主自带的那一版。`devDependencies` 里的精确钉版才是那条**独立的编译期纪律**（由 `test/publish-manifest.test.ts` 钉住）：本插件的类型与名义品牌与宿主 ABI 耦合，"自动跟上去"正是宿主类型面被装出第二份的那条路。支持窗口是滚动的：本包在发布时最近的三个已发布宿主版本上逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
+- **要求宿主 `dsh` 满足 `engines.dsh` 的 `^0.2.1-rc.3` 范围（即 `0.2.1-rc.3` → `<0.3.0`）。** `0.2.2-alpha.2` 只是发布时点已取证的最高版本，不是区间上限。宿主真正读的是 `engines.dsh`（`^0.2.1-rc.3`），而且它**单独决定**：`evaluatePluginCompatibility` 在 `engines.dsh` 那一支就返回了，根本走不到读 `peerDependencies` 的那段——所以 `@deepseek-ai/dsh*` 那几枚 peer 在这里不参与兼容判定。预发布版本参与范围比较。宿主在 `0.2.1-rc.3` 到 `<0.3.0` 之间都满足；`0.3.0` 及以后不满足，要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。`@deepseek-ai/dsh*` 那几枚 peer 写同一条支持窗口范围，因为运行期那几份由宿主提供；`@deepseek-ai/schemastery` 仍钉宿主自带的那一版。`devDependencies` 里的精确钉版才是那条**独立的编译期纪律**（由 `test/publish-manifest.test.ts` 钉住）：本插件的类型与名义品牌与宿主 ABI 耦合，"自动跟上去"正是宿主类型面被装出第二份的那条路。支持窗口是滚动的：本包在发布时最近的三个已发布宿主版本上逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **`dependencies` 里不放任何 `@deepseek-ai/*`，这是契约**（`test/publish-manifest.test.ts` 钉着）。消费方的 profile 用 `nodeLinker: hoisted` 且 `autoInstallPeers: false` 安装，于是写在 `dependencies` 里的宿主包会被落成**真实目录**，与运行中的宿主已加载的那份并存。`@deepseek-ai/dsh-tools` 的工具运行期调度键是普通 `Symbol`（不是 `Symbol.for`），符号身份按模块实例算：宿主从 profile 副本上读那个键拿到 `undefined`，于是**每一次原生工具调用都抛**——而构建、类型检查、覆盖率门禁在此之前全部照绿。peer 与 devDependencies 都不会进 profile，所以都物化不出第二份。
 - **按值导入的宿主包必须保持外部化。** `@deepseek-ai/dsh-brand` 与 `@deepseek-ai/schemastery` 是值导入（`brandNumber`、`import Schema from …`）。外部化名单读 `dependencies` ∪ `peerDependencies`；只写 `devDependencies` 会被打包器把官方函数体内联进产物，本包就各持一份官方构造器。必需 peer 同时满足两件事：说明符仍是外部的，而消费方 profile 不多装任何东西。`zod` 是普通依赖（由 `lib/tool-ledger.ts` 与设置卡的 `src/stats-reader.ts` 值导入）。
-- **产物刻意不压缩。** `test/build-host.test.ts` 钉着 `host.js` 里那几枚裸说明符、以及 `settings.js` 里没有它们；压缩会把字符串一并去掉，那两条断言就会永远变绿。
+- **产物刻意压缩**（`build-host.mjs` 的 `minify: true`）。`test/build-host.test.ts` 用容忍空白的正则钉住 `host.js` 与 `settings.js` 里的裸说明符（压缩后写作 `from"x"`），外部化本身则走 chunk 的 `inlinedModules` 清单做结构性判据——按函数名做文本断言在 mangle 之后会永远变绿。
 - **随包发 TypeScript 声明**（`types/host.d.ts`、`types/settings-host.d.ts`，以及它们引用的 `lib/` 声明），各子路径带 `types` 条件，`node16` / `bundler` 下 `tsc` 能解析。`./client` 刻意没有（它是浏览器 UMD 外壳），`./cordis.patch.yml` 也没有（宿主 loader 当文件读）。
 - **插件页读本包的 locale**。`locale/en.json` 与 `locale/zh.json` 给出 `meta.title`、`meta.description` 与 `meta.detail`；详情页是 `docs/DETAIL.md` / `docs/DETAIL.zh.md`。`./locale/*.json` 已导出，`locale/` 与 `docs/` 都在 `files` 里，所以装出去的 tarball 带得到它们。
 - 构建产物不入库，`prepack` 会重建，所以发出去的永远是当前源码产出的那一版。
@@ -173,10 +173,10 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 
 | 规则族 | 仅可查看 | 工作区内修改 | 完全权限 | 自动审查 |
 |---|---|---|---|---|
-| `noVerify`（git 钩子绕过） | deny | deny | **deny** | allow |
+| `noVerify`（git 钩子绕过） | deny | deny | **deny** | **deny** |
 | `rmrf`（包住可写根 / 家目录 / 根） | allow¹ | deny | allow | **deny** |
 | `rmrf`（沙箱完全覆盖这次目标） | allow | allow | allow | allow |
-| `pipeShell`（下载即执行） | allow | **deny** | allow | **deny** |
+| `pipeShell`（下载即执行） | ask | **deny** | allow | **deny** |
 | `devServer`（长驻服务） | allow² | allow² | allow² | allow² |
 | `nestedShellUnconfirmed`（认不准） | ask | allow | allow | allow |
 | git 破坏族 | ask | ask | allow | allow |
@@ -186,7 +186,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 ² 宿主自带的协作式超时与 `promoteOnTimeout` 已经管住长驻命令，这条规则不再提供安全属性，故整条让给宿主。
 
 - **完全权限 = 零兵底，但仅限"问不了"的那一支，且有一处例外。** 官方预设把这一档绑死 `approval: never`，用户选它就是"不要拦、不要问"：命中只进设置卡的统计，模型侧一个字都不改；例外是 `noVerify`，它仍然拒绝——绕 git 钩子与沙箱无关，整档放行会让它成为唯一的绕过口。而 `danger-full-access + ask`（自定义组合，或没装预设服务时的默认）**还能问**，那一支沿用工作区档的处置——沙箱什么都不拦却把动作静默放行，方向正好相反。
-- **自动审查只留两条确定性硬拦**（`rmrf` 与 `pipeShell`）。reviewer 是一个 LLM，它的 allow 不等于用户批准，而这一档沙箱什么都不拦；其余全部交给 reviewer，避免同一动作问两次。
+- **自动审查留三条确定性硬拦**（`rmrf`、`pipeShell` 与 `noVerify`）。reviewer 是一个 LLM，它的 allow 不等于用户批准，而这一档沙箱什么都不拦；`noVerify` 与其余各列一样拒绝——绕 git 钩子与沙箱无关，不交给 reviewer 决定。其余**全部**交给 reviewer，避免同一动作问两次。
 - **一条硬规则：「能不能问」决定 `ask` 能不能落地。** `never` 在**任何应答者之前**就确定性返回 `rejected`（理由还会被宿主换成它自己的固定串），所以本该 `ask` 的规则在这一档由我们自己收口成 `deny`，并附一段"这档问不了、换哪一档才能问"，不让模型只拿到一句"不许"。
 - **读不到沙箱模式时**（没有可约束的执行器，或服务形状不符）走一条保守列：写类判据照拦，"认不准"照问。它**刻意不复用**工作区档那一列——那一列依赖"沙箱会拦住一部分"这个前提，而这里没有这个前提。
 - 类型让两条性质**结构性**成立：忘定档 = 编译错误；一枚键两属不可能。后者是要紧的：`tools.guard` 是同步谓词而审批是异步的，且宿主在审批放行之后**还会再跑一次 guard**——"两处都认领"的表现就是**用户点了允许之后还是被拒**。
@@ -213,7 +213,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 
 ### 扩展模式由配置者自负
 
-`extraSecretPatterns` 的片段在加载期逐条用 `new RegExp(pattern, "u")` 校验，匹配时用 `iu` 标志编译；长度上限只拦明显写错的输入，拦不住灾难回溯——一条病态模式可以让同步判定在工具调用主路径上长时间不返回。模式是否安全由配置者负责：本插件既不对模式做静态分析，也不在运行期给匹配加墙钟预算。非法片段在加载期被拒并告警。
+`extraSecretPatterns` 的片段在加载期逐条用 `new RegExp(pattern, "u")` 校验，匹配时用 `iu` 标志编译；长度上限只拦明显写错的输入，拦不住灾难回溯——一条病态模式可以让同步判定在工具调用主路径上长时间不返回。模式是否安全由配置者负责：本插件既不对模式做静态分析，也不在运行期给匹配加墙钟预算。非法片段不生效，并在校验那一刻于日志里点名；装配之后才写进来的片段在下一次密钥面判定前点名，同一串只报一次。校验与编译按清单内容记账，同一份清单只算一次——判定链复用记好的那一套，而不是每次工具调用重编一遍。
 
 ## <img src="https://api.iconify.design/lucide/lock.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 数据与隐私
 
@@ -223,7 +223,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 | 子进程调用（只有这一处） | `ask` 档命中时，按写死的 `BLAST_COMMANDS` 跑一条**只读命令**，在会话 cwd 里、经宿主的 `ctx.shell`，因此与 bash 工具走同一套沙箱与凭据擦洗环境。`git status` 用 `--no-optional-locks` 抑制可选锁与索引刷新，但仍按会话解析出的 `sandboxPolicy` 执行。输出收紧后按每门语言接进审批请求的 `reason` 与 `displayReason`。任何失败（执行器缺席、仓库目标不确定、策略解析失败、非零退出、超时、取消、宿主截断输出、形状不符）一律退回盲问，不重试、不换命令。命令表写死、**不插值任何模型输入**；原命令只用于目标/策略的跳过判据 |
 | 读什么 | 会话事件历史里的工具台账（主路径：守卫里同步读的投影单元；回退是一次全量事件扫描，判定逐字相同）；目标与层目录的 `statSync`；预检写面对每枚声明目标的一次路径解析与一次正文读取；内容自证对最近一次成功编辑目标的一次回读（超过 1 MiB 的文件不回读，按「不知」处理）；家目录取 `os.homedir()` |
 | 记什么 | 全部在进程内存里——事实门分片、判定台账、以及卡片读的那几格计数——宿主退出即消失，dsh 数据目录下不留本包的文件 |
-| 出域的只有两处且都可关 | 装了 lesson-loop 时，`report` 载荷含 cwd、session id、命中命令原文或目标路径与拒绝文案，另带 `judgeMs` 与（密钥面命中时的）目标解析形清单。此外每次判定还有一条 `judge-cost` pass，载荷只有面名、毫秒、字符数三枚数值，不含命令原文与路径。**只有 `judge-cost` 那条 pass 受 `judgeStats` 管**——拒绝上报里的 `judgeMs` / `judgeLength` / `resolvedPaths` 是无条件发送的 |
+| 出域的有两处：`judge-cost` 可关，拒绝上报没有独立开关 | 装了 lesson-loop 时，`report` 载荷含 cwd、session id、命中命令原文或目标路径与拒绝文案，另带 `judgeMs` 与（密钥面命中时的）目标解析形清单。此外每次判定还有一条 `judge-cost` pass，载荷只有面名、毫秒、字符数三枚数值，不含命令原文与路径。**只有 `judge-cost` 那条 pass 受 `judgeStats` 管**——拒绝上报里的 `judgeMs` / `judgeLength` / `resolvedPaths` 是无条件发送的 |
 
 ## <img src="https://api.iconify.design/lucide/circle-help.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 常见问题
 

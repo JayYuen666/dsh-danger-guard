@@ -17,16 +17,28 @@ const NO_MODE = undefined as string | undefined;
 /** 本文件反复用到的档位名（`no-duplicate-string` 盯字面量重复）。 */
 const WORKSPACE_MODE = "workspace-write";
 
-/** 一份把给定服务表塞进 `get()` 的入参（其余三位用固定值）。 */
+/** `sandboxMode` 读法收到的三个入参（来源断言用；测试里不该猜生产传了什么）。 */
+type ModeArgs = [shell: unknown, policy: unknown, session: unknown];
+
+/** 一份把给定服务表塞进 `get()` 的入参（其余三位用固定值）。
+ *  `onMode` 让用例看到沙箱模式读法实际收到的 shell / sandboxPolicy / session。 */
 const factsFrom = (
   services: Record<string, unknown>,
-  options: { session?: unknown; sandboxCovers?: boolean; mode?: string | undefined } = {},
+  options: {
+    session?: unknown;
+    sandboxCovers?: boolean;
+    mode?: string | undefined;
+    onMode?: (...args: ModeArgs) => void;
+  } = {},
 ): ReturnType<typeof policyFactsOf> =>
   policyFactsOf({
     get: (name) => services[name],
     session: "session" in options ? options.session : SESSION,
     sandboxCovers: options.sandboxCovers ?? false,
-    sandboxMode: () => ("mode" in options ? options.mode : WORKSPACE_MODE),
+    sandboxMode: (shell, policy, session) => {
+      options.onMode?.(shell, policy, session);
+      return "mode" in options ? options.mode : WORKSPACE_MODE;
+    },
   });
 
 /** 一套"执行器报在拦 + 策略服务在位"的最小服务面。 */
@@ -39,13 +51,22 @@ describe("policyFactsOf：模式的三种取值与缺席口径", () => {
     }
   });
 
-  it("读不到模式（执行器自报 undefined / 形状不符）⇒ unknown", () => {
-    assert.equal(factsFrom(SANDBOX, {}).mode, WORKSPACE_MODE, "缺省给的是工作区档");
+  it("读不到模式 / 未知名字 ⇒ unknown", () => {
     assert.equal(factsFrom(SANDBOX, { mode: NO_MODE }).mode, "unknown", "读不到模式");
     assert.equal(factsFrom(SANDBOX, { mode: "some-future-mode" }).mode, "unknown", "未知名字");
   });
 
-  it("`get` 整个缺席（宿主没提供可选读数口）⇒ unknown，而不是抛错", () => {
+  it("沙箱模式读法收到 shell / sandboxPolicy / session（服务名与 session 透传都有断言）", () => {
+    const seen: ModeArgs[] = [];
+    factsFrom(SANDBOX, {
+      onMode: (...args) => {
+        seen.push(args);
+      },
+    });
+    assert.deepEqual(seen, [[SANDBOX.shell, SANDBOX.sandboxPolicy, SESSION]]);
+  });
+
+  it("`get` 整个缺席（宿主没提供可选读数口）⇒ 四位事实都走缺席口径，不抛错", () => {
     const facts = policyFactsOf({
       get: undefined,
       session: undefined,
@@ -53,6 +74,9 @@ describe("policyFactsOf：模式的三种取值与缺席口径", () => {
       sandboxMode: () => NO_MODE,
     });
     assert.equal(facts.mode, "unknown");
+    assert.equal(facts.askable, true, "服务缺席按宿主默认 ask 处理");
+    assert.equal(facts.autoReview, false);
+    assert.equal(facts.sandboxCovers, false);
   });
 });
 
@@ -97,6 +121,15 @@ describe("policyFactsOf：能否询问的三条来源", () => {
 
   it("覆盖与配置都读不到 ⇒ 按能问处理（默认策略就是 ask）", () => {
     assert.equal(factsFrom({ ...SANDBOX, approval: {} }).askable, true);
+    // config 在但 policy 缺席、以及 approval 形状不是对象：都按「配置缺席」处理。
+    assert.equal(factsFrom({ ...SANDBOX, approval: { config: {} } }).askable, true);
+    assert.equal(factsFrom({ ...SANDBOX, approval: null }).askable, true);
+    assert.equal(factsFrom({ ...SANDBOX, approval: 7 }).askable, true);
+    // 白名单之外的策略名按「问不了」处理（fail-closed，不是 `!== "never"` 的宽松判据）。
+    assert.equal(
+      factsFrom({ ...SANDBOX, approval: { config: { policy: "future-policy" } } }).askable,
+      false,
+    );
   });
 
   it("审批服务整个缺席 ⇒ **仍然能问**（降级路径会保留我们的 reason）", () => {
@@ -109,6 +142,50 @@ describe("policyFactsOf：能否询问的三条来源", () => {
       approval: { config: { policy: "never" }, overrideOf: () => "ask" },
     };
     assert.equal(factsFrom(services, { session: undefined }).askable, false);
+  });
+
+  it("策略值只认白名单：形状漂移一律按问不了处理", () => {
+    for (const [label, override] of [
+      ["object", { policy: "never" }],
+      ["trailing space", "never "],
+      ["number", 1],
+      ["boolean", true],
+    ] as const) {
+      assert.equal(
+        factsFrom({
+          ...SANDBOX,
+          approval: { config: { policy: "ask" }, overrideOf: () => override },
+        }).askable,
+        false,
+        label,
+      );
+    }
+    // 配置本身形状不符时也不能落到 fail-open。
+    assert.equal(factsFrom({ ...SANDBOX, approval: { config: { policy: 1 } } }).askable, false);
+  });
+
+  it("session 为 null 时两处覆盖读法都不调用（不把 null 交给宿主方法）", () => {
+    let called = 0;
+    const services = {
+      ...SANDBOX,
+      approval: {
+        config: { policy: "ask" },
+        overrideOf: () => {
+          called += 1;
+          return "never";
+        },
+      },
+      permissionPresets: {
+        current: () => {
+          called += 1;
+          return "auto";
+        },
+      },
+    };
+    const facts = factsFrom(services, { session: null });
+    assert.equal(called, 0);
+    assert.equal(facts.askable, true);
+    assert.equal(facts.autoReview, false);
   });
 });
 

@@ -8,6 +8,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
 import { displayReasonOf, fillTemplate, MESSAGES } from "../lib/messages.ts";
+import type { DangerGuardMessages } from "../lib/messages.ts";
 
 describe("displayReasonOf：一枚键在全部语言下的文案", () => {
   it("每个 locale 一格，en 单独显式必填；键集与 MESSAGES 的语言集一致", () => {
@@ -26,6 +27,20 @@ describe("displayReasonOf：一枚键在全部语言下的文案", () => {
     assert.equal(out["zh"], MESSAGES.zh.rmrf);
     assert.equal(out.en, MESSAGES.en.rmrf);
   });
+
+  it("语言集扩宽时自动跟上（不是写死 zh/en 两条分支）", () => {
+    const mutable = MESSAGES as unknown as Record<string, DangerGuardMessages>;
+    try {
+      mutable["fr"] = MESSAGES.en;
+      const out = displayReasonOf("rmrf") as Record<string, string>;
+      assert.equal(out["fr"], MESSAGES.en.rmrf, "新增语言必须出现在结果里");
+      for (const [locale, value] of Object.entries(out)) {
+        assert.ok(value.length > 0, `${locale} 的文案不得为空`);
+      }
+    } finally {
+      Reflect.deleteProperty(mutable, "fr");
+    }
+  });
 });
 
 describe("fillTemplate：槽位插值", () => {
@@ -36,5 +51,21 @@ describe("fillTemplate：槽位插值", () => {
     );
     assert.equal(fillTemplate("no slots", {}), "no slots");
     assert.equal(fillTemplate("{missing} stays", {}), "{missing} stays");
+  });
+
+  it("替换值是字面量：`$&`/`$1` 等替换模式不被二次解释", () => {
+    const literal = "$& $1 $` $' $$";
+    assert.equal(fillTemplate("{value}", { value: literal }), literal);
+  });
+
+  it("槽位存在但取值缺失时保留原占位符，不写进 undefined", () => {
+    assert.equal(fillTemplate("{a}", { a: undefined } as never), "{a}");
+  });
+
+  it("槽位值里的占位符字形不被二次解释", () => {
+    assert.equal(
+      fillTemplate("{text} / {root}", { text: `const p = \${file}; // {root}`, root: "/proj" }),
+      `const p = \${file}; // {root} / /proj`,
+    );
   });
 });

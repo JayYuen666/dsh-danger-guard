@@ -100,9 +100,17 @@ function poke(config: Config, field: keyof Config, dirty: unknown): void {
 let root: string;
 let target: string;
 
+/** 两种口径的名字：多处断言共用，避免同一字面量反复出现。 */
+const PATTERN = "pattern";
+const STRICT_RELATIVE = "strict-relative";
+
 /** 目标文件名：既是落地的源文件名，也是各检索日志里指向它的 pattern/query。
  *  字面量散在十条用例里改一处就漏（`no-duplicate-string` 点的就是这种漂移面）。 */
 const TARGET_BASENAME = "policy-mod.ts";
+/** 目标所在目录（mkdir 与严格口径的相对路径共用同一来源，改名不会只漏一处）。 */
+const SRC_DIR = "src";
+/** 严格口径的 POSIX 相对路径（不能用 path.join：Windows 上会带反斜杠）。 */
+const TARGET_REL = `${SRC_DIR}/${TARGET_BASENAME}`;
 
 /** 一次 edit 调用：会话带 cwd（相对路径与"目标相对路径"判据都要它才成立）。 */
 const fire = (
@@ -161,9 +169,9 @@ const SMALL_ARGS = { old_string: "const value = 1", new_string: "const value = 2
 describe("引用取证的可计入检索工具名单与判据口径", () => {
   beforeAll(async () => {
     root = await mkdtemp(path.join(tmpdir(), "dg-refsearch-"));
-    await mkdir(path.join(root, "src"), { recursive: true });
+    await mkdir(path.join(root, SRC_DIR), { recursive: true });
     await writeFile(path.join(root, "package.json"), "{}");
-    target = path.join(root, "src", TARGET_BASENAME);
+    target = path.join(root, SRC_DIR, TARGET_BASENAME);
     await writeFile(target, "const value = 1\n");
   });
 
@@ -205,7 +213,7 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
         undefined,
         "query 数组含文件名即计入",
       );
-      const byRelative = searchLog("zg_search", { fts: "src/policy-mod.ts", root });
+      const byRelative = searchLog("zg_search", { fts: TARGET_REL, root });
       assert.equal(
         fire(ctx, "default-zg-rel", byRelative, MID_ARGS),
         undefined,
@@ -285,6 +293,52 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
         undefined,
         "read 仍按读证据记账：low 档只需 read 即放行",
       );
+      // mid 档才看得出「read 有没有被当成引用凭证」：一次检索形态的 read 调用不能顶替引用面。
+      const searchShapedRead = searchLog("read", { path: root, pattern: TARGET_BASENAME });
+      assert.ok(
+        fire(ctx, "read-mid-precedence", searchShapedRead, MID_ARGS) !== undefined,
+        "read 计入检索名单也不产生引用凭证：mid 档仍拒",
+      );
+    });
+
+    it("混存有效项与非法项时保留有效项（不是整表回落）", () => {
+      const ctx = createMockCtx();
+      applyPlugin(ctx);
+      poke(ctx.value, "refSearchTools", ["grep", 1, { nope: true }]);
+      assert.equal(
+        fire(
+          ctx,
+          "mixed-grep",
+          searchLog("grep", { path: root, pattern: TARGET_BASENAME }),
+          MID_ARGS,
+        ),
+        undefined,
+        "有效项 grep 保留并计入",
+      );
+      assert.ok(
+        fire(
+          ctx,
+          "mixed-glob",
+          searchLog("glob", { path: root, pattern: TARGET_BASENAME }),
+          MID_ARGS,
+        ) !== undefined,
+        "名单只剩 grep：glob 不再计入",
+      );
+    });
+
+    it("拒绝文案按宿主真实注册面点名：没注册的工具不出现", () => {
+      const ctx = createMockCtx();
+      // 只在**本用例**补一个注册面：rg_search 未注册、grep 注册。必须在 apply 之前挂上：
+      // 在位探测口是装配期从 `ctx.tools` 造出来的（见 host.ts 的 toolPresentOf 调用点）。
+      (ctx.tools as unknown as { get?: (name: string) => unknown }).get = (name) =>
+        name === "grep" ? {} : undefined;
+      applyPlugin(ctx);
+      ctx.value.refSearchTools = ["grep", "rg_search"];
+      ctx.value.refSearchStrictTools = [];
+      const denied = fire(ctx, "present-filter", readLog(), MID_ARGS);
+      assert.ok(denied !== undefined);
+      assert.match(denied, /grep/u, "在位的工具照常点名");
+      assert.doesNotMatch(denied, /rg_search/u, "未注册的工具不得出现在指令里");
     });
 
     it("非空但一项都不是字符串 → 也回落内置默认名单（不能读成「显式清空」）", () => {
@@ -365,8 +419,8 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       );
       assert.deepEqual([...policy.patternTools], ["grep", "glob"]);
       assert.deepEqual([...policy.strictTools], ["zg_search"]);
-      assert.equal(policy.criteria.get("grep"), "pattern");
-      assert.equal(policy.criteria.get("zg_search"), "strict-relative");
+      assert.equal(policy.criteria.get("grep"), PATTERN);
+      assert.equal(policy.criteria.get("zg_search"), STRICT_RELATIVE);
       assert.equal(policy.criteria.get("rg_search"), undefined, "名单之外不给口径");
     });
 
@@ -387,6 +441,47 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       // 冻结是运行期防线：记账与指令文案共用这份策略，就地 push 会永久改写两处。
       assert.equal(Object.isFrozen(policy.patternTools), true);
       assert.equal(Object.isFrozen(policy.strictTools), true);
+      // criteria 不暴露写方法：ReadonlyMap 只是编译期约束，对外交的是只读视图。
+      assert.equal(Reflect.get(policy.criteria, "set"), undefined, "criteria 上拿不到 set");
+      assert.equal(Reflect.get(policy.criteria, "delete"), undefined, "criteria 上拿不到 delete");
+    });
+
+    it("工具名前后空白先归一，再判严格口径与去重", () => {
+      const policy = refSearchPolicyOf([" grep ", "grep", "zg_search "], [" zg_search "]);
+      assert.deepEqual([...policy.criteria.keys()], ["grep", "zg_search"]);
+      assert.deepEqual([...policy.patternTools], ["grep"]);
+      assert.deepEqual([...policy.strictTools], ["zg_search"]);
+      assert.equal(policy.criteria.get("zg_search"), STRICT_RELATIVE);
+      assert.equal(policy.criteria.has(" zg_search "), false);
+    });
+
+    it("criteria 只交读面：没有 set/delete/clear，冻结也不依赖 Map 的 no-op 行为", () => {
+      const policy = refSearchPolicyOf(["grep"], []);
+      assert.equal("set" in policy.criteria, false);
+      assert.equal("delete" in policy.criteria, false);
+      assert.equal("clear" in policy.criteria, false);
+      assert.equal(Object.isFrozen(policy.criteria), true);
+    });
+
+    it("读面保留 Map 的遍历形状：entries / values / forEach", () => {
+      const policy = refSearchPolicyOf(["grep", "zg_search"], ["zg_search"]);
+      assert.deepEqual(
+        [...policy.criteria.entries()],
+        [
+          ["grep", PATTERN],
+          ["zg_search", STRICT_RELATIVE],
+        ],
+      );
+      assert.deepEqual([...policy.criteria.values()], [PATTERN, STRICT_RELATIVE]);
+      const seen: [string, string, boolean][] = [];
+      const each = policy.criteria.forEach.bind(policy.criteria);
+      each((value, key, map) => {
+        seen.push([key, value, map === policy.criteria]);
+      });
+      assert.deepEqual(seen, [
+        ["grep", PATTERN, true],
+        ["zg_search", STRICT_RELATIVE, true],
+      ]);
     });
   });
 });

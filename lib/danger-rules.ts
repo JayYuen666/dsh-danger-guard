@@ -1,8 +1,9 @@
 // lib/danger-rules.ts —— 危险命令识别：纯函数，无 ctx、无 I/O。
 //
-// 移植自 ECC（MIT, github.com/affaan-m/ECC）scripts/hooks 的四类拦截：
+// 判据框架移植自 ECC（MIT, github.com/affaan-m/ECC）scripts/hooks 的危险命令拦截：
 //   block-no-verify（git 钩子绕过）、dev-server-block（长驻进程）、
-//   远程执行（curl|sh 家族）、rm -rf（灾难删除）。
+//   gateguard-fact-force 的 destructive-Bash gate（rm -rf 等灾难删除）。
+// 远程执行（curl|sh 家族）是本包按同一框架扩展的类目，上游没有对应文件。
 // 按 dsh 语境重写：输入是 bash 工具的 command 字符串，输出命中的规则键。
 //
 // 设计原则：
@@ -35,6 +36,15 @@ import { hasUnclosedQuote, lexTokens, splitSegments, structureView } from "./com
 import { dockerDanger, kubectlDanger } from "./container-rules.ts";
 import { DANGER_RE } from "./danger-regexes.ts";
 import { declaredTargets } from "./edit-targets.ts";
+import {
+  DURATION_WORD_RE,
+  ENV_ASSIGN_RE,
+  PREFIX_POSITIONAL_VALUE,
+  PREFIX_VALUE_FLAGS,
+  RUN_PREFIX_WORDS,
+} from "./prefix-tables.ts";
+// 用户扩展密钥模式的校验与编译（本包只读它编译好的那一套正则）。
+import { userSecretRegexes } from "./secret-patterns.ts";
 import type { ShellToken } from "./command-segments.ts";
 import type { Fix } from "./fix.ts";
 
@@ -226,195 +236,6 @@ const SHORT_N_NO_VERIFY_SUBS = new Set(["commit", "am"]);
  *  所以「拦下这段前缀」不会误伤任何**能正常工作**的命令——代价只是让模型改用全词。
  *  反向放开它们则要给每个子命令维护一份 option 表才能判歧义，收益为负。 */
 const NO_VERIFY_ABBREV_MIN = "--no-v".length;
-
-/** 运行前缀词：提权/包装命令，不改变命令实部（复用 devServer 前缀思路）。
- *  漏一个词就是一个逃逸口（`time npm run dev`、`doas rm -rf /` 曾因此放行）。
- *  `xargs`/`parallel` 也在这张表上：`xargs -I{} git commit --no-verify` 里 git 是**被 xargs
- *  执行的那条命令**，四类规则对它同样成立（此前它们只出现在下载即执行的正则里，与文件头
- *  "包装词同判"的宣称不一致）。 */
-const RUN_PREFIX_WORDS = new Set([
-  "sudo",
-  "nohup",
-  "command",
-  "exec",
-  "env",
-  "time",
-  "setsid",
-  "pkexec",
-  "doas",
-  "noglob",
-  "watch",
-  "nice",
-  "stdbuf",
-  "timeout",
-  "taskset",
-  "chrt",
-  "xargs",
-  "parallel",
-  // 下面这组是「段头是包装词、实部在其后」的其它形态。漏一个就是一条现成的逃逸口：
-  // 它们都接受「后面跟一条命令」的位置，而 `headStarts` 的多点位扫描只有在段头被认出
-  // 是包装词时才会启动——认不出时整条兜底**不参与**，`su -c "rm -rf ~"` 就直接放行。
-  "su",
-  "runuser",
-  "ssh",
-  "busybox",
-  "chroot",
-  "unshare",
-  "nsenter",
-  "ionice",
-  "flock",
-  "strace",
-  "ltrace",
-  "gdb",
-  "script",
-  "systemd-run",
-  "firejail",
-  "bwrap",
-  "proot",
-  "torsocks",
-  "proxychains",
-  "proxychains4",
-]);
-
-/** 吃旗标的包装词 → 其**带独立取值**的旗标（跳名不跳值会让取值挡在命令实部前 →
- *  头匹配失败，`nice -n 10 npm run dev` 即此）。分表而非共用一份：`sudo -n`（非交互，
- *  无值）与 `nice -n 10`（有值）字形相同语义相反，共用会把 `sudo -n rm -rf /` 的 rm
- *  当成取值吃掉，反手造出新的逃逸口。
- *  sudo 那一行按本机 /usr/bin/sudo 实测补全：`sudo -p xrm rm -rf /` 与 `sudo -C 3 rm -rf /`
- *  都真的把下一词当取值并继续执行 `rm`（实测走到密码提示 ⇒ 命令词已就位），此前这两形放行。
- *  表**不声称完备**（`-h` 这类"报错退出"的旗标列进来反而会把命令词吃掉）：漏一枚的兜底是
- *  `wrapperHeadStarts` 的多点位扫描，不是这张表。 */
-const PREFIX_VALUE_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  env: ["-u", "--unset", "--unset-var"],
-  // `su -c "<命令>"` 的体是一枚取值：不认它，`su -c "rm -rf ~"` 里的 rm 就落到头外。
-  su: [
-    "-c",
-    "--command",
-    "-s",
-    "--shell",
-    "-g",
-    "--group",
-    "-G",
-    "--supp-group",
-    "-w",
-    "--whitelist-environment",
-  ],
-  runuser: [
-    "-c",
-    "--command",
-    "-s",
-    "--shell",
-    "-g",
-    "--group",
-    "-G",
-    "--supp-group",
-    "-u",
-    "--user",
-  ],
-  // `ssh -p 22 host "<命令>"`：旗标带值，host 是位置取值，其后才是命令体。
-  ssh: [
-    "-p",
-    "-i",
-    "-o",
-    "-l",
-    "-F",
-    "-J",
-    "-L",
-    "-R",
-    "-D",
-    "-W",
-    "-b",
-    "-c",
-    "-e",
-    "-m",
-    "-O",
-    "-Q",
-    "-S",
-    "-w",
-  ],
-  ionice: ["-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid", "-u", "--uid"],
-  flock: ["-w", "--timeout", "-E", "--conflict-exit-code", "-c", "--command"],
-  chroot: ["--userspec", "--groups"],
-  // `-F/--no-fork` 与 `-r/--root`（可选值）都不吃下一词：吃掉命令词就是一条现成的逃逸口。
-  nsenter: ["-t", "--target", "-S", "--setuid", "-G", "--setgid", "-w", "--wd"],
-  "systemd-run": [
-    "-u",
-    "--unit",
-    "-p",
-    "--property",
-    "-E",
-    "--setenv",
-    "--uid",
-    "--gid",
-    "--working-directory",
-  ],
-  script: [
-    "-c",
-    "--command",
-    "-O",
-    "--output-limit",
-    "-I",
-    "--log-in",
-    "-B",
-    "--log-io",
-    "-T",
-    "--log-timing",
-  ],
-  nice: ["-n", "--adjustment"],
-  stdbuf: ["-i", "-o", "-e"],
-  sudo: [
-    "-u",
-    "-g",
-    "-p",
-    "-r",
-    "-c",
-    "-C",
-    "-D",
-    "-T",
-    "-a",
-    "--user",
-    "--group",
-    "--prompt",
-    "--role",
-    "--login-class",
-    "--close-from",
-    "--chdir",
-    "--timeout",
-    "--auth-type",
-  ],
-  taskset: ["-c", "--cpu-list"],
-  timeout: ["-k", "-s", "--kill-after", "--signal"],
-  // `-t/--no-title` 是布尔；把 `-t` 当取值会吞掉后面的命令词。
-  watch: ["-n", "--interval", "-q", "--equexit", "-s", "--signal"],
-  xargs: ["-a", "-d", "-e", "-I", "-i", "-J", "-L", "-l", "-n", "-P", "-s", "-S"],
-  parallel: ["-a", "-j", "-n", "-s", "--jobs", "--arg-file", "--max-args", "--sshlogin"],
-};
-
-/** 旗标之外还吃一个**位置**取值的包装词（`nice 10 …` / `timeout 5 …` / `taskset 0-3 …`）。
- *  chrt 不在此表：它的策略旗标是布尔且可连用、命令前必有一枚优先级词，走 stripRunPrefix
- *  里的专用分支。 */
-const PREFIX_POSITIONAL_VALUE = new Set([
-  "nice",
-  "timeout",
-  "taskset",
-  // `su <user> -c "…"` / `ssh <host> "…"` / `runuser <user> -c "…"`：旗标之后（或之前）
-  // 的那一枚是目标名，不是命令词。不吃它，`ssh box "rm -rf ~"` 里的 box 会被当成命令头。
-  "su",
-  "runuser",
-  "ssh",
-  // `chroot <newroot> <命令>`：新根是位置取值。
-  "chroot",
-  // `flock <file> <命令>`：锁文件是位置取值。
-  "flock",
-]);
-
-/** 时长词：`5` / `10s` / `5m` / `1h` / `2d`，以及 GNU timeout 承认的**小数与 MM:SS**
- *  形态（`timeout --signal TERM 1.5 npm run dev` 实测漏拦——只认整数就把 `1.5` 留成了命令头）。
- *  这一形只在"已经吃过旗标取值"时用于认位置取值，纯整数走 isPositionalValue 的另一支。 */
-const DURATION_WORD_RE = /^(?:\d+(?:\.\d+)?[smhd]?|\d+:[0-5]?\d(?:\.\d+)?)$/u;
-
-/** 前导环境赋值（VAR=x），同样不改变命令实部。 */
-const ENV_ASSIGN_RE = /^[A-Za-z_]\w*=/u;
 
 /**
  * 该词是不是**纯**环境赋值：`FOO=x rm -rf /` 的 rm 是命令实部（照剥）。
@@ -661,7 +482,7 @@ const PARAM_NAME_RE = /^-(?<name>[A-Za-z]+)/u;
  * - `body.startsWith(name)` 保住改动前那条 `/^-recurse/i` 顺手覆盖的长写法（`-recursive`）。
  *
  * 为什么按"参数名"判，而不是逐字母扫任意 `-词`：pwsh 的参数名同样长成 `-字母…`，
- * `Remove-Item -Force -LiteralPath C:\Users\bob\notes.txt` 里 `-LiteralPath` 含一枚 `r`，
+ * `Remove-Item -Force -LiteralPath C:\Users\<user>\notes.txt` 里 `-LiteralPath` 含一枚 `r`，
  * 簇扫描据此得出"递归"，与真 `-Force` 一配就把**删一个文件**判成灾难删除（当时的误拦；`-ErrorAction`、`-Filter` 同形）。改按参数名判之后，只有真是 Recurse/Force 的
  * 缩写才算旗标，其余参数名一律不进旗标面。
  *
@@ -881,26 +702,55 @@ function hasForceRecursive(
  *  （审查确认：旧实现只认 sudo/env 打头 → xargs 是一个现成的逃逸口）。
  *  包装词后只跳「旗标 / 数值 / `{}` 占位 / VAR=值」四类取值，不跳任意位置词——
  *  `xargs cat sh` 里的 sh 是文件名不是命令，一律当二次执行就是误伤。 */
-const EXEC_WRAPPERS = "(?:sudo|env|nohup|exec|doas|pkexec|xargs|parallel)";
-const WRAPPER_SKIP = String.raw`(?:-\S+|\d+|\{\}|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+`;
 /** 执行端名单含 **PowerShell 家族**（`pwsh`/`powershell`）与 `iex`/`Invoke-Expression`，
  *  以及会把 stdin 当代码执行的 Python / Node / Perl / Ruby / PHP / Lua / osascript：
- *  `curl x | iex`、`curl x | python3` 与 `curl x | sh` 同危。`.exe` 与大小写不构成豁免。 */
+ *  `curl x | iex`、`curl x | python3` 与 `curl x | sh` 同危。`.exe` 与大小写不构成豁免。
+ *  包装词不在这张名单里：执行端前面的 sudo/timeout/nice/xargs… 一律由 `runPrefixEnd`
+ *  按**同一张**前缀词表剥掉（旧实现在这里另写了一份 `EXEC_WRAPPERS`，与 runPrefixEnd 的
+ *  词表不同步，`| timeout 5 sh`、`| sudo -u root sh`、`| command sh` 因此全套漏拦）。 */
 const PIPE_EXECUTOR_NAMES = String.raw`sh|bash|zsh|dash|ksh|pwsh|powershell|invoke-expression|iex|python(?:2|3)?|pypy(?:3)?|node(?:js)?|perl5?|ruby|php|lua(?:jit|[0-9.]*)?|osascript`;
-const SHELL_EXEC = new RegExp(
-  `(?:^|\\||<\\(|\\$\\()\\s*` +
-    `(?:(?:[^|\\s]*/)?${EXEC_WRAPPERS}\\s+(?:${WRAPPER_SKIP})*)*` +
-    `(?:[^|\\s]*/)?(?:${PIPE_EXECUTOR_NAMES})\\b`,
-  "iu",
-);
+/** 执行端整词窗口（命令头已剥过包装词，这里只比裸名）。 */
+const PIPE_EXECUTOR_HEAD = new RegExp(`^(?:${PIPE_EXECUTOR_NAMES})$`, "iu");
+/** "取回即执行"的命令头：解释器与 `source`/`eval`/`.`（`sh <(curl x)`、`eval "$(curl x)"`）。 */
+const SUBST_EXECUTOR_HEAD = new RegExp(`^(?:${PIPE_EXECUTOR_NAMES}|source|eval|\\.)$`, "iu");
+/** 结构视图里命令可以重新开始的位置：管道、进程替换、命令替换。 */
+const PIPE_CUT_RE = /(?<cut>\|\||\||<\(|\$\()/gu;
 
-/** 进程替换的执行端命令头（`sh <(curl …)`、`source <(curl …)`、`. <(curl …)`）。
- *  `source`/`.` 与解释器同义——它们是"取回即执行"的常见写法，不是逃逸口。 */
-const SHELL_HEAD_RE = new RegExp(
-  `^(?:(?:sudo|env|nohup|exec|doas|pkexec)\\s+)*(?:[^\\s]*/)?(?:${PIPE_EXECUTOR_NAMES}|source)\\b` +
-    `|^(?:(?:sudo|env)\\s+)*\\.(?=\\s)`,
-  "u",
-);
+/** `.exe` 后缀（Windows 命令头；模块作用域常量，免得每次调用都重建正则）。 */
+const EXE_SUFFIX_RE = /\.exe$/iu;
+
+/** 命令头的裸名：去路径前缀、去 `.exe`、小写（`/bin/BASH.EXE` 与 `bash` 同判）。 */
+const execHeadName = (word: string): string =>
+  binNameOf(word).toLowerCase().replace(EXE_SUFFIX_RE, "");
+
+/** `structure` 里 `at` 之后的那个命令头是不是执行端（包装词由 runPrefixEnd 剥）。 */
+function executorHeadAt(structure: string, at: number): boolean {
+  const tokens = lexTokens(structure.slice(at));
+  const head = tokens[runPrefixEnd(tokens)];
+  return head !== undefined && PIPE_EXECUTOR_HEAD.test(execHeadName(head.value));
+}
+
+/** 模式一：管道 / 后台 / 命令替换之后有执行端，且它在取回内容之后（`curl x | timeout 5 sh`）。 */
+function executorAfterPipe(structure: string, fetchIdx: number): boolean {
+  PIPE_CUT_RE.lastIndex = 0;
+  for (;;) {
+    const cut = PIPE_CUT_RE.exec(structure);
+    if (cut === null) {
+      return false;
+    }
+    const at = cut.index + cut[0].length;
+    if (at > fetchIdx && executorHeadAt(structure, at)) {
+      return true;
+    }
+  }
+}
+
+/** 模式二的前半：这一段的命令头是不是解释器/`source`/`eval`/`.`（取回即执行）。 */
+function substExecutorHead(structure: string): boolean {
+  const tokens = lexTokens(structure.trim());
+  const head = tokens[runPrefixEnd(tokens)];
+  return head !== undefined && SUBST_EXECUTOR_HEAD.test(execHeadName(head.value));
+}
 
 /** 长驻开发服务器命令头（首 token 或 npm/pnpm/yarn/bun 的 run 参数）。 */
 const DEV_SERVER_WORDS = new Set(["vite", "webpack", "next", "nuxt", "cargo-watch", "watchexec"]);
@@ -1185,9 +1035,15 @@ const takeGitLong = (walk: GitWalk, word: string): void => {
   walk.pos += GIT_VALUE_FLAGS.has(word) || subValueFlags?.has(word) === true ? 2 : 1;
 };
 
-/** 位置参数：`git config core.hooksPath <dir>` 的钩子目录键就长在这个位置上。 */
+/** 位置参数：`git config core.hooksPath <dir>` 的钩子目录键就长在这个位置上。
+ *  `git config core.hooksPath` 是读取当前值（与 `--get` 同义），不构成绕过；只有
+ *  键后跟着取值（或键自身写成 `key=value`）才是写入。 */
 const takeGitPositional = (walk: GitWalk, word: string): void => {
-  walk.hooksPathKey ||= walk.sub === "config" && HOOKS_PATH_KEY_RE.test(word);
+  const next = walk.words[walk.pos + 1];
+  walk.hooksPathKey ||=
+    walk.sub === "config" &&
+    HOOKS_PATH_KEY_RE.test(word) &&
+    (word.includes("=") || (next !== undefined && !next.startsWith("-")));
   walk.positionals.push(word);
   walk.pos += 1;
 };
@@ -1291,23 +1147,22 @@ function gitFacts(words: readonly string[]): GitFacts {
 
 /** 单段（已按候选头切好）：git 钩子绕过？绕过只在清单子命令上成立。 */
 function gitBypass(tokens: readonly ShellToken[]): BashVerdict | undefined {
-  const [head] = tokens;
+  // 头已被 `matchesHead`（`isGitHead`）认成 git：`\git`/`my\git` 的头与 `git` 同判
+  // （与 rm 词表同源，同一处判据）。
+  const { sub, hooksSkipped, hooksPath, bypassWords } = gitFacts(
+    tokens.map((token) => token.value),
+  );
+  // 原来那层「头不是 git 就跳过」的守卫已由 `matchesHead` 做完：这里只剩"这条 git 命令是否绕过钩子"。
   let result: BashVerdict | undefined;
-  // `\git`/`my\git` 的头与 `git` 同判（与 rm 词表同源，同一处判据）。
-  if (head !== undefined && isExactBinIn(head, GIT_BIN_NAMES)) {
-    const { sub, hooksSkipped, hooksPath, bypassWords } = gitFacts(
-      tokens.map((token) => token.value),
-    );
-    if (hooksPath || (sub !== undefined && GIT_NO_VERIFY_SUBS.has(sub) && hooksSkipped)) {
-      // 出路只给**绕过旗标**那一支：`core.hooksPath` 的机械解是删掉一个「键 值」二元组，
-      // 而键与值的词位关系（`git config core.hooksPath <dir>` 的 `<dir>` 是哪个词）
-      // 这条走查并没有记——硬造一个改法不如让模型照基础文案自己改（那条文案已写明
-      // 「先修钩子或与用户确认豁免」）。
-      result =
-        bypassWords.length > 0
-          ? { key: "noVerify", fix: { role: "bypassFlag", offending: bypassWords } }
-          : { key: "noVerify" };
-    }
+  if (hooksPath || (sub !== undefined && GIT_NO_VERIFY_SUBS.has(sub) && hooksSkipped)) {
+    // 出路只给**绕过旗标**那一支：`core.hooksPath` 的机械解是删掉一个「键 值」二元组，
+    // 而键与值的词位关系（`git config core.hooksPath <dir>` 的 `<dir>` 是哪个词）
+    // 这条走查并没有记——硬造一个改法不如让模型照基础文案自己改（那条文案已写明
+    // 「先修钩子或与用户确认豁免」）。
+    result =
+      bypassWords.length > 0
+        ? { key: "noVerify", fix: { role: "bypassFlag", offending: bypassWords } }
+        : { key: "noVerify" };
   }
   return result;
 }
@@ -1398,15 +1253,9 @@ function gitDestructive(facts: GitFacts): BashDenialKey | undefined {
 /** 单段（已按候选头切好）：破坏性 git 子命令？词表入口与 `gitBypass` **同源**
  *（同一个 `GIT_BIN_NAMES`、同一趟 `gitFacts` 走查）—— 两台走查迟早会漂。 */
 function gitDestructiveOf(tokens: readonly ShellToken[]): BashVerdict | undefined {
-  const [head] = tokens;
-  let result: BashVerdict | undefined;
-  if (head !== undefined && isExactBinIn(head, GIT_BIN_NAMES)) {
-    const key = gitDestructive(gitFacts(tokens.map((token) => token.value)));
-    if (key !== undefined && isBashDenialKey(key)) {
-      result = { key };
-    }
-  }
-  return result;
+  // 头已被 `matchesHead`（`isGitHead`）认成 git，这一层不再重复判。
+  const key = gitDestructive(gitFacts(tokens.map((token) => token.value)));
+  return key === undefined || !isBashDenialKey(key) ? undefined : { key };
 }
 
 /** 段内**非旗标**词（`terraform -chdir=x apply` 的全局旗标要跳掉）。
@@ -1415,6 +1264,22 @@ function gitDestructiveOf(tokens: readonly ShellToken[]): BashVerdict | undefine
 const positionalsOf = (words: readonly string[]): string[] =>
   words.filter((word) => !word.startsWith("-"));
 
+/** `-auto-approve` 的**假**取值：Go 的 bool flag 认 `false/0/f`，shell 侧还有 `no/off` 写法。
+ *  等号形态取到假值时这条命令并没有跳过确认，不能按 `tfAutoApprove` 收口。 */
+const TF_AUTO_APPROVE_FALSE: ReadonlySet<string> = new Set(["false", "0", "f", "no", "off"]);
+
+/** `-auto-approve` / `--auto-approve` / 带取值的等号形态（terraform 用单横线，双横线一并认）。 */
+const TF_AUTO_APPROVE_RE = /^--?auto-approve(?:=(?<value>.*))?$/u;
+
+/** 这一枚词是不是"确实跳过了确认"的 auto-approve：裸形与非假取值算，`=false` 一类不算。 */
+function skipsApproval(word: string): boolean {
+  const matched = TF_AUTO_APPROVE_RE.exec(word);
+  /* v8 ignore next 1 —— 取不到分组只在正则改坏时发生，调用点保证形式已匹配。 */
+  return (
+    matched !== null && !TF_AUTO_APPROVE_FALSE.has((matched.groups?.["value"] ?? "").toLowerCase())
+  );
+}
+
 /** `terraform`（与它的开源分支 `tofu`）的破坏性形态。 */
 function terraformDanger(words: readonly string[]): BashDenialKey | undefined {
   const [sub] = positionalsOf(words.slice(1));
@@ -1422,7 +1287,7 @@ function terraformDanger(words: readonly string[]): BashDenialKey | undefined {
   if (sub === "destroy") {
     // `terraform plan -destroy` **不是**这条：`plan` 只打印，`sub` 取到的是 `plan`。
     key = "tfDestroy";
-  } else if (sub === "apply" && words.includes("-auto-approve")) {
+  } else if (sub === "apply" && words.some((word) => skipsApproval(word))) {
     key = "tfAutoApprove";
   }
   return key;
@@ -1564,15 +1429,14 @@ const INFRA_DESTRUCTIVE: Readonly<
 };
 
 /** 单段（已按候选头切好）：基础设施破坏族？词表入口按**去路径前缀的命令词**认。 */
-function infraDestructiveOf(tokens: readonly ShellToken[]): BashVerdict | undefined {
-  const [head] = tokens;
+function infraDestructiveOf(
+  head: ShellToken,
+  tokens: readonly ShellToken[],
+): BashVerdict | undefined {
   const words = tokens.map((token) => token.value);
-  let key: BashDenialKey | undefined;
-  if (head !== undefined) {
-    // 命令词按**去路径前缀**认（`/usr/local/bin/kubectl` 与 `kubectl` 同判，与 git 族同口径）。
-    const predicate = ownLookup(INFRA_DESTRUCTIVE, binNameOf(head.value));
-    key = predicate?.(words) ?? migrateDanger(words);
-  }
+  // 命令词按**去路径前缀**认（`/usr/local/bin/kubectl` 与 `kubectl` 同判，与 git 族同口径）。
+  const predicate = ownLookup(INFRA_DESTRUCTIVE, binNameOf(head.value));
+  const key = predicate?.(words) ?? migrateDanger(words);
   return key === undefined || !isBashDenialKey(key) ? undefined : { key };
 }
 
@@ -1780,7 +1644,7 @@ function isDeepHomeDescendant(target: string, home: string): boolean {
   // ⚠ 不能用 `path.relative`：这里的入参是**词面**（`~`、绝对家目录形）与宿主路径混着来，
   // 而 `~` 不是绝对路径，`relative` 对它给出的东西没有意义（实测会把 `rm -rf ~` 判成放行）。
   //
-  // 判据必须同时容忍两种分隔符：宿主家目录在 Windows 上是 `C:\Users\x`，而 shell 词面
+  // 判据必须同时容忍两种分隔符：宿主家目录在 Windows 上是 `C:\Users\<user>`，而 shell 词面
   // 总用 `/` 写。写死 `${home}/` 时 Windows 上永远匹配不上，于是"家目录的深层后代"被误判成
   // 灾难目标（实测在 Windows runner 上 `rm -rf <home>/.cache/x/y` 被拦）。
   const separator =
@@ -1820,7 +1684,7 @@ function isWindowsShapeTarget(raw: string, home: string): boolean {
   const driveless = DRIVELESS_SHAPE_RE.test(raw)
     ? path.posix.normalize(foldWindowsSeparators(raw))
     : undefined;
-  // 家目录在这一侧要过字形归一：Windows 上 os.homedir() 是 `C:\Users\x`，与折过斜杠的
+  // 家目录在这一侧要过字形归一：Windows 上 os.homedir() 是 `C:\Users\<user>`，与折过斜杠的
   // winTarget 不同形，原样比较则永不成立（POSIX 侧那条字面比较用的仍是原值）。
   const winHome = normalizeWindowsShape(home);
   // ── 家目录**深层普通后代**的豁免必须写成**守卫提前返回**，不能挂在 `||` 链上。
@@ -1884,6 +1748,15 @@ function isWindowsShapeTarget(raw: string, home: string): boolean {
  * @param home `os.homedir()`
  * @returns 是否属于「删了就是灾难」的家目录目标
  */
+/** 家目录尾巴按 POSIX 折叠：删空段与 `.` 段（`Documents/`、`//Documents`、`./Documents` 与 `Documents`
+ *  同判）。只做"缩短"的折叠，**不去解析 `..`** —— 上跳本来就是灾难判据的一部分。 */
+function foldHomeTail(rest: string): string {
+  return rest
+    .split("/")
+    .filter((part) => part.length > 0 && part !== ".")
+    .join("/");
+}
+
 function isHomeDisasterPath(target: string, home: string): boolean {
   if (target === home) {
     return true;
@@ -1891,8 +1764,8 @@ function isHomeDisasterPath(target: string, home: string): boolean {
   if (!target.startsWith(`${home}/`)) {
     return false;
   }
-  const rest = target.slice(home.length + 1);
-  return rest.length === 0 || !rest.includes("/") || rest.split("/").includes("..");
+  const folded = foldHomeTail(target.slice(home.length + 1));
+  return !folded.includes("/") || folded.split("/").includes("..");
 }
 
 /** 波浪号形态映射成家目录绝对形态（`~`→home、`~/x`→home/x），供同一把尺子复用。 */
@@ -2094,7 +1967,7 @@ function braceNumberRenderer(width: number): (current: number) => string {
 /** 端点带前导零（`0` 本身不算）时启用 bash 的补零展开。 */
 const BRACE_PADDED_RE = /^-?0\d/u;
 
-/** `{a..c}` 序列；没匹配上返回 null。 */
+/** `{a..c}` / `{a..z..2}` 序列；没匹配上返回 null。步长缺省为 1，0 由 rangeWords 判不可判。 */
 function expandAlphaSequence(alpha: RegExpExecArray | null): string[] | null {
   return alpha === null
     ? null
@@ -2103,7 +1976,7 @@ function expandAlphaSequence(alpha: RegExpExecArray | null): string[] | null {
         alpha.groups?.["start"]?.codePointAt(0) ?? 0,
         alpha.groups?.["end"]?.codePointAt(0) ?? 0,
         /* v8 ignore stop */
-        1,
+        Number(alpha.groups?.["step"] ?? "1"),
         String.fromCodePoint,
       );
 }
@@ -2383,71 +2256,69 @@ function partitionRmArgs(
  *         决定 Windows 字形轨道这一条参不参与
  */
 function catastrophicRm(
+  head: ShellToken,
   tokens: readonly ShellToken[],
   windowsDialect: boolean,
 ): BashVerdict | undefined {
-  const [head] = tokens;
   // 两形里任一命中词表就用那一形（`\rm`、`my\rm`、`C:\tools\rm` 的头都是 rm）。
-  const bin = head === undefined ? "" : rmBinOf(head);
+  // `matchesHead` 已保证 `rmBinOf(head)` 非空，这一层不再重复判空（那是永假的死分支）。
+  const bin = rmBinOf(head);
   let result: BashVerdict | undefined;
-  if (bin.length > 0) {
-    const cmdDialect = CMD_BUILTINS.has(bin);
-    // 旗标面按**命令词**分派（命令词在调用点是已知量，词形不是）：只有 `remove-item`/`ri`
-    // 是"只有 PowerShell 才这么写"的拼法，它们的 `-字母…` 参数名交给 isPsParamAbbrev。
-    // `rm`/`del`/`erase`/`rd`/`rmdir` 同时活在 POSIX/cmd 侧，那两侧宽松短簇的 fail-closed
-    // 语义必须保住，不能为了 pwsh 的便利放开（代价：pwsh 里 `rm` 是 Remove-Item 的别名，
-    // 两种语义在这个命令词上重叠 ⇒ 宁可误拦）。
-    const psParamTrack = bin === "remove-item" || bin === "ri";
-    // `rm`/`del`/`rd` 在 pwsh 里是 Remove-Item 别名：只有调用点声明 Windows 方言时才启用
-    // cmdlet 的“递归单独即灾难级”，POSIX 轨的 `rm -r ~`（需 force）保持原结论。
-    const psAliasTrack = windowsDialect && CMDLET_ALIASES.has(bin);
-    // 轨道参与的**两个**入口在这一处合并：宿主自己是 Windows（总闸）**或**调用点
-    // 声明这段源是 Windows 方言（工具身份 = pwsh，见 BashDangerOptions.shellDialect）。
-    // 后者不是猜字形——方言由调用点说话，POSIX 宿主上的 bash 读法逐字不变。
-    const windowsTrack = isWindowsHost() || windowsDialect;
-    const { flags, targets } = partitionRmArgs(tokens.slice(1), cmdDialect);
-    const psAliasRecurses =
-      psAliasTrack &&
-      flags.some((word) => isPsParamAbbrev(word, "recurse") && !isPsSwitchOff(word));
-    // 环境变量形态是**未展开**的字面判据，与 `$HOME` 同构：它不随轨道/平台退出，
-    // 因为 `%SystemRoot%\System32`、`%USERPROFILE%\Documents` 在任何读法下都不是一个
-    // 合法的相对目标，而展开后删的分别是系统根树与用户树。
-    // POSIX 判据**两形都过**（词值与源文本），但空串不进：`path.posix.normalize("")` 得到 `.`，
-    // 而那正是"删当前目录"这条灾难形状——`rm -rf ""` 与 `rm -rf \`（词值是空串）都不是。
-    // 源文本也要过一遍：家目录是配置进来的字面串，`os.homedir()` 报成 `E:\work\bob` 时，
-    // 那一串按两种读法都正是家目录本身（只读词值会折成 `E:workbob` 而放行）。
-    // 反斜杠在 POSIX 判据里不是分隔符，`\etc`、`\\` 在两形下都不成灾 ⇒ 多这一遍没有误拦代价。
-    // Windows 字形轨道只读源文本：词值 `C:WindowsSystem32` 已经不是任何 Windows 形状。
-    const disaster = (token: ShellToken): boolean =>
-      [token.value, token.raw]
-        .filter((form) => form.length > 0)
-        .some(
-          (form) =>
-            ENV_SYSTEM_ROOT_RE.test(form) ||
-            ENV_USER_ROOT_RE.test(form) ||
-            isPosixDisasterTarget(form),
-        ) ||
-      (windowsTrack && isWindowsShapeTarget(token.raw, os.homedir()));
-    if (
-      (hasForceRecursive(flags, cmdDialect, psParamTrack) || psAliasRecurses) &&
-      targets.some((target) => disaster(target))
-    ) {
-      // 点名**触发判据的那几枚目标**（去重、按首次出现序）：一条 `rm -rf ./build ~` 里
-      // 真正成灾的是 `~`，而模型看到的拒绝理由若只说「目标是家目录」，它得回去自己
-      // 逐个目标比对才知道该动哪一个——`./build` 删掉是安全的，误把它一起改掉反而更糟。
-      // 取词面 `raw`（Windows 轨的判据读的也是它），故两条轨道共用同一份点名。
-      //
-      // ⚠ 这里**不需要**再兜一层空串：`disaster` 要求 `[value, raw]` 至少一形非空，
-      // 而词法层保证 `rawContent` 是 `content` 的超集（转义只缩不增、`\`+换行两者都空），
-      // 故 `raw === ""` 蕴含 `value === ""` —— disaster 为真时 raw 必非空。
-      // 反向那条 Windows 臂同样自足：`isWindowsShapeTarget` 命中盘符/UNC 形，raw 必非空。
-      // 于是名单恒非空，`Fix` 那条「offending 非空」的不变式由这里结构性地兑现，
-      // 不必留一条测不到的空串兜底（那正是覆盖率与可读性的双份负债）。
-      const offending = [
-        ...new Set(targets.filter((target) => disaster(target)).map((target) => target.raw)),
-      ];
-      result = { key: "rmrf", fix: { role: "disasterTarget", offending } };
-    }
+  const cmdDialect = CMD_BUILTINS.has(bin);
+  // 旗标面按**命令词**分派（命令词在调用点是已知量，词形不是）：只有 `remove-item`/`ri`
+  // 是"只有 PowerShell 才这么写"的拼法，它们的 `-字母…` 参数名交给 isPsParamAbbrev。
+  // `rm`/`del`/`erase`/`rd`/`rmdir` 同时活在 POSIX/cmd 侧，那两侧宽松短簇的 fail-closed
+  // 语义必须保住，不能为了 pwsh 的便利放开（代价：pwsh 里 `rm` 是 Remove-Item 的别名，
+  // 两种语义在这个命令词上重叠 ⇒ 宁可误拦）。
+  const psParamTrack = bin === "remove-item" || bin === "ri";
+  // `rm`/`del`/`rd` 在 pwsh 里是 Remove-Item 别名：只有调用点声明 Windows 方言时才启用
+  // cmdlet 的“递归单独即灾难级”，POSIX 轨的 `rm -r ~`（需 force）保持原结论。
+  const psAliasTrack = windowsDialect && CMDLET_ALIASES.has(bin);
+  // 轨道参与的**两个**入口在这一处合并：宿主自己是 Windows（总闸）**或**调用点
+  // 声明这段源是 Windows 方言（工具身份 = pwsh，见 BashDangerOptions.shellDialect）。
+  // 后者不是猜字形——方言由调用点说话，POSIX 宿主上的 bash 读法逐字不变。
+  const windowsTrack = isWindowsHost() || windowsDialect;
+  const { flags, targets } = partitionRmArgs(tokens.slice(1), cmdDialect);
+  const psAliasRecurses =
+    psAliasTrack && flags.some((word) => isPsParamAbbrev(word, "recurse") && !isPsSwitchOff(word));
+  // 环境变量形态是**未展开**的字面判据，与 `$HOME` 同构：它不随轨道/平台退出，
+  // 因为 `%SystemRoot%\System32`、`%USERPROFILE%\Documents` 在任何读法下都不是一个
+  // 合法的相对目标，而展开后删的分别是系统根树与用户树。
+  // POSIX 判据**两形都过**（词值与源文本），但空串不进：`path.posix.normalize("")` 得到 `.`，
+  // 而那正是"删当前目录"这条灾难形状——`rm -rf ""` 与 `rm -rf \`（词值是空串）都不是。
+  // 源文本也要过一遍：家目录是配置进来的字面串，`os.homedir()` 报成 `E:\work\bob` 时，
+  // 那一串按两种读法都正是家目录本身（只读词值会折成 `E:workbob` 而放行）。
+  // 反斜杠在 POSIX 判据里不是分隔符，`\etc`、`\\` 在两形下都不成灾 ⇒ 多这一遍没有误拦代价。
+  // Windows 字形轨道只读源文本：词值 `C:WindowsSystem32` 已经不是任何 Windows 形状。
+  const disaster = (token: ShellToken): boolean =>
+    [token.value, token.raw]
+      .filter((form) => form.length > 0)
+      .some(
+        (form) =>
+          ENV_SYSTEM_ROOT_RE.test(form) ||
+          ENV_USER_ROOT_RE.test(form) ||
+          isPosixDisasterTarget(form),
+      ) ||
+    (windowsTrack && isWindowsShapeTarget(token.raw, os.homedir()));
+  if (
+    (hasForceRecursive(flags, cmdDialect, psParamTrack) || psAliasRecurses) &&
+    targets.some((target) => disaster(target))
+  ) {
+    // 点名**触发判据的那几枚目标**（去重、按首次出现序）：一条 `rm -rf ./build ~` 里
+    // 真正成灾的是 `~`，而模型看到的拒绝理由若只说「目标是家目录」，它得回去自己
+    // 逐个目标比对才知道该动哪一个——`./build` 删掉是安全的，误把它一起改掉反而更糟。
+    // 取词面 `raw`（Windows 轨的判据读的也是它），故两条轨道共用同一份点名。
+    //
+    // ⚠ 这里**不需要**再兜一层空串：`disaster` 要求 `[value, raw]` 至少一形非空，
+    // 而词法层保证 `rawContent` 是 `content` 的超集（转义只缩不增、`\`+换行两者都空），
+    // 故 `raw === ""` 蕴含 `value === ""` —— disaster 为真时 raw 必非空。
+    // 反向那条 Windows 臂同样自足：`isWindowsShapeTarget` 命中盘符/UNC 形，raw 必非空。
+    // 于是名单恒非空，`Fix` 那条「offending 非空」的不变式由这里结构性地兑现，
+    // 不必留一条测不到的空串兜底（那正是覆盖率与可读性的双份负债）。
+    const offending = [
+      ...new Set(targets.filter((target) => disaster(target)).map((target) => target.raw)),
+    ];
+    result = { key: "rmrf", fix: { role: "disasterTarget", offending } };
   }
   return result;
 }
@@ -2459,6 +2330,8 @@ function catastrophicRm(
 const FETCH_VERBS = String.raw`\b(?:curl|wget|fetch|invoke-webrequest|invoke-restmethod|iwr|irm)\b`;
 const FETCH_HEAD_RE = new RegExp(FETCH_VERBS, "iu");
 const FETCH_IN_SUBST_RE = new RegExp(`<\\(\\s*${FETCH_VERBS}`, "iu");
+/** 命令替换里的取回（`eval "$(curl x)"`）——模式二只认 `<()` 时这一形是现成的漏拦口。 */
+const FETCH_IN_CMDSUBST_RE = new RegExp(`\\$\\(\\s*${FETCH_VERBS}`, "iu");
 
 /** 单段：下载即执行？执行端是 shell/脚本解释器才拦；jq/grep 等接收端放行。
  *  入参是**结构视图**（引号内字面文本已清空、`$( )`/反引号体内保留），所以
@@ -2468,16 +2341,16 @@ function pipeToShell(unprefixed: string): BashVerdict | undefined {
   // 快速门槛：段里有取回内容的命令词
   if (FETCH_HEAD_RE.test(unprefixed)) {
     const fetchIdx = unprefixed.search(FETCH_HEAD_RE);
-    // 先取"管道/后台形态"里 shell 执行端的下标（模式一拿它和 fetchIdx 比先后）
-    const match = SHELL_EXEC.exec(unprefixed);
     // 两条模式同一条结论（`result = "pipeShell"`），故并成一个条件（sonarjs/no-duplicated-branches）：
-    // `||` 保留原短路顺序——模式二那两次 test() 仍只在模式一未命中时才跑。
+    // `||` 保留原短路顺序——模式二那几次 test() 仍只在模式一未命中时才跑。
     if (
-      // 模式一：管道/后台喂给 shell（curl … | sh）——shell 在 fetch 之后
-      (match !== null && match.index > fetchIdx) ||
-      // 模式二：进程替换（sh <(curl …) / source <(curl …) / . <(curl …)）——shell 在前，
-      // fetch 结果经 <() 喂给它。命令头允许路径前缀（`/bin/bash <(curl …)` 照拦）。
-      (SHELL_HEAD_RE.test(unprefixed) && FETCH_IN_SUBST_RE.test(unprefixed))
+      // 模式一：管道/后台/命令替换喂给 shell（`curl … | timeout 5 sh`）——执行端在 fetch 之后。
+      // 执行端的包装词与 `runPrefixEnd` 共用同一张表，所以 `| sudo -u root sh`、`| xargs -I{} sh` 同判。
+      executorAfterPipe(unprefixed, fetchIdx) ||
+      // 模式二：进程替换与取回即执行（`sh <(curl …)`、`source <(curl …)`、`eval "$(curl …)"`）——
+      // 执行端在前，取回的内容经 `<()`/`$()` 喂给它；命令头允许路径前缀（`/bin/bash <(curl …)` 照拦）。
+      (substExecutorHead(unprefixed) &&
+        (FETCH_IN_SUBST_RE.test(unprefixed) || FETCH_IN_CMDSUBST_RE.test(unprefixed)))
     ) {
       result = { key: "pipeShell" };
     }
@@ -2612,7 +2485,9 @@ function devServerDangerOfHead(
     result = words[1] === "watch" ? { key: "devServer" } : undefined;
   } else if (head === "npx" || head === "bunx") {
     result = npxDanger(words, 0, serverWords);
-  } else if (PKG_MANAGERS.has(head)) {
+  } else {
+    // 走到这里的只能落在 `devHeads` 的并集里（`matchesHead` 过滤过），而前四支已
+    // 取走词表/cargo/npx/bunx，剩下的并集成员就是包管理器 ⇒ 不必再判一次 `PKG_MANAGERS`。
     result = pkgManagerDanger(words, 0, serverWords, runArgs);
   }
   return result;
@@ -2646,22 +2521,26 @@ function dangerContextOf(opts: BashDangerOptions): DangerContext {
   };
 }
 
+/** `devServer` 挑段头的那一步（两形选形），本体与 `COMMAND_RULES` 的过滤器共用，防两处漂移。 */
+function devHeadOf(head: ShellToken, ctx: DangerContext): string {
+  const [valueForm, rawForm] = binForms(head);
+  return ctx.devHeads.has(valueForm) ? valueForm : rawForm;
+}
+
 /** 单段（已按候选头切好）：长驻开发服务器？词表来自上下文（合并只做一次）。 */
-function devServer(tokens: readonly ShellToken[], ctx: DangerContext): BashVerdict | undefined {
-  const [headWord] = tokens;
-  let result: BashVerdict | undefined;
-  if (headWord !== undefined) {
-    // bin 名（去路径、已由 lexTokens 去引号）：`/usr/bin/vite`、`./.bin/next dev`、`"vite"` 与裸名同判
-    const [valueForm, rawForm] = binForms(headWord);
-    const head = ctx.devHeads.has(valueForm) ? valueForm : rawForm;
-    result = devServerDangerOfHead(
-      head,
-      tokens.map((token) => token.value),
-      ctx.serverWords,
-      ctx.runArgs,
-    );
-  }
-  return result;
+function devServer(
+  head: ShellToken,
+  tokens: readonly ShellToken[],
+  ctx: DangerContext,
+): BashVerdict | undefined {
+  // bin 名（去路径、已由 lexTokens 去引号）：`/usr/bin/vite`、`./.bin/next dev`、`"vite"` 与裸名同判。
+  // 两形选形与 `matchesHead` 共用同一处 `devHeadOf`，所以"过滤说它可能命中"与"这里真按哪个词判"不会漂。
+  return devServerDangerOfHead(
+    devHeadOf(head, ctx),
+    tokens.map((token) => token.value),
+    ctx.serverWords,
+    ctx.runArgs,
+  );
 }
 
 // ── 执行面归一：包装词之后的二次执行与嵌套 shell 的 `-c` 体 ────────────────────
@@ -3000,6 +2879,66 @@ const settled = (ctx: DangerContext, verdict: BashVerdict | undefined): boolean 
   verdict !== undefined && severityIn(ctx, verdict) === SEVERITY_RANK.deny;
 
 /**
+ * 一条按**段头命令词**分派的规则。
+ *
+ * `matchesHead` 是 `run` 的过滤器，也是这条规则的**性能前提**：包装词段会把其后每个
+ * "像命令"的词位都列为候选（`sudo a b c …` 有 O(n) 个），若每个候选都 `slice` 一次再让五条
+ * 规则各扫一遍尾，整体是 O(n²)——实测 8000 词要 18 秒，而宿主同步主路径上这就是一次卡死。
+ *
+ * 两半必须写在同一个对象里：`matchesHead` 若比 `run` 认的词表**窄**，症状是候选点位静默
+ * 消失（规则还在，却再没人喂它），与 #85 的包装词漂移是同一类病，所以不另建一张平行词表。
+ */
+interface HeadRule {
+  /** 这枚候选头词是否**可能**命中本规则（超集过滤器，宁可多留不可少留）。 */
+  matchesHead: (head: ShellToken, ctx: DangerContext) => boolean;
+  /** `head` 就是 `candidate[0]`（同一个 token）。单独传是因为 `matchesHead` 已经判过它：
+   *  规则体内再写一遍"取不到头就跳过"的守卫，那枚守卫在这一层之后就是一条永假的死分支。 */
+  run: (
+    head: ShellToken,
+    candidate: readonly ShellToken[],
+    ctx: DangerContext,
+  ) => BashVerdict | undefined;
+}
+
+/** 迁移命令的命令头：工具本体（`rails`/`manage.py`）**或**它的启动器（`python`/`npx`）。
+ *  `migrateDanger` 按"命令位置 + 动作词"对判，真正的命令词常是启动器的参数，两种都要留。 */
+const MIGRATE_HEADS: ReadonlySet<string> = new Set([
+  ...MIGRATE_LAUNCHERS,
+  ...MIGRATE_PAIRS.map(([bin]) => bin),
+]);
+
+/** git 族的段头判据（`gitBypass` 与 `gitDestructiveOf` 同源，两处都从这一个函数取）。 */
+const isGitHead = (head: ShellToken): boolean => isExactBinIn(head, GIT_BIN_NAMES);
+
+/** 四类规则（git 两族 / 基础设施 / 灾难删除 / 长驻服务）的派分表，顺序即聚合顺序。 */
+const COMMAND_RULES: readonly HeadRule[] = [
+  {
+    matchesHead: (head) => isGitHead(head),
+    run: (_head, candidate) => gitBypass(candidate),
+  },
+  {
+    matchesHead: (head) => isGitHead(head),
+    run: (_head, candidate) => gitDestructiveOf(candidate),
+  },
+  {
+    matchesHead: (head) => {
+      const bin = binNameOf(head.value);
+      return ownLookup(INFRA_DESTRUCTIVE, bin) !== undefined || MIGRATE_HEADS.has(bin);
+    },
+    run: (head, candidate) => infraDestructiveOf(head, candidate),
+  },
+  {
+    matchesHead: (head) => rmBinOf(head).length > 0,
+    run: (head, candidate, ctx) => catastrophicRm(head, candidate, ctx.windowsDialect),
+  },
+  {
+    // `devHeads` 就是那四条分支的并集（词表 + 包管理器 + npx/bunx/cargo），见 dangerContextOf。
+    matchesHead: (head, ctx) => ctx.devHeads.has(devHeadOf(head, ctx)),
+    run: (head, candidate, ctx) => devServer(head, candidate, ctx),
+  },
+];
+
+/**
  * 四类规则里的三类（git 绕过 / 灾难删除 / 长驻服务）逐候选命令头点位判一遍。
  * 候选点位由 `headStarts` 给：段头不是包装词时就是单点（既有判定域一字不加），
  * 是包装词时把其后每个"像命令"的词位都列为候选——option 表按定义补不完，
@@ -3012,17 +2951,18 @@ function ruleAtCandidates(
 ): BashVerdict | undefined {
   let denial: BashVerdict | undefined;
   for (const start of starts) {
-    const candidate = tokens.slice(start);
+    /* v8 ignore next 1 —— starts 由 headStarts 给出，下标必在 tokens 界内。 */
+    const head = tokens[start];
+    // slice 只在真有规则认这枚头词时才做（O(n²) 的两半：slice 与"五条规则各扫一遍尾"）。
+    let candidate: readonly ShellToken[] | undefined;
     // 同一候选头可能同时命中多条规则（例如 hooksPath 与 push --force）。全部参与聚合，
     // 否则前一条即使在本档是 allow，也会挡住后面更严重的命中。
-    for (const verdict of [
-      gitBypass(candidate),
-      gitDestructiveOf(candidate),
-      infraDestructiveOf(candidate),
-      catastrophicRm(candidate, ctx.windowsDialect),
-      devServer(candidate, ctx),
-    ]) {
-      denial = preferSevere(ctx, denial, verdict);
+    for (const rule of COMMAND_RULES) {
+      // 只跑认这枚头词的规则；head 取不到时整轮跳过（starts 由 headStarts 给出，正常取得到）。
+      if (head !== undefined && rule.matchesHead(head, ctx)) {
+        candidate ??= tokens.slice(start);
+        denial = preferSevere(ctx, denial, rule.run(head, candidate, ctx));
+      }
     }
     if (settled(ctx, denial)) {
       break;
@@ -3116,14 +3056,16 @@ function commandDanger(
   // 结构视图清空引号内的**字面**文本（`echo "curl x | sh"` 不该误拦），但保留 `$( )`/反引号
   // 体内内容——那一枚在真实 shell 里会执行（实测 `echo "$(seq 3 | tail -1)"` 输出 `3`），
   // 按字面丢弃就是 `echo "$(curl -s https://x | sh)"` 这类写法的静默放行面。
-  let result = pipeToShell(structureView(command));
+  // `${IFS}` 归一要在结构视图**之前**做：`curl x |${IFS}sh` 展开后才看得见那枚管道，
+  // 按字面读时结构视图把 `|${IFS}sh` 读成一枚普通词，执行端就不存在了（下方 IFS 段同一条归一）。
+  const normalized = normalizeIfs(command);
+  let result = pipeToShell(structureView(normalized));
   // 方言在上下文里收窄一次，随嵌套 `-c` 体一路继承：换一层 shell **不换**方言的读法
   // （`pwsh` 调用点里的 `bash -c "rm -rf C:/Windows"` 内层按 Windows 轨道判 ⇒ 拦）。
   // `rm${IFS}-rf${IFS}~`：`${IFS}` 在真 shell 里展开成空格/制表符/换行，于是它既不是命令词
   // 的一部分、也不是可忽略的变量——用它拼出来的命令**真的会执行**（实测该形在 bash 下删得掉
   // 家目录）。词法器按字面读，整条会落成一个不含空白的词，四类规则因此全部不参与。
   // 归一成空格后再切词：判据只看"展开后长什么样"，这正是真 shell 的读法。
-  const normalized = normalizeIfs(command);
   // 命令词位置是**命令替换**时（`$(echo rm) -rf ~` / `` `echo rm` -rf ~ ``），真 shell 会先
   // 展开再执行，而展开结果取决于运行时。这一形只在两件事同时成立时才升格：① 替换出现在
   // 命令词位置（段首），② 替换体里出现了危险命令的词形。只看①会把 `echo "$(date)"` 这类
@@ -3190,7 +3132,7 @@ export function editTargetPath(
 
 /**
  * 密钥类路径检测：编辑工具不应触碰凭据面。
- * 目录分隔同时认正斜杠与反斜杠（Windows 路径 `C:\Users\x\.ssh\id_rsa` 照拦）。
+ * 目录分隔同时认正斜杠与反斜杠（Windows 路径 `C:\Users\<user>\.ssh\id_rsa` 照拦）。
  * 扩展名后缀用 `(?![\w.])` 而非 `\b`——`\b` 会让 `api.key.ts`/`main.pem.tsx` 等
  * 合法源码（扩展名后还有 `.ts`）被当密钥误拦；新写法要求扩展名处于词尾（后不接词字符/点）。
  *
@@ -3268,70 +3210,10 @@ export interface EditDangerOptions {
   resolvedPaths?: Readonly<Record<string, readonly string[]>>;
 }
 
-/** 用户扩展模式的编译结果（合法的要能用、非法的要知道是哪条——静默跳过等于让用户以为保护已生效）。 */
-export interface SecretPatternPartition {
-  accepted: string[];
-  rejected: string[];
-}
-
-/** 单条扩展模式的长度上限：正则本身的病（灾难回溯）没法静态判定，但"超长"是配置写错的
- *  最强信号，先按长度收一道，剩下的口径写在 README 的「扩展模式由配置者自负」。 */
-const MAX_SECRET_PATTERN_LENGTH = 512;
-
-/**
- * 是不是被写成了 JS 正则**字面量**（`/…/` 或 `/…/gi`）。
- *
- * 判据刻意窄到"只认整串被一对斜杠包住"这一种形状：模式本身常含斜杠（`secrets/prod\.env$`），
- * 所以不能只看到斜杠就拒。这里要求「首字符是 `/`、末字符是 `/`」——那是把路径分隔符写在
- * 两端的写法（如 `/etc/shadow`），而用户要的语义正是"匹配这个片段"，
- * 此时该写 `^/etc/shadow$` 而不是用斜杠当定界符。真正带 flags 的形状（`/x/i`）与
- * 「首尾都是斜杠」两种都拒，且都给出同一条可读理由。
- */
-function looksLikeRegexLiteral(pattern: string): boolean {
-  const first = pattern.at(0);
-  const last = pattern.at(-1);
-  if (first !== "/") {
-    return false;
-  }
-  if (last === "/") {
-    return true;
-  }
-  return DANGER_RE.slashPatternLiteral.test(pattern);
-}
-
-/**
- * 逐条试编译用户给的密钥模式：`new RegExp(pat, "u")` 抛错、或长度超限的进 `rejected`。
- * 这是**加载期校验**的谓词（host 侧读配置时调用并把 rejected 报出来）；判定链里
- * `secretRegexes` 也走同一个函数，两侧不可能给出不一致的模式集合。
- */
-export function partitionSecretPatterns(patterns: readonly string[]): SecretPatternPartition {
-  const accepted: string[] = [];
-  const rejected: string[] = [];
-  for (const pattern of patterns) {
-    if (pattern.length === 0 || pattern.length > MAX_SECRET_PATTERN_LENGTH) {
-      rejected.push(pattern);
-    } else if (looksLikeRegexLiteral(pattern)) {
-      // 写成 `/…/i` 的形状**编得过**（首尾的斜杠只是普通字符、尾部 `i` 也是普通字符），
-      // 于是它不会进 rejected、界面上看不到「本条未生效」，却永远匹配不到任何路径 ——
-      // 用户以为开了保护，密钥面静默失效。这类输入必须点名拒掉，不能靠编译期抛错。
-      rejected.push(pattern);
-    } else {
-      try {
-        accepted.push(new RegExp(pattern, "u").source);
-      } catch {
-        rejected.push(pattern);
-      }
-    }
-  }
-  return { accepted, rejected };
-}
-
-/** 内置 + 用户配置的密钥路径正则，**逐条独立编译、独立匹配**。
- *  不把它们拼成一个大正则：拼接会改变捕获组编号与反向引用语义（`(b)\1` 里的 `\1`
- *  会指向前面模式的分组），还会让重复命名组在部分运行时组合失败。 */
+/** 内置 + 用户配置的密钥路径正则；用户那一部分的校验与编译住在 `lib/secret-patterns.ts`，
+ *  按清单内容复用编译结果。 */
 function secretRegexes(opts: EditDangerOptions = {}): readonly RegExp[] {
-  const { accepted } = partitionSecretPatterns(opts.extraSecretPatterns ?? []);
-  return [SECRET_PATH_RE, ...accepted.map((pat) => new RegExp(pat, "iu"))];
+  return [SECRET_PATH_RE, ...userSecretRegexes(opts.extraSecretPatterns ?? [])];
 }
 
 /**

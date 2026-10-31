@@ -30,18 +30,33 @@ const LOCAL_TS_IMPORT = /from\s*["']\.{1,2}\/[^"']*\.ts["']/u;
 
 /** 该说明符是不是以**裸说明符**出现。`\s*` 是必须的：minify 去掉 `from "x"` 里的空格。 */
 const hasSpecifier = (code: string, specifier: string): boolean =>
-  new RegExp(`from\\s*["']${specifier}["']`, "u").test(code);
+  new RegExp(
+    `from\\s*["']${specifier.replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`)}["']`,
+    "u",
+  ).test(code);
 
-/** 本包依赖表里的包名（dependencies ∪ peerDependencies）——**独立**取，不借构建脚本的口径。 */
+/** 本包四个依赖段的包名——**独立**取，不借构建脚本的口径。
+ *  构建器只外部化 dependencies / peerDependencies / optionalDependencies；devDependencies
+ *  一并收进来是为了让「运行期代码误引构建期依赖」以"被内联"的形状变红，而不是因为它属于
+ *  外部化集合。 */
 function declaredPackages(): string[] {
   const raw: unknown = JSON.parse(
     readFileSync(path.join(import.meta.dirname, "..", "package.json"), "utf8"),
   );
   const pkg = raw as {
     dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
     peerDependencies?: Record<string, string>;
+    optionalDependencies?: Record<string, string>;
   };
-  return [...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.peerDependencies ?? {})];
+  return [
+    ...new Set([
+      ...Object.keys(pkg.dependencies ?? {}),
+      ...Object.keys(pkg.devDependencies ?? {}),
+      ...Object.keys(pkg.peerDependencies ?? {}),
+      ...Object.keys(pkg.optionalDependencies ?? {}),
+    ]),
+  ];
 }
 
 /** 说明符或模块 id 的包名段：`@scope/pkg/sub` → `@scope/pkg`，`pkg/sub` → `pkg`。 */
@@ -50,15 +65,26 @@ function packageNameOf(id: string): string {
   return id.startsWith("@") ? segments.slice(0, 2).join("/") : (segments[0] ?? id);
 }
 
-/** 内联清单里来自**依赖表**的模块（内联进来的依赖会以 node_modules 路径出现在那儿）。 */
+/** 包名的目录段：`@scope/pkg` → `pkg`（工作区真实路径里没有 scope 段）。 */
+const bareNameOf = (name: string): string => name.slice(name.lastIndexOf("/") + 1);
+
+/** 内联清单里来自**依赖表**的模块。两条路径形状都要认：
+ *  - 正常依赖以 `node_modules/…` 出现；
+ *  - 工作区软链会被 rolldown 折成**真实路径**（不含 `node_modules/`，如
+ *    `/repo/dsh-plugin-shared/lib/record.ts`），只能按目录段比对包名。 */
 function inlinedDependencies(inlinedModules: readonly string[]): string[] {
-  const declared = new Set(declaredPackages());
+  const declared = declaredPackages();
   return inlinedModules
     .map((id) => {
       const at = id.lastIndexOf("node_modules/");
-      return at === -1 ? undefined : packageNameOf(id.slice(at + "node_modules/".length));
+      if (at !== -1) {
+        const name = packageNameOf(id.slice(at + "node_modules/".length));
+        return declared.includes(name) ? name : undefined;
+      }
+      const segments = id.split(/[\\/]/u);
+      return declared.find((name) => segments.includes(bareNameOf(name)));
     })
-    .filter((name): name is string => name !== undefined && declared.has(name));
+    .filter((name): name is string => name !== undefined);
 }
 
 describe("danger-guard 两份 host 产物的外部化", () => {
@@ -86,6 +112,11 @@ describe("danger-guard 两份 host 产物的外部化", () => {
       [],
       "host.js 内联了依赖表里的包（external 名单被挪动了？）",
     );
+    // 正向锚：清单非空且含本包入口，否则上面的空集断言会在构建器交回空清单时空转。
+    assert.ok(
+      inlinedModules.some((id) => /[\\/]host\.ts$/u.test(id)),
+      "内联清单必须含本包入口源码",
+    );
     assert.equal(LOCAL_TS_IMPORT.test(host), false, "不得残留 ./x.ts 说明符");
   });
 
@@ -105,7 +136,29 @@ describe("danger-guard 两份 host 产物的外部化", () => {
       "设置半不导入 dsh-brand；出现说明符说明有人挪了 brand 用法却没补声明",
     );
     assert.deepEqual(inlinedDependencies(inlinedModules), [], "settings.js 内联了依赖表里的包");
+    assert.ok(
+      inlinedModules.some((id) => /[\\/]settings-host\.ts$/u.test(id)),
+      "内联清单必须含设置入口源码",
+    );
     assert.equal(LOCAL_TS_IMPORT.test(settings), false, "不得残留 ./x.ts 说明符");
+  });
+});
+
+describe("inlinedDependencies 的路径判定", () => {
+  it("工作区软链折出的真实路径按目录段认出（不依赖 node_modules/ 字样）", () => {
+    assert.deepEqual(inlinedDependencies(["/repo/packages/dsh-plugin-shared/lib/record.ts"]), [
+      "@jayyuen66/dsh-plugin-shared",
+    ]);
+  });
+
+  it("devDependencies 被值引入同样算内联（它不在构建器的外部化集合里）", () => {
+    assert.deepEqual(inlinedDependencies(["/repo/node_modules/rolldown/dist/index.mjs"]), [
+      "rolldown",
+    ]);
+  });
+
+  it("本包源码不算依赖内联", () => {
+    assert.deepEqual(inlinedDependencies([path.join(import.meta.dirname, "..", "host.ts")]), []);
   });
 });
 

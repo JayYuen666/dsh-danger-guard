@@ -18,6 +18,7 @@ import type { StatsSnapshot } from "../lib/judge-stats.ts";
 import { installStatsRemote, STATS_SERVICE_KEY } from "../lib/stats-remote.ts";
 import { loggedText } from "./setup-logs.ts";
 import { STATS_DESCRIPTORS } from "../src/stats-reader.ts";
+import { BUNDLE_PKG } from "../src/bundle-pkg.ts";
 
 /** 从真 Context 上取回读面（服务键缺席时 `get` 给 undefined —— 断言里当场点名）。 */
 function statsServiceOf(ctx: Context): { stats: () => StatsSnapshot } {
@@ -41,6 +42,17 @@ describe("判定统计读面（官方 Typert Remote）", () => {
       "宿主侧标记的方法名集合（`@Remote` 写在哪个成员上）",
     );
     // 手写 descriptor 的那几个字段必须与宿主侧标记严丝合缝：分叉了卡片只会"读不到"。
+    assert.equal(STATS_DESCRIPTORS.length, markers.length, "客户端不能多挂或少挂端点");
+    for (const [index, marker] of markers.entries()) {
+      const item = STATS_DESCRIPTORS[index];
+      assert.ok(item !== undefined, `第 ${String(index)} 枚 descriptor 缺失`);
+      assert.equal(item.method, marker.method, `第 ${String(index)} 枚方法名`);
+      assert.equal(
+        item.id,
+        `${BUNDLE_PKG}#${STATS_SERVICE_KEY}/${marker.method}`,
+        "网关按 id 路由",
+      );
+    }
     const [descriptor] = STATS_DESCRIPTORS;
     assert.ok(descriptor !== undefined, "客户端必须有一枚 descriptor");
     assert.equal(descriptor.service, STATS_SERVICE_KEY);
@@ -72,9 +84,21 @@ describe("判定统计读面（官方 Typert Remote）", () => {
     assert.equal(after.quotaReleases, before.quotaReleases + 1);
     assert.equal(countOf(after.calls, "bash"), countOf(before.calls, "bash") + 1);
     assert.equal(countOf(after.slow, "bash"), countOf(before.slow, "bash") + 1);
-    // 阈值与窗口随快照出去：卡片要能把"慢"这个字说成具体数字。
-    assert.equal(after.slowMs, SLOW_JUDGE_MS);
-    assert.ok(after.window > 0);
+    // 阈值与窗口随快照出去：卡片要能把"慢"这个字说成具体数字。期望值写死对外口径，
+    // 不引用常量（从实现派生等于自我复读）。
+    assert.equal(after.slowMs, 100, "对外宣称的慢判定线是 100ms");
+    assert.equal(after.window, 200, "滚动窗口对外口径是 200 次");
+  });
+
+  it("表外档位只丢这一格：统计旁路不抛错，也不污染读数", () => {
+    const ctx = new Context();
+    installStatsRemote(ctx);
+    const service = statsServiceOf(ctx);
+    const before = service.stats();
+    noteRuleHit("rmrf", "future-tier" as never);
+    const after = service.stats();
+    assert.deepEqual(after.hits, before.hits);
+    assert.deepEqual(after.asks, before.asks);
   });
 
   it("注册口在、但 provide 抛错 ⇒ 收口成 false 并说明少了哪一栏，不把闸门带下去", () => {

@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 JayYuen666
+Copyright (c) 2026 JayYuen (JayYuen666)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -20,8 +20,9 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ---
+以上为完整的 MIT 许可条款；以下仅说明来源与覆盖范围，不构成对它的附加条件或限制。
 
-本文件覆盖本仓自身编写的代码（Copyright (c) 2026 JayYuen）。本包的**事实强制门**与**危险
-命令拦截**移植自 ECC（MIT，版权归 Affaan Mustafa 所有）的机制设计；本包不包含上游的代码、
-词表或文案，该判断依据逐项比对记录于 [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)，
-上游 MIT 许可全文亦附于该文件；该文件随本包一同发布。
+本文件覆盖本仓自身编写的代码（Copyright (c) 2026 JayYuen (JayYuen666)）。本包的**事实强制门**与**危险
+命令拦截**移植自 ECC（MIT，版权归 Affaan Mustafa 所有）的机制设计。关于本包是否包含上游代码、词表
+或文案，以 [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) 的逐项比对记录为准（该文件随本包发布，
+上游 MIT 全文亦附于其中）；比对结论更新时以那份文件为准。

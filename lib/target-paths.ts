@@ -6,8 +6,8 @@
 // 的一侧先记下来、同步的一侧现读。键形必须逐字同源，而"逐字同源"这件事没法靠类型保证
 // （少一次 `path.resolve` 不会编译报错，只会让官方那一形永远读不到），于是收进这一枚模块。
 //
-// ⚠ 本模块不 import `node:fs`：本机 `realpathSync` 那一形留在 host.ts（它是同步谓词当场
-// 唯一付得起的解析），两形在 host.ts 的 `resolvedFormsOf` 里合成清单交给 lib 判定——
+// ⚠ 本模块不 import `node:fs`：本机 `realpathSync` 那一形由 host.ts 注入（它是同步谓词当场
+// 唯一付得起的解析），两形在本模块的 `resolvedFormsOf` 里合成清单交给判定——
 // **并列，从不互相替换**，所以官方那一形缺席或陈旧只会少拦不会多放。
 import path from "node:path";
 
@@ -32,7 +32,8 @@ export const resolveTarget = (value: string, cwd: string | undefined): string =>
     // 绝对路径的解析与 cwd 无关，这里借 `path.resolve` 只为折掉 `.`/`..` 与尾分隔符。
     return path.resolve(value);
   }
-  return cwd === undefined ? value : path.resolve(cwd, value);
+  // 空串与缺席同视：`path.resolve("", v)` 会落到插件进程自己的 cwd，那与工具的执行世界无关。
+  return cwd === undefined || cwd.length === 0 ? value : path.resolve(cwd, value);
 };
 
 /** **官方通道**交出的目标真实路径（`归一后的目标 → 该执行世界里的绝对路径`）。
@@ -40,7 +41,7 @@ export const resolveTarget = (value: string, cwd: string | undefined): string =>
  *   - `fs/observed`（后端每观察一枚目标就报一次，`FsTarget` 是它自己的解析结果 ⇒ 零额外 I/O）；
  *   - 预检 B 面（async 的一站：`fs.resolve` + `fs.processPath`，写在密钥面让路判定之前，
  *     于是**同一次调用**随后同步跑的 guard 就吃得到）。
- *  读口是同步的（host.ts 的 `resolvedFormsOf`）——`tools.guard` 是同步谓词而官方 `resolve`
+ *  读口是同步的（本模块的 `resolvedFormsOf`）——`tools.guard` 是同步谓词而官方 `resolve`
  *  是 async，miss 就只剩本机 `realpathSync` 那一形（照旧并列参与）。
  *  陈旧只是**多一形**（判定取并集）：软链被重新指向后旧值仍在，最坏是多拦一次；漏拦的方向
  *  只可能来自"少一形"，而这一枚不减少任何形。 */
@@ -69,7 +70,8 @@ export function rememberOfficialPath(
   cwd: string | undefined,
   real: string | undefined,
 ): void {
-  if (real !== undefined) {
+  // 空串同样是"没到手"：记下去会让读侧以为官方给出了一枚空路径，并把它塞进待判并集。
+  if (real !== undefined && real.length > 0) {
     lruPut(officialPaths, officialPathKeyOf(target, cwd), real, OFFICIAL_PATH_CAP);
   }
 }
@@ -128,9 +130,14 @@ export async function officialTargetOf(
   return resolved;
 }
 
+/** 一次调用最多向官方通道问多少枚目标。声明目标来自模型可写的参数，条数没有上界；
+ *  逐枚并发时整批会同时打到后端（远端/沙箱面每枚是一次往返）。超出上限的部分按"官方
+ *  那一形缺席"处理——它仍会走本机形与声明形，只是不额外挣这一形。 */
+const MAX_OFFICIAL_RESOLVE_TARGETS = 64;
+
 /** 把这一次调用声明的每枚目标问一遍官方通道：真实路径记进缓存，同时把**已 resolve 的
  *  target** 按声明形交回调用方复用（预检随后读正文、探版本都吃这一枚，不再各付一次往返）。
- *  逐枚**并发**而不是串行 await：一次调用的声明目标是个位数，而每枚 resolve 在远端后端上
+ *  逐枚**并发**而不是串行 await：常规调用的声明目标是个位数，而每枚 resolve 在远端后端上
  *  可能是一次往返——串行会把那 3 秒墙钟吃光，反而让唯一挣得到手的一形也赔进去。
  *  解析不成的那枚**不进**表（调用方据此回落到自己 resolve 的旧路径，行为与改造前逐字一致）。 */
 export async function rememberOfficialTargetsOf(
@@ -141,7 +148,7 @@ export async function rememberOfficialTargetsOf(
 ): Promise<ReadonlyMap<string, FsTarget>> {
   const resolvedByTarget = new Map<string, FsTarget>();
   await Promise.all(
-    targets.map(async (target) => {
+    targets.slice(0, MAX_OFFICIAL_RESOLVE_TARGETS).map(async (target) => {
       const resolved = await officialTargetOf(fs, target, cwd, signal);
       if (resolved !== undefined) {
         rememberOfficialPath(target, cwd, processPathOf(fs, resolved));
@@ -204,4 +211,39 @@ export function resolvedFormsOf(
     }
   }
   return Object.fromEntries(entries);
+}
+
+/** `path` 是否就是 `root` 或落在它之下（照官方 `workspace-changes/src/paths.ts` 的 `isInside`）。
+ *
+ * 为什么不拼前缀再 `startsWith`：那要自己判"末尾有没有分隔符"，而分隔符在 Windows 上是
+ * `\\\\`、混形还合法——每漏一种写法就多一条恒假的判据。`path.relative` 由平台实现同时解决
+ * 分隔符与 `..` 归一：结果是空串（同一路径）或以 `..` 开头（在外面）都不是"在内部"。
+ *
+ * ⚠ 判"是否上跳出根"必须比**路径组件边界**，不能只看 `rel.startsWith("..")`：
+ * `relative()` 对根内名为 `..cache` 的目录返回 `..cache`，那个前缀判断会把它误判成
+ * "跑到根外面" —— 方向是**放行**（"沙箱盖不住"为真 ⇒ 灾难删除让路给同样管不了它的沙箱）。 */
+export function isInside(root: string, candidate: string): boolean {
+  const rel = path.relative(root, candidate);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
+/** `candidate` 是否为 `target` 的**祖先目录**（目标自身不算）。
+ *  这是「引用取证的作用域判据」与「项目根的回落取值」共用的**同一条不变式**，故单列一处：
+ *  判定侧（`isProjectScopeOf`）只认"检索起点是目标的祖先"，而拒绝文案会把项目根当检索
+ *  起点原样递给模型（`assembleGaps` 的 `ctx.searchPath`）。两处一旦不同源，就会出现
+ *  「门禁教模型去搜的位置，门禁自己又不认」——模型怎么照做都攒不满凭证。 */
+export const isAncestorDirOf = (candidate: string, target: string): boolean =>
+  candidate !== target && isInside(candidate, target);
+
+/** 起点内的层目录 → 相对起点的 POSIX 形（结果里的 `file` 用的就是这一形，比对才不用两边各 normalize）。
+ *  收在路径模块里：它产出的就是 `underLayer` 的输入契约（统一 `/` 形）。 */
+export function toPosixRelative(root: string, dir: string): string {
+  return path.relative(root, dir).split(path.sep).join("/");
+}
+
+/** 这一项是不是那层（或层更深）里的命中。层就是起点自身时（rel = ""）整棵都在层内。
+ *  两侧都是 `toPosixRelative` 的产物，所以这里的 `/` 是那个函数的输出契约，不是平台分隔符假设
+ *  （换成 `path.sep` 反而会错：拿 `/` 形的串去比 `\` 形的前缀）。 */
+export function underLayer(rel: string, file: string): boolean {
+  return rel.length === 0 || file === rel || file.startsWith(`${rel}/`);
 }

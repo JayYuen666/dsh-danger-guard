@@ -52,12 +52,19 @@ interface StagedRead {
  */
 const pending = new Map<string, StagedRead[]>();
 
+/** 同一键最多保留的未落地观测：同一轮里连发多次 read 的真实上界很小，超出的最旧记录
+ *  在配对错位（guard 与 post-execute 键不同源）时只会污染后续提交，不能无限堆积。 */
+export const MAX_STAGED_PER_KEY = 8;
+
 /** 暂存一次读取观测（guard 时点调用；此时这一趟还**没执行**）。 */
 export function stageReadObservation(key: string, mtimeMs: number, targetN: string): void {
   const queue = pending.get(key);
   if (queue === undefined) {
     lruPut(pending, key, [{ mtimeMs, targetN }]);
     return;
+  }
+  if (queue.length >= MAX_STAGED_PER_KEY) {
+    queue.shift();
   }
   queue.push({ mtimeMs, targetN });
 }
@@ -79,18 +86,19 @@ function shiftStaged(key: string): StagedRead | undefined {
  * 提交一次读取观测：调用方已确认**内容真的交付给模型了**。
  *
  * 提交同时解除失效点——"拿到了这一版"正是那条判据的解除条件，不必再在两处各比一次。
- * @param key       `会话|目标`
- * @param targetN   归一后的目标绝对路径（`pending` 缺席时的回落目标）
- * @param currentMtime 现读的 mtime（同样只在 `pending` 缺席时用）
+ *
+ * 没有暂存时**什么都不记**：执行面与 guard 时点的键不同源（例如中途 `cd`）时，这次成功
+ * 回调找不到自己那一笔观测；拿"现读的 mtime"当基线等于替一份没验证过的内容背书，还会把
+ * 失效点一并清掉（fail-open）。宁可少记一次基线（下次 read 仍要证据）。
+ * @param key `会话|目标`
  */
-export function commitReadObservation(key: string, targetN: string, currentMtime: number): void {
+export function commitReadObservation(key: string): void {
   const staged = shiftStaged(key);
-  // 没有暂存（执行面与 guard 时点的键不同源，例如中途 `cd`）时退回现读那一枚：
-  // 调用方已确认内容交付了，记下"现在这一版"仍然是对的，方向保守。
-  const observedN = staged?.targetN ?? targetN;
-  const observedMtime = staged?.mtimeMs ?? currentMtime;
-  lruPut(globalMtime, observedN, observedMtime);
-  lruPut(basis, key, { mtimeMs: observedMtime, staleBase: -1 });
+  if (staged === undefined) {
+    return;
+  }
+  lruPut(globalMtime, staged.targetN, staged.mtimeMs);
+  lruPut(basis, key, { mtimeMs: staged.mtimeMs, staleBase: -1 });
 }
 
 /**
@@ -102,11 +110,11 @@ export function discardReadObservation(key: string): void {
 }
 
 /**
- * 取观测基线并**写下本次观测**（评估侧调用）。
+ * 读取观测基线（评估侧调用）。**只读**：本次观测的落库在 `settleVersion`，这里不写任何表。
  *
  * 返回的两枚值分开用：`staleBase` 是**上一次**判定留下的失效点（-1 = 没有），
- * `mtimeJump` 说明这一趟是否看到 mtime 前进。刷新全局 mtime **只表示"这次看见了这一版"**，
- * 不表示"这一版下的证据已经作废或已补上"——那是 `staleBase` 的事（文件头第 3 条）。
+ * `mtimeJump` 说明这一趟是否看到 mtime 前进。全局 mtime 的刷新点不在这里——在这里写下去
+ * 会让紧随其后的另一个会话再也看不到这次跳变（文件头第 3 条）。
  */
 export function observeVersion(
   key: string,

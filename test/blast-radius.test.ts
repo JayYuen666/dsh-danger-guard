@@ -47,7 +47,13 @@ const WORKSPACE_ASKABLE: PolicyFacts = {
 
 /** 一条 `ask` 档请求的常驻夹具（git 族里最典型的那条）。 */
 const ASK_COMMAND = "git reset --hard";
-/** 上表里 `gitResetHard` 对应的预演命令（逐字引，免得两处漂）。 */
+/** 表里三枚"丢弃工作区改动"键共用的预演命令（与 lib/blast-radius.ts 的 GIT_STATUS 同值）。 */
+const GIT_STATUS_COMMAND = "git --no-optional-locks status --porcelain";
+/** `git clean` 的只读预演命令。 */
+const CLEAN_DRY_RUN = "git clean -nd";
+
+/** 上表里 `gitResetHard` 对应的预演命令（逐字引，免得两处漂）。
+ *  缺键由下面那条"键与值一起钉住"的用例兜住；这里退回空串只是为了让类型成立。 */
 const STATUS_COMMAND = BLAST_COMMANDS.gitResetHard ?? "";
 /** 一次预演的 spec 视图（假执行器把入参原样收下，断言按这几格取）。 */
 interface SpecView {
@@ -57,6 +63,8 @@ interface SpecView {
   workdir?: unknown;
   /** 预演必须带的沙箱策略（与 runGate 同口径，见 measureBlastOf 的注释）。 */
   sandboxPolicy?: unknown;
+  /** 取消信号必须原样交给执行器：`boundedOf` 只结束等待，杀子进程靠执行器拿到同一枚 signal。 */
+  signal?: unknown;
 }
 const specOf = (calls: { spec: unknown }[], index = 0): SpecView => calls[index]?.spec ?? {};
 
@@ -111,6 +119,18 @@ const measure = (
 ): Promise<BlastReading | undefined> => measureBlastOf({ sourceCommand: ASK_COMMAND, ...options });
 
 describe("blast-radius：预演命令表", () => {
+  it("表就是这七条常量（键与值一起钉住：删键、换命令、改顺序都当场红）", () => {
+    assert.deepEqual(BLAST_COMMANDS, {
+      gitResetHard: GIT_STATUS_COMMAND,
+      gitCheckoutDiscard: GIT_STATUS_COMMAND,
+      gitRestoreDiscard: GIT_STATUS_COMMAND,
+      gitCleanForce: CLEAN_DRY_RUN,
+      gitStashDrop: "git stash list",
+      gitBranchDelete: "git branch -vv",
+      gitForcePush: "git log --oneline -n 10",
+    });
+  });
+
   it("表里全是**只读**命令（`--porcelain` / `-n` / `list` / `-vv` / `log`）", () => {
     for (const [key, command] of Object.entries(BLAST_COMMANDS)) {
       assert.match(
@@ -118,6 +138,10 @@ describe("blast-radius：预演命令表", () => {
         /--porcelain|clean -nd|stash list|branch -vv|log /u,
         `${key}: ${command}`,
       );
+      // 上一条只证明串里出现过一枚只读片段，不证明其余部分是只读的：`git branch -vv -D main`
+      // 同样命中。只读这一格因此要同时排除串接、管道与重定向——预演命令是一条常量单命令，
+      // 多出任何一种复合结构就意味着它可能真的改动仓库状态。
+      assert.doesNotMatch(command, /[&|><`;\n\r]|\$\(/u, `${key}: ${command}`);
     }
   });
 
@@ -131,9 +155,11 @@ describe("blast-radius：预演命令表", () => {
     }
   });
 
-  it("**不插值模型输入**：表里的命令是常量，逐条都不含占位/变量（那是注入面）", () => {
+  it("**不插值模型输入**：表里的命令是常量，逐条都不含占位/变量/串接（那是注入面）", () => {
     for (const command of Object.values(BLAST_COMMANDS)) {
-      assert.doesNotMatch(command, /\$\{|\$\(|`|;/u, command);
+      // `;` 之外还挡住 `&&`、管道、重定向、后台与换行：片段匹配挡不住的第二条命令
+      //（`git branch -vv -D main` 含白名单片段，但 `&& git clean -fd` 不含任何合法片段）。
+      assert.doesNotMatch(command, /\$\{|\$\(|&&|[`;|><&\n\r]/u, command);
     }
   });
 
@@ -181,13 +207,38 @@ describe("blast-radius：目标确定性", () => {
       "cd /tmp/other && git reset --hard",
       "cd ~/other && git reset --hard",
       "cd $HOME/other && git reset --hard",
+      'cd "$HOME" && git reset --hard',
+      "cd '../other' && git reset --hard",
+      "cd -- .. && git reset --hard",
+      String.raw`cd ..\other && git reset --hard`,
+      "pushd /tmp && git reset --hard",
+      "pushd && git reset --hard",
+      "popd && git reset --hard",
+      "cd -P /tmp && git reset --hard",
+      "cd -- - && git reset --hard",
+      "cd C:/tmp && git reset --hard",
+      'cd "C:/tmp" && git reset --hard',
+      "env --chdir=/tmp git reset --hard",
+      'env "--chdir=/tmp" git reset --hard',
+      "env -C /tmp git reset --hard",
+      "env -C/tmp git reset --hard",
+      'env "-C/tmp" git reset --hard',
+      "env --chdir",
       "cd .. && git reset --hard",
       "cd /tmp/other; git clean -nd",
     ]) {
       assert.equal(blastTargetUncertainOf(command), true, command);
     }
     // `cd src` 之后仓库根仍然唯一，不该因此退回盲问。
-    for (const command of [`cd src && ${ASK_COMMAND}`, ASK_COMMAND]) {
+    for (const command of [
+      `cd src && ${ASK_COMMAND}`,
+      `cd ./src/.. && ${ASK_COMMAND}`,
+      `cd -P src && ${ASK_COMMAND}`,
+      `env --chdir=src ${ASK_COMMAND}`,
+      `env --chdir src ${ASK_COMMAND}`,
+      `env FOO=bar ${ASK_COMMAND}`,
+      ASK_COMMAND,
+    ]) {
       assert.equal(blastTargetUncertainOf(command), false, command);
     }
   });
@@ -202,7 +253,7 @@ describe("blast-radius：目标确定性", () => {
 
 describe("blast-radius：上限收紧与渲染", () => {
   it("空输出只说明探针没打印，**不是**安全结论", () => {
-    const line = renderBlast({ command: "git clean -nd", text: "" }, ZH);
+    const line = renderBlast({ command: CLEAN_DRY_RUN, text: "" }, ZH);
     assert.match(line, /没有任何输出/u);
     assert.match(line, /不能证明/u);
     assert.doesNotMatch(line, /此刻不会改动任何东西/u);
@@ -253,7 +304,7 @@ describe("blast-radius：上限收紧与渲染", () => {
   it("英文块头不混汉字", () => {
     const rendered = renderBlast({ command: STATUS_COMMAND, text: " M a.ts" }, MESSAGES.en);
     assert.doesNotMatch(rendered, /\p{Script=Han}/u);
-    const empty = renderBlast({ command: "git clean -nd", text: "" }, MESSAGES.en);
+    const empty = renderBlast({ command: CLEAN_DRY_RUN, text: "" }, MESSAGES.en);
     assert.doesNotMatch(empty, /\p{Script=Han}/u);
   });
 });
@@ -284,13 +335,14 @@ describe("blast-radius：接进 ask 的每一处文案", () => {
 describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => {
   it("正常路径：按表里的命令跑，读取结果交回", async () => {
     const { shell, calls } = fakeShell(" M src/a.ts\n?? scratch.txt");
+    const signal = signalOf();
     const reading = await measure({
       shellRaw: shell,
       policyRaw: undefined,
       command: STATUS_COMMAND,
       cwd: FIXTURE_CWD,
       session: undefined,
-      signal: signalOf(),
+      signal,
     });
     assert.ok(reading !== undefined);
     assert.equal(reading.command, STATUS_COMMAND);
@@ -301,6 +353,7 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
     assert.equal(specOf(calls).onExpiry, "kill");
     assert.equal(specOf(calls).timeoutMs, BLAST_TIMEOUT_MS);
     assert.equal(specOf(calls).workdir, FIXTURE_CWD);
+    assert.equal(specOf(calls).signal, signal, "同一枚取消信号必须透传给执行器");
   });
 
   it("预演带上 sandboxPolicy：只读预演不许回落到部署级宽松策略", async () => {
@@ -448,7 +501,7 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
     // `typeof === "object"` 这一层挡不住数组、Promise 与 `{}`。执行器拿到不带 mode 的策略时
     // 是按**部署默认**跑的 —— 那可能比会话当前档位宽松，甚至就是 `danger-full-access`。
     // 于是"我带上策略了"变成一句空话：命令照跑，沙箱退了一档。
-    const resolvedCases = [{}, [], Promise.resolve({ mode: WS_MODE }), { mode: 1 }];
+    const resolvedCases = [{}, [], Promise.resolve({ mode: WS_MODE }), { mode: 1 }, { mode: "" }];
     const outcomes = await Promise.all(
       resolvedCases.map(async (resolved) => {
         const { shell, calls } = sandboxingShell();
@@ -489,6 +542,26 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
       undefined,
     );
     assert.equal(calls.length, 0);
+  });
+
+  it("执行面形状守卫读取属性抛错 ⇒ 盲问，不让异常逃出", async () => {
+    const throwingShell = {
+      get resolve(): unknown {
+        throw new Error("boom");
+      },
+      execute: () => Promise.resolve({}),
+    };
+    assert.equal(
+      await measure({
+        shellRaw: throwingShell,
+        policyRaw: undefined,
+        command: STATUS_COMMAND,
+        cwd: "/w",
+        session: undefined,
+        signal: signalOf(),
+      }),
+      undefined,
+    );
   });
 
   it("会话目录缺席 ⇒ 盲问（不替执行器猜目录）", async () => {
@@ -658,6 +731,15 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
           aborted: false,
           stdout: { text: "x", truncated: true },
         },
+        // 非布尔真值同样是形状不符：`!== true` 会把 1 / "true" 当成“未发生”。
+        { exitCode: 0, timedOut: 1, aborted: false, stdout: { text: "x" } },
+        { exitCode: 0, timedOut: false, aborted: "true", stdout: { text: "x" } },
+        {
+          exitCode: 0,
+          timedOut: false,
+          aborted: false,
+          stdout: { text: "x", truncated: 1 },
+        },
       ].map((result) =>
         measure({
           shellRaw: shellOfResult(result),
@@ -669,7 +751,9 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
         }),
       ),
     );
-    assert.deepEqual(rejected, [undefined, undefined, undefined, undefined]);
+    for (const item of rejected) {
+      assert.equal(item, undefined);
+    }
   });
 
   it("交回的形状不符（没有 result / 没有 stdout / 输出非字符串）⇒ 盲问，不抛", async () => {

@@ -9,13 +9,19 @@
 // 后两家随部署而变。把任何一家写进插件级 `inject` 都会让缺它的 profile 上**整个闸门不再激活**，
 // 而闸门绝不能因为一条可选读面缺席而下线（本仓 bulkhead 口径）。
 
+import { guardModeOf } from "./mode-policy.ts";
 import type { GuardMode, PolicyFacts } from "./mode-policy.ts";
 
-/** `ctx.approval` 的读取面：本包只读"当前策略"这一位。 */
+/** `ctx.approval` 的读取面：本包只读"当前策略"这一位。`config` 按未知形状收：
+ *  宿主自带的 schema 会校验，但替身服务与未来形状仍可能交回非对象值。 */
 interface ApprovalFace {
-  readonly config?: { readonly policy?: unknown };
+  readonly config?: unknown;
   overrideOf?: (session: unknown) => unknown;
 }
+
+/** 配置段里确实带 `policy` 字段的对象（值本身仍按未知收，下面用白名单判）。 */
+const isPolicyConfig = (value: unknown): value is { readonly policy?: unknown } =>
+  typeof value === "object" && value !== null && "policy" in value;
 
 /** 覆盖位的形状守卫：宿主形状漂移（该位不是函数）时按"缺席"处理，
  *  绝不在同步 guard 谓词里抛 TypeError——那会让整道闸门变成调用错误。 */
@@ -73,10 +79,7 @@ const isPermissionPresetsFace = (value: unknown): value is PermissionPresetsFace
 export function policyFactsOf(input: PolicyFactsInput): PolicyFacts {
   const { get, session, sandboxCovers, sandboxMode } = input;
   const modeRaw = sandboxMode(get?.("shell"), get?.("sandboxPolicy"), session);
-  const mode: GuardMode =
-    modeRaw === "read-only" || modeRaw === "workspace-write" || modeRaw === "danger-full-access"
-      ? modeRaw
-      : "unknown";
+  const mode: GuardMode = guardModeOf(modeRaw);
   const approvalRaw: unknown = get?.("approval");
   // 默认"能问"：宿主 `ApprovalService` 的配置默认就是 `ask`，而服务缺席那条 fail-closed
   // 路径同样会带我们的 reason（见上面的口径）。
@@ -88,15 +91,21 @@ export function policyFactsOf(input: PolicyFactsInput): PolicyFacts {
     // 于是每一次工具判定的策略面都会抛 "Cannot read properties of undefined
     // (reading 'approvalStateOf')" —— 宿主里表现为所有工具全线失败。
     const overridden =
-      session === undefined || !isOverrideOf(overrideOf)
+      session === undefined || session === null || !isOverrideOf(overrideOf)
         ? undefined
         : overrideOf.call(approvalRaw, session);
-    askable = (overridden ?? approvalRaw.config?.policy) !== "never";
+    const configured = isPolicyConfig(approvalRaw.config) ? approvalRaw.config.policy : undefined;
+    // 白名单：只有明确的 `ask`（或宿主配置缺席、按 schema 默认的 ask）才算能问。
+    // 形状漂移（对象、带空白、布尔值）一律按问不了处理，避免把 `ask` 交给一个注定
+    // 被宿主折成硬拒的通道。
+    const policy = overridden ?? configured;
+    askable = policy === undefined || policy === "ask";
   }
   const presetsRaw: unknown = get?.("permissionPresets");
   const autoReview =
     isPermissionPresetsFace(presetsRaw) &&
     session !== undefined &&
+    session !== null &&
     presetsRaw.current(session) === "auto";
   return { mode, askable, autoReview, sandboxCovers };
 }

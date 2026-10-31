@@ -7,8 +7,8 @@
 // 「只被测试养着的导出面」。
 //
 // NEED_ORDER 与指令表是同一枚枚举的两个面：表由 `Record<FactNeed, …>` 在编译期要求补齐，
-// 顺序表只能靠运行时的自检用例钉住"覆盖全部字面量"（漏一项 = `needsKey` 的收敛比对静默丢项，
-// 模型补了也不收敛）。放在一起，新增 need 时才看得见彼此。
+// 顺序表另有 `NEED_ORDER_COMPLETE` 的编译期闸门与运行时自检用例双保险（漏一项 =
+// `needsKey` 的收敛比对静默丢项，模型补了也不收敛）。放在一起，新增 need 时才看得见彼此。
 //
 // 文案不在本文件：中英两份单源在 lib/messages.ts，渲染函数把消息表当**参数**收——宿主在
 // guard 调用点传 `messagesFor(MESSAGES, locale)` 的结果。于是这一层既不读设置、也不自带某
@@ -41,7 +41,7 @@ export type NeedOrderCoversFactNeed = [
 /** 编译期闸门的落点：新增 `FactNeed` 字面量而不补进 `NEED_ORDER_TUPLE` 时，上面的条件
  *  类型不再是 `true`、这一行赋值当场红。导出是为了不留"未使用声明"的 lint 债。 */
 export const NEED_ORDER_COMPLETE: NeedOrderCoversFactNeed = true;
-export const NEED_ORDER: readonly FactNeed[] = NEED_ORDER_TUPLE;
+export const NEED_ORDER: readonly FactNeed[] = Object.freeze([...NEED_ORDER_TUPLE]);
 
 /** 按判据口径分区的工具名（从 `criteria` 单源派生，不用 `patternTools`/`strictTools` 两份
  *  数组——`RefSearchPolicy` 是可手写的导出接口，两份数据一旦不一致，never 指令说

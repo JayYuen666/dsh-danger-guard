@@ -149,6 +149,9 @@ const FILE_CONTENT_AFTER = `${VALUE_LINE_AFTER}\n`;
 
 /** 小改：30 字符、不含签名关键字、非高风险路径 → 默认为 low 档。 */
 const SMALL = { old_string: VALUE_LINE_BEFORE, new_string: VALUE_LINE_AFTER };
+/** 夹具目标文件名：既当路径段又当引用检索的 pattern，两处必须同字面（同源由常量保证）。 */
+const TARGET_MOD_NAME = "target-mod.ts";
+
 /** 大改：合计 3000 字符 > 默认 big(2000) → 默认升 high。 */
 const LARGE = { old_string: "x".repeat(1500), new_string: "y".repeat(1500) };
 
@@ -161,9 +164,8 @@ const T1 = new Date("2026-02-01T00:00:00.000Z");
 function evidenceFor(file: string): SessionEvent[] {
   // 起点=目标的父目录、签名=文件名（项目级引用的最小形态）。先取名再入参，
   // 免得 slice/lastIndexOf 嵌进 JSON.stringify 里读不动（也过不了 max-nested-calls）。
-  const cut = file.lastIndexOf("/");
-  const parentDir = file.slice(0, cut);
-  const fileName = file.slice(cut + 1);
+  const parentDir = path.dirname(file);
+  const fileName = path.basename(file);
   return [
     fxCall("r1", "read", JSON.stringify({ file_path: file })),
     fxResult("r1"),
@@ -220,7 +222,7 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
     await mkdir(stdTestDir, { recursive: true });
     // projectRootOf 的 ROOT_MARKER
     await writeFile(path.join(root, ROOT_MANIFEST_NAME), "{}");
-    targetA = path.join(root, "src", "target-mod.ts");
+    targetA = path.join(root, "src", TARGET_MOD_NAME);
     await writeFile(targetA, FILE_CONTENT_BEFORE);
 
     // 第二套夹具：故意**没有**任何标准层目录，只有一个非标准名目录，
@@ -252,7 +254,7 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
   });
 
   describe("三档分级设置字段的运行路径接线", () => {
-    it("bUILTIN_BASE 四个新字段存在，且阈值默认值来自 lib 单源（防三处漂移）", () => {
+    it("常量 builtin_base 四个新字段存在，且阈值默认值来自 lib 单源（防三处漂移）", () => {
       const ctx = createMockCtx();
       apply(ctx);
       // 0.1.7 不再有 register 的 base 参数：底座就是拦截半读不到设置值面时回落的那一份
@@ -297,7 +299,7 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
       const log = [
         call("read", { file_path: targetA }),
         ok(),
-        call("grep", { path: path.join(root, "src"), pattern: "target-mod.ts" }),
+        call("grep", { path: path.join(root, "src"), pattern: TARGET_MOD_NAME }),
         ok(),
       ];
 
@@ -313,6 +315,37 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
         fire(ctx, targetA, "big-mid", log, LARGE),
         undefined,
         "big 抬高后同一改动降为 mid，read+refs 即放行",
+      );
+    });
+
+    it("等号归属：恰好 small(200) 仍属 low，恰好 big(2000) 仍属 mid", () => {
+      const ctx = createMockCtx();
+      apply(ctx);
+      const { call, ok } = makeEvents();
+      // 合计正好 200 字符：`contentChars <= smallChars` 那一支收它，所以还是 low。
+      const atSmall = { old_string: "a".repeat(100), new_string: "b".repeat(100) };
+      const readOnly = [call("read", { file_path: targetA }), ok()];
+      assert.equal(
+        fire(ctx, targetA, "eq-small", readOnly, atSmall),
+        undefined,
+        "恰好 200 字符属 low：只要 read，不要求引用探查",
+      );
+
+      // 合计正好 2000 字符：`contentChars > bigChars` 不收它，于是停在 mid ——
+      // 缺引用时拒，补上引用即放行（按 high 判的话补了引用也放不了行）。
+      const atBig = { old_string: "c".repeat(1000), new_string: "d".repeat(1000) };
+      const denied = fire(ctx, targetA, "eq-big", readOnly, atBig);
+      assert.ok(denied !== undefined, "恰好 2000 属 mid，缺引用探查要拒");
+      assert.match(denied, /引用|grep|zg_search/u, "拒绝理由是缺引用探查（不是层探查）");
+      const withRefs = [
+        ...readOnly,
+        call("grep", { path: path.join(root, "src"), pattern: TARGET_MOD_NAME }),
+        ok(),
+      ];
+      assert.equal(
+        fire(ctx, targetA, "eq-big-refs", withRefs, atBig),
+        undefined,
+        "read + refs 齐备即放行 ⇒ 这一档是 mid 而不是 high",
       );
     });
 
@@ -623,7 +656,7 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
   });
 
   describe("层台账与容量：可归因检索覆盖层；extraTestDirs 变更使缓存失效", () => {
-    it("落在层目录内的检索 → 层证据同样记上（读与检索都得有成败回填才兑现）", () => {
+    it("覆盖层目录的项目级检索 → 层证据一并记上（读与检索都得有成败回填才兑现）", () => {
       const ctx = createMockCtx();
       apply(ctx);
       ctx.value.extraTestDirs = [EXTRA_TEST_DIR_NAME];

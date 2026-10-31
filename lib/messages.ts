@@ -16,7 +16,7 @@ import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 // 形状单源在零依赖的 ./fix.ts（**不能**从 ./danger-rules.ts 借：那会把它拖进客户端的
 // 类型程序，而它导的是 node:os/node:path —— 实测 TS2591 `Cannot find name 'node:os'`）。
 // 这里只为了类型编译期绑住「角色 → 模板」那张表。
-import type { Fix } from "./fix.ts";
+import type { Fix, FixRole } from "./fix.ts";
 
 /**
  * 模板槽位：占位符名 → 已文本化的替换值。
@@ -24,21 +24,25 @@ import type { Fix } from "./fix.ts";
  */
 export type MessageSlots = Readonly<Record<string, string>>;
 
+/** 占位符字形：一层花括号包住的键名。只用于 {@link fillTemplate} 的单趟替换。 */
+const PLACEHOLDER_SHAPE = /\{[^{}]+\}/gu;
+
 /**
- * `{key}` 占位符填充：逐个槽位做全量字面替换。
- * 不用正则也不用 `params[key]` 取值（后者在 noUncheckedIndexedAccess 下要写 `?? ""`，
- * 而"模板里出现了字典没有的占位符"这种错既测不到也不该被静默兜住——写错占位符时
- * 原文照出，肉眼可见）。
+ * `{key}` 占位符填充：按**原模板**一次扫描，替换进去的值不再被二次解释。
+ *
+ * 逐槽位 split/join 时，槽位值里若含另一个占位符字形（源码行原文里 `${file}` 这类很常见），
+ * 会被后续槽位误伤；单趟替换把填充结果与模板本身分开，值里的花括号原样保留。
+ *
+ * 未出现在槽位表里的占位符原样留在输出里：写错占位符时原文照出，肉眼可见。
  * @param template - 含 `{key}` 占位符的文案。
  * @param slots - 槽位表；未出现的占位符不受影响。
  * @returns 填充后的文本。
  */
 export function fillTemplate(template: string, slots: MessageSlots): string {
-  let out = template;
-  for (const [key, value] of Object.entries(slots)) {
-    out = out.split(`{${key}}`).join(value);
-  }
-  return out;
+  return template.replaceAll(PLACEHOLDER_SHAPE, (token) => {
+    const key = token.slice(1, -1);
+    return Object.hasOwn(slots, key) ? (slots[key] ?? token) : token;
+  });
 }
 
 /** 本包 host 侧产出的全部模型可读文案。 */
@@ -195,6 +199,8 @@ export interface DangerGuardMessages {
   readonly preflightRefsNoneUnread: string;
   /** 引用块·有命中且有凭据面文件被隔离的说明行（槽位 count）：命中面可能不止这些。 */
   readonly preflightRefsQuarantined: string;
+  /** 扫完但有文件没读成正文（超大 / 读不动）：命中面不是全部。 */
+  readonly preflightRefsUnread: string;
   /** 层探查一行（槽位 layer/dir/hits）：与引用面**同一次**扫描派生，不另花 I/O。 */
   readonly preflightLayerLine: string;
   /** 目标内容块头（槽位 name/bytes）。 */
@@ -208,7 +214,8 @@ export interface DangerGuardMessages {
   readonly noteReadOnly: string;
   /** 工作区内修改档：沙箱允许改工作区、但不提供原子性，于是包住可写根的删除要我们拦。 */
   readonly noteWorkspaceWrite: string;
-  /** 完全权限档（带 reviewer）：只留两条确定性硬拦，其余交给 reviewer。 */
+  /** 完全权限档（带 reviewer）：只留少数几条确定性硬拦（灾难删除、下载即执行、绕过 git 钩子），
+   *  其余交给 reviewer。 */
   readonly noteFullAccess: string;
   /** 读不到沙箱模式：按保守列处置，没有沙箱兜底。 */
   readonly noteUnknown: string;
@@ -347,9 +354,10 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
     gapRefsNever:
       '引用探查（满足任一即计入）：{clauses}，列出所有 import/引用者；无命中写明"无引用"',
     gapRefsToolsEmpty:
-      "引用探查：当前设置里没有任何计入取证的检索工具（refSearchTools 为空）——对 {name} 的" +
-      "引用探查无法记账，请在设置卡「计入取证的检索工具」里补齐工具名（或直接问用户怎么办）",
-    countedToolsEmpty: "可计入的检索工具（refSearchTools 当前为空）",
+      "引用探查：当前没有可计入取证的检索工具——可能是 refSearchTools 未配置，或配置的" +
+      "工具在当前部署不可用。请检查设置卡「计入取证的检索工具」与本机已安装的检索插件" +
+      "（或直接问用户怎么办），对 {name} 的引用探查目前无法记账",
+    countedToolsEmpty: "当前可用的检索工具",
     gapRefsNarrow:
       "探查作用域不对：你对 {name} 发起的检索只落在**文件自身或兄弟目录**——那只能看到内容，" +
       '看不到"谁引用它"。把 {tools} 的检索起点改指 `{root}` 这类祖先目录，' +
@@ -395,6 +403,8 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "（超大 / 读不动），已读范围内零命中——这不等于「目标没有任何引用者」。",
     preflightRefsQuarantined:
       "注意：本次扫描按本包规则未读 {count} 个凭据面文件，命中面可能不止以上这些。",
+    preflightRefsUnread:
+      "注意：另有 {count} 个文件走到了但没能读正文（超大 / 读不动），命中面可能不止以上这些。",
     preflightLayerLine:
       "[层探查] {layer}：`{dir}` 内 {hits} 处命中（与上面同一次扫描，不必再去那层搜一遍）",
     preflightReadHead: "[目标内容] `{name}`（{bytes} 字节）：",
@@ -409,14 +419,15 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
     noteFullAccess:
       "[档位] 当前是「完全访问」：本档沙箱不拦文件效应，所以写面要靠别处兜。" +
       "这一层只保留少数几条与沙箱无关的确定性硬拦（如灾难删除、下载即执行、绕过 git 钩子），" +
-      "其余动作交给下游——本档不逐条问，问了也不会有人答。",
+      "其余动作交给下游。灾难删除不具原子性——已经落下的删除不会因为后续越界被拒而回滚。",
     noteUnknown:
       "[档位] 认不出宿主的沙箱模式：这个部署没有可约束的执行器、服务形状不符，" +
       "或模式名不在本包认识的集合里（宿主新增了模式）。按最保守口径处置，不假设有沙箱兜底。",
     askBlockedGeneric:
       "[档位] 这条本应弹审批问你，但当前档位**不允许询问**（审批策略为 never，宿主会在任何应答者之前" +
-      "直接拒绝）。要么把动作改写成不需要确认的形态（见上面每条给出的做法），" +
-      "要么把审批策略改成会询问（或换到会询问的档位）再执行——请不要再原样重试这一类命令。",
+      "直接拒绝）。上面若提到「请用户确认」，在本档不可行；剩下的出路只有两条：把动作改写成" +
+      "不需要确认的形态（见上面每条给出的做法），或把审批策略改成会询问（或换到会询问的档位）再执行" +
+      "——请不要再原样重试这一类命令。",
   },
   en: {
     fixBypassFlag:
@@ -514,7 +525,7 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "limit (nested `-c` bodies and `$( )` substitutions each carry their own depth cap), the " +
       "segment head is an interpreter that runs a code string (python -c / node -e / " +
       "perl -e, … — what that language does is not visible at the command-lexer level), or the " +
-      "command is longer than the judgable limit. This is neither 'confirmed dangerous' nor " +
+      "command is longer than the judgeable limit. This is neither 'confirmed dangerous' nor " +
       "'confirmed safe' — do not retry it verbatim. Paste it to the user and run it only after " +
       'they explicitly confirm; or rewrite it as one plain, quote-balanced layer (e.g. bash -c "rm -rf ./build") and retry. ' +
       "For the interpreter case (python -c / node -e / perl -e), put the code in a file and run it " +
@@ -524,7 +535,7 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "certificates, keystores). Credentials are not edited by the model; when one really must " +
       "change, have the user do it by hand in a terminal.",
     opaqueTarget:
-      "[danger-guard] The edit target path is too long to judge (past the judgable length limit): " +
+      "[danger-guard] The edit target path is too long to judge (past the judgeable length limit): " +
       "it is neither confirmed nor cleared as a credential file. Do not retry it verbatim — paste " +
       "the path to the user to confirm, or use a normal short path.",
     indeterminate:
@@ -578,10 +589,11 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "Reference probe (any one of these counts): {clauses} — then list every importer/" +
       'referrer; on zero hits, state "no references"',
     gapRefsToolsEmpty:
-      "Reference probe: no search tool currently counts towards evidence (refSearchTools is " +
-      "empty), so a reference probe of {name} can never be credited — add tool names under " +
-      "'Search tools counted as evidence' on the settings card (or just ask the user what to do)",
-    countedToolsEmpty: "a counted search tool (refSearchTools is currently empty)",
+      "Reference probe: no search tool currently counts towards evidence — refSearchTools may " +
+      "be unset, or the configured tools may be unavailable in this deployment. Check the " +
+      "'Search tools counted as evidence' setting and the installed search plugins (or ask the " +
+      "user what to do); a reference probe of {name} cannot be credited right now",
+    countedToolsEmpty: "the search tools currently available",
     gapRefsNarrow:
       "Wrong scope: the searches you ran for {name} only landed on **the file itself or a " +
       "sibling directory** — that shows content, not who references it. Point the search root of " +
@@ -640,6 +652,9 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
     preflightRefsQuarantined:
       "Note: this scan skipped {count} credential-path file(s) by design, so the surface above " +
       "may not list every reference.",
+    preflightRefsUnread:
+      "Note: {count} more file(s) were reached but their text could not be read (too large or " +
+      "unreadable), so the surface above may not list every reference.",
     preflightLayerLine:
       "[layer probe] {layer}: {hits} hit(s) under `{dir}` (from the same scan as above — no " +
       "separate search needed there)",
@@ -661,8 +676,9 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "[mode] This is full access: this mode's sandbox does not restrict file effects, so the " +
       "write surface has to be caught elsewhere. This layer keeps only a few deterministic hard " +
       "stops that have nothing to do with the sandbox (catastrophic deletion, " +
-      "download-and-execute, bypassing git hooks); everything else is left to the downstream " +
-      "sandbox - this preset does not ask per action, and asking would reach nobody.",
+      "download-and-execute, bypassing git hooks); everything else is left to the downstream. " +
+      "A catastrophic deletion is not atomic: removals already made are not rolled back when a " +
+      "later part is refused outside the boundary.",
     noteUnknown:
       "[mode] The host's sandbox mode is unrecognised: this deployment has no confining executor, " +
       "the service shape differs, or the mode name is outside the set this package knows (the host " +
@@ -670,27 +686,32 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "layer.",
     askBlockedGeneric:
       "[mode] This should have prompted the user, but the current preset does **not allow asking** " +
-      "(the approval policy is never, so the host rejects before any answerer runs). Either rewrite " +
-      "the action into a form that needs no confirmation (see the guidance above for each rule), or " +
-      "change the approval policy to one that asks (or switch to a preset that asks) before running " +
-      "it - do not retry this kind of command verbatim.",
+      "(the approval policy is never, so the host rejects before any answerer runs). If the text " +
+      "above suggests confirming with the user, that route is unavailable here; only two remain: " +
+      "rewrite the action into a form that needs no confirmation (see the guidance above for each " +
+      "rule), or change the approval policy to one that asks (or switch to a preset that asks) " +
+      "before running it - do not retry this kind of command verbatim.",
   },
 };
 
 /**
  * 一条 `Fix` 渲染成**单独一行**（宿主把它接在拒绝理由之后）。
  *
- * 「角色 → 用哪句模板」这张表收在这里而不是调用点：调用点是 host，而角色集住在
- * `lib/danger-rules.ts`。收在中间这枚模块里，两边各改一处时会当场红——写死在 host
- * 的话，新增角色会静默落进 `fixDisasterTarget` 那一支（两支都是"点名 + 换掉"，
- * 读起来还挺通顺，于是测试也未必抓得住）。
+ * 「角色 → 用哪句模板」这张表收在中间这枚模块里，而不是调用点（host）：角色集住在
+ * `lib/danger-rules.ts`，用 `Record<FixRole, …>` 写全之后，新增角色会在这里产生编译错误。
  *
  * `offending` 恒非空：lib 侧两处产出点都在组装前判过长度（空名单交出的是
  * "没有 fix"，不是"有 fix 但没内容"）。
  */
+const FIX_TEMPLATE_OF: Readonly<Record<FixRole, (messages: DangerGuardMessages) => string>> = {
+  bypassFlag: (messages) => messages.fixBypassFlag,
+  disasterTarget: (messages) => messages.fixDisasterTarget,
+};
+
 export function renderFix(fix: Fix, messages: DangerGuardMessages): string {
-  const template = fix.role === "bypassFlag" ? messages.fixBypassFlag : messages.fixDisasterTarget;
-  return fillTemplate(template, { values: fix.offending.join(messages.listSeparator) });
+  return fillTemplate(FIX_TEMPLATE_OF[fix.role](messages), {
+    values: fix.offending.join(messages.listSeparator),
+  });
 }
 
 /**

@@ -9,7 +9,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-import { isNotFoundError, presenceOfAttempt } from "../lib/fs-errors.ts";
+import { MTIME_UNKNOWN, isNotFoundError, presenceOfAttempt } from "../lib/fs-errors.ts";
 
 /** 造一个只带指定字段的 fs 错误（Node 的真实错误两者都有，这里故意只给一个）。 */
 const fsError = (fields: { code?: string; message?: string }): Error =>
@@ -23,6 +23,14 @@ describe("isNotFoundError：`code` 优先于 message", () => {
   it("code=ENOTDIR ⇒ 不是「不存在」（路径中间是文件，文件其实在）", () => {
     const error = fsError({ code: "ENOTDIR", message: "ENOTDIR: not a directory, stat '/x/y'" });
     assert.equal(isNotFoundError(error), false, "把 ENOTDIR 读成不存在会免掉 read");
+  });
+
+  it("code 与 message 冲突时以 code 为准（ENOTDIR + ENOENT 措辞 ⇒ false）", () => {
+    assert.equal(
+      isNotFoundError(fsError({ code: "ENOTDIR", message: "ENOENT: misleading wording" })),
+      false,
+      "只读 message 前缀的实现会在这里把 ENOTDIR 读成不存在",
+    );
   });
 
   it("code=EACCES / ELOOP ⇒ 同样不是「不存在」", () => {
@@ -47,13 +55,30 @@ describe("isNotFoundError：`code` 优先于 message", () => {
     }
   });
 
-  it("code 存在但不是字符串时回落到 message（形状漂移不当成 ENOENT）", () => {
+  it("code 不是字符串时按「无 code」回落 message（口径与上一条一致）", () => {
     const drifted = Object.assign(new Error("ENOENT: ok"), { code: 17 });
     assert.equal(isNotFoundError(drifted), true, "code 非字符串时仍认 message 前缀");
+  });
+
+  it("抛错 getter 不把异常泄给调用方（按不可知处理）", () => {
+    const throwing = Object.defineProperty({}, "code", {
+      get(): never {
+        throw new Error("getter boom");
+      },
+    });
+    assert.equal(isNotFoundError(throwing), false);
   });
 });
 
 describe("presenceOfAttempt：三态分类（与平台无关）", () => {
+  it("code 与 message 冲突时按 code 定档（ENOTDIR + ENOENT 措辞 ⇒ unknown，不是 absent）", () => {
+    const attempt = presenceOfAttempt(() => {
+      throw fsError({ code: "ENOTDIR", message: "ENOENT: misleading wording" });
+    });
+    assert.equal(attempt.presence, "unknown", "读成 absent 会免掉新建文件的 read");
+    assert.equal(attempt.mtimeMs, MTIME_UNKNOWN);
+  });
+
   it("拿到 mtime ⇒ present", () => {
     assert.deepEqual(
       presenceOfAttempt(() => 1234),
@@ -67,7 +92,7 @@ describe("presenceOfAttempt：三态分类（与平台无关）", () => {
       presenceOfAttempt(() => {
         throw error;
       }),
-      { presence: "absent", mtimeMs: -1 },
+      { presence: "absent", mtimeMs: MTIME_UNKNOWN },
     );
   });
 
@@ -86,7 +111,7 @@ describe("presenceOfAttempt：三态分类（与平台无关）", () => {
       };
       assert.deepEqual(
         presenceOfAttempt(attempt),
-        { presence: "unknown", mtimeMs: -1 },
+        { presence: "unknown", mtimeMs: MTIME_UNKNOWN },
         typeof thrown,
       );
     }
@@ -97,13 +122,22 @@ describe("presenceOfAttempt：三态分类（与平台无关）", () => {
     assert.equal(presenceOfAttempt(() => 1_700_000_000).mtimeMs, 1_700_000_000);
   });
 
+  it("真实 mtime 为 -1 时仍是 present，且与哨兵不撞值", () => {
+    assert.deepEqual(
+      presenceOfAttempt(() => -1),
+      { presence: "present", mtimeMs: -1 },
+    );
+    assert.notEqual(MTIME_UNKNOWN, -1, "哨兵不得与有限 mtime 相撞");
+    assert.equal(MTIME_UNKNOWN < -1, true, "哨兵必须小于任何有限 mtime");
+  });
+
   it("非有限的 mtime（NaN / Infinity）按 unknown 处理，不以 present 向外传播", () => {
     // 下游拿 mtimeMs 做 `>` 跳变判定：NaN 恒假会让外部改动检测静默失效——
     // 注入的假 stat / 上游封装的异常返回值必须在这一层被折成"不可知"。
     for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
       assert.deepEqual(
         presenceOfAttempt(() => bad),
-        { presence: "unknown", mtimeMs: -1 },
+        { presence: "unknown", mtimeMs: MTIME_UNKNOWN },
         String(bad),
       );
     }

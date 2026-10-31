@@ -27,8 +27,7 @@ declare const win32PathBrand: unique symbol;
 export type OsPath = string & { readonly [osPathBrand]: true };
 
 /** **shell 文本里的 POSIX 路径**：`/etc`、`~/x` 这类，语义永远按 POSIX 读。
- *  命令判据（`lib/danger-rules.ts` 的词法层）收这一枚：那里的入参是**命令字符串**，
- *  不是宿主路径，两者混起来正是上面那两起事故的根源。 */
+ *  它标的是命令字符串里的词面世界，与宿主路径是两个世界——混用正是上面那两起事故的根源。 */
 export type PosixPath = string & { readonly [posixPathBrand]: true };
 
 /** **Windows 字形路径**：`C:\x`、`\\server\share` 这类，只在 Windows 轨道上产生。 */

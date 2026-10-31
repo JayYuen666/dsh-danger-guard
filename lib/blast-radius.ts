@@ -13,8 +13,9 @@
 //   2. 只在 **`ctx.shell` 在位**时跑（没装执行器的 profile 退化成盲问，不静默换命令）；
 //   3. 预演命令是**写死的常量**，**不插值任何模型输入** —— 插值模型给的路径就是拿命令
 //      原文拼 shell 串，那是注入面。所以 `gitRestoreDiscard` 量的是整个工作区
-//      （`git status --porcelain`）而不是那条命令点名的那几个文件。原命令只用于两项
-//      **跳过**判据（仓库覆盖选项、策略是否可取），绝不参与命令拼接。
+//      （`git status --porcelain`）而不是那条命令点名的那几个文件。原命令只用于三项
+//      **跳过**判据（仓库覆盖选项、策略是否可取、`git clean -x/-X` 时预演清单会偏小），
+//      绝不参与命令拼接。
 //   4. 量不出来（执行器缺席 / 仓库目标不确定 / 策略解析失败 / 非零退出 / 超时 / 取消 /
 //      宿主截断输出）一律**退回盲问**，绝不因此改变审批本身的结论 —— 量证据是增强，
 //      不是判据。
@@ -23,9 +24,12 @@
 // host.ts（它才拿得到 `ctx.shell` 与会话 cwd）。
 
 import { once } from "node:events";
+import path from "node:path";
 
 import { resolveLocale } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
+
+import { lexTokens, splitTopLevel } from "./command-segments.ts";
 
 import type { BashDenialKey } from "./danger-rules.ts";
 import type { AskRequest } from "./confirm.ts";
@@ -145,6 +149,10 @@ interface ShellHandle {
 const isShellHandle = (value: unknown): value is ShellHandle =>
   isRecord(value) && typeof value["result"] === "function";
 
+/** 只把**明确未发生**当作可用的输出：`true` 或任何非布尔真值都按形状不符退回盲问。
+ *  宿主交回 `truncated: 1` / `aborted: "true"` 时，`!== true` 会把它当成未发生。 */
+const explicitlyInactive = (value: unknown): boolean => value === undefined || value === false;
+
 /** 一次预演结果 → 读取结果。**非零退出 / 超时 / 取消 / 宿主截断 / 形状不符一律
  *  `undefined`**。`stdout.truncated` 是宿主侧的收集上限：截断后的 `text` 是**尾部**，
  *  拿它当完整清单会静默丢掉开头，所以宁可盲问。 */
@@ -155,9 +163,9 @@ function readingOf(result: unknown, command: string): BlastReading | undefined {
     const { text, truncated } = isRecord(stdout) ? stdout : {};
     if (
       exitCode === 0 &&
-      timedOut !== true &&
-      aborted !== true &&
-      truncated !== true &&
+      explicitlyInactive(timedOut) &&
+      explicitlyInactive(aborted) &&
+      explicitlyInactive(truncated) &&
       typeof text === "string"
     ) {
       reading = { command, text };
@@ -186,10 +194,13 @@ type SandboxRequest =
  *  只验 `typeof === "object" && !== null` 不够：数组、`Promise`、`{}` 空壳都过得了，而执行器
  *  拿到没有 `mode` 的策略会回落部署默认。这里不校验 mode 是不是那三枚已知字面量 —— 宿主
  *  将来加档位时，多认一枚也不会让我们误判（模式由执行器解释，本模块只要求"它给了"）。 */
-const isResolvedPolicy = (value: unknown): boolean =>
-  typeof value === "object" &&
-  value !== null &&
-  typeof (value as { mode?: unknown }).mode === "string";
+const isResolvedPolicy = (value: unknown): boolean => {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const { mode } = value as { mode?: unknown };
+  return typeof mode === "string" && mode.length > 0;
+};
 
 /**
  * 预演要带的沙箱策略。
@@ -241,15 +252,101 @@ const GIT_REPO_ENV_RE = /(?:^|[\s;&|()"'`])(?:GIT_DIR|GIT_WORK_TREE)=/u;
  *  留在子树里的 `cd src` 不算：那种情形下 cwd 仍能唯一确定仓库根。 */
 const CD_ESCAPE_RE = /(?:^|[\s;&|()"'`])cd\s+(?:\.\.(?:[/\s;&|]|$)|[~/]|\$[A-Za-z_{(]|[A-Za-z]:)/u;
 
+/** 目录切换内建：`cd` / `pushd` 改变当前目录，`popd` 回到目录栈里的上一项。 */
+const DIRECTORY_COMMANDS: ReadonlySet<string> = new Set(["cd", "popd", "pushd"]);
+/** `cd`/`pushd` 自身的选项：跳过它们后下一枚才是目标目录。 */
+const DIRECTORY_FLAGS: ReadonlySet<string> = new Set(["-L", "-P", "-e", "-@", "-n", "--"]);
+
+/** Windows 盘符形（`C:`）：词法形不是 POSIX 绝对路径。 */
+const WINDOWS_DRIVE_SHAPE = /^[A-Za-z]:/u;
+
+/** 目录目标是否离开 cwd 子树。词值已由 lexTokens 去过引号，所以 `cd "$HOME"` 与
+ *  `cd $HOME` 在这里同形；Windows 分隔符按 `/` 归一后再判，避免 `cd ..\\other` 漏判。 */
+function directoryTargetEscapes(target: string): boolean {
+  if (target.length === 0 || target === "-") {
+    return true;
+  }
+  if (target.includes("$") || target.startsWith("~") || path.posix.isAbsolute(target)) {
+    return true;
+  }
+  if (WINDOWS_DRIVE_SHAPE.test(target)) {
+    return true;
+  }
+  const normalized = path.posix.normalize(target.replaceAll("\\", "/"));
+  return normalized === ".." || normalized.startsWith("../");
+}
+
+/** `env --chdir` 的取值同样换目录；相对值留在子树里，绝对值离开。
+ *  `env -C` 的紧凑与空格写法都已被 `REPO_OVERRIDE_RE` 当作仓库覆盖位截住，
+ *  这里不重复判。 */
+function envChdirEscapes(tokens: readonly string[]): boolean {
+  const envIndex = tokens.indexOf("env");
+  if (envIndex === -1) {
+    return false;
+  }
+  const after = tokens.slice(envIndex + 1);
+  for (const [offset, token] of after.entries()) {
+    if (token.startsWith("--chdir=")) {
+      return directoryTargetEscapes(token.slice("--chdir=".length));
+    }
+    if (token === "--chdir") {
+      const value = after[offset + 1];
+      return value === undefined || directoryTargetEscapes(value);
+    }
+  }
+  return false;
+}
+
+/** 跳过 `cd`/`pushd`/`popd` 自身的选项，交回目标目录所在下标。 */
+function directoryTargetIndex(tokens: readonly string[], start: number): number {
+  let index = start;
+  while (index < tokens.length) {
+    const candidate = tokens[index];
+    if (candidate === undefined || !DIRECTORY_FLAGS.has(candidate)) {
+      break;
+    }
+    index += 1;
+  }
+  return index;
+}
+
+/** 单段里的目录切换是否离开 cwd 子树。 */
+function segmentEscapesCwd(segment: string): boolean {
+  const lexed = lexTokens(segment);
+  const tokens = lexed.map((token) => token.value);
+  if (envChdirEscapes(tokens)) {
+    return true;
+  }
+  for (let index = 0; index < lexed.length; index += 1) {
+    const token = lexed[index];
+    if (token !== undefined && DIRECTORY_COMMANDS.has(token.value)) {
+      const target = lexed[directoryTargetIndex(tokens, index + 1)]?.raw;
+      // `cd` / `pushd` / `popd` 无目标时分别回 HOME、交换栈顶、回栈内上一项，落点都不由 cwd 决定。
+      if (target === undefined || directoryTargetEscapes(target)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** 任一段里的 `cd` / `pushd` / `popd` / `env --chdir` 是否离开 cwd 子树。 */
+function directoryEscapeOf(command: string): boolean {
+  return splitTopLevel(command).some((segment) => segmentEscapesCwd(segment));
+}
+
 /**
  * 原命令的仓库目标是否**无法用会话 cwd 唯一确定**。
  *
  * 宁可误判为不确定（多一次盲问），也不要展示另一仓库的干净状态 —— 虚假证据比没有证据更
- * 糟，因为它带着"我查过了"的权威。原命令只经过这三枚正则做跳过判断，绝不参与预演命令的拼接。
+ * 糟，因为它带着"我查过了"的权威。原命令只经过这几条跳过判据，绝不参与预演命令的拼接。
  */
 export function blastTargetUncertainOf(command: string): boolean {
   return (
-    REPO_OVERRIDE_RE.test(command) || GIT_REPO_ENV_RE.test(command) || CD_ESCAPE_RE.test(command)
+    REPO_OVERRIDE_RE.test(command) ||
+    GIT_REPO_ENV_RE.test(command) ||
+    CD_ESCAPE_RE.test(command) ||
+    directoryEscapeOf(command)
   );
 }
 
@@ -360,13 +457,16 @@ export async function measureBlastOf(
     command !== undefined &&
     cwd !== undefined &&
     !abortedOf(signal) &&
-    !blastTargetUncertainOf(sourceCommand) &&
-    isShellRunFace(shellRaw)
+    !blastTargetUncertainOf(sourceCommand)
   ) {
     try {
-      const policy = sandboxRequestOf(policyRaw, session, shellRaw);
-      if (policy.ok) {
-        reading = await runBlast(shellRaw, policy.request, command, cwd, signal);
+      // 形状守卫也在 try 内：宿主服务的属性可能是带抛错的 getter，异常若逃出这里，
+      // “任何失败都退回盲问”的边界就不成立。
+      if (isShellRunFace(shellRaw)) {
+        const policy = sandboxRequestOf(policyRaw, session, shellRaw);
+        if (policy.ok) {
+          reading = await runBlast(shellRaw, policy.request, command, cwd, signal);
+        }
       }
     } catch {
       // 预演失败是**预期内**的事（不在 git 仓库里、执行器报错、超时）—— 它不是告警，
@@ -402,4 +502,32 @@ export function withBlast(
     displayReason[locale] = `${text}\n${renderBlast(reading, MESSAGES[resolveLocale(locale)])}`;
   }
   return { ...ask, reason: `${ask.reason}\n${renderBlast(reading, messages)}`, displayReason };
+}
+
+/** 空白串（命令词切分用；模块作用域常量，免得每次调用都重建正则）。 */
+const WHITESPACE_RUN = /\s+/u;
+
+/** 短旗标簇的词形（`-fdx`、`-fdX`）：单横线 + 全字母。 */
+const SHORT_FLAG_WORD = /^-[A-Za-z]+$/u;
+/** 短旗标里的 "x"：`-x`/`-X` 都算（用 `i` 旗标而不是字符组，免得被 `use-ignore-case` 报）。 */
+const IGNORED_FLAG_CHAR = /x/iu;
+
+/** 原命令里能不能看见「连 `.gitignore` 忽略的文件一起删」这一位的短旗标族。
+ *  `-x` 与 `-X` 可与其他短旗标合写（`-fdx`、`-fdX`），所以按字符集匹配而不是整词匹配。
+ *  逐词判而不是一条正则：`[A-Za-z]*[xX][A-Za-z]*` 两段可交换，正则引擎会因此被
+ *  `regexp/no-super-linear-backtracking` 判成多项式回溯面。 */
+const hasIgnoredFlag = (word: string): boolean =>
+  SHORT_FLAG_WORD.test(word) && IGNORED_FLAG_CHAR.test(word);
+
+/** 这枚键的预演清单会不会**系统性小于**原命令实际会删的东西（是则退回盲问）。
+ *
+ *  只有 `gitCleanForce` 一条：预演是 `git clean -nd`，**不列** `.gitignore` 忽略的文件；
+ *  原命令带 `-x`（连 ignored 一起删）或 `-X`（只删 ignored）时，那份清单会小到误导用户 ——
+ *  量出来的证据比不量更危险，所以这种情形**不跑预演**，退回盲问。其余键的预演与原命令
+ *  量的是同一件事，没有这一位偏差。
+ */
+export function blastPreflightSkippedOf(key: BashDenialKey, command: string): boolean {
+  return (
+    key === "gitCleanForce" && command.split(WHITESPACE_RUN).some((word) => hasIgnoredFlag(word))
+  );
 }

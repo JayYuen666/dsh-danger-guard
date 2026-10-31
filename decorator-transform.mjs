@@ -27,6 +27,7 @@
 // 主动选择的行为，不是待修的问题）。
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -40,13 +41,84 @@ import path from "node:path";
  *  反向的误判（字符串里出现 `@foo`）只多跑一次 tsc，不会产出错东西，所以这一侧不必收紧。 */
 const DECORATOR_SYNTAX = /(?:^|[\s{;(,])@[A-Za-z_$][\w$]*/u;
 
-/** 这个文件需要预转换吗（后缀与装饰器形状两道筛）。 */
-export function needsDecoratorLowering(id, code) {
-  return /\.[cm]?ts$/u.test(id) && DECORATOR_SYNTAX.test(code);
+/** 字符串字面量整段抄进 out（保留转义对），返回 `{ text, next }`。
+ *  引号内的两个斜线的行注释标记是文本而不是注释，所以这一支必须独立成函数。 */
+function copyStringLiteral(code, at) {
+  const quote = code[at];
+  let text = quote;
+  let i = at + 1;
+  while (i < code.length) {
+    const ch = code[i];
+    text += ch;
+    if (ch === "\\") {
+      text += code[i + 1] ?? "";
+      i += 2;
+    } else {
+      i += 1;
+      if (ch === quote) {
+        break;
+      }
+    }
+  }
+  return { text, next: i };
 }
 
-/** `tsc` 的入口（本仓 devDependency；用绝对路径而不靠 PATH，免得受调用方环境影响）。 */
-const TSC_BIN = path.resolve(import.meta.dirname, "node_modules/typescript/bin/tsc");
+/** 行注释的结束位置（换行符本身留给外层，保持与"剥掉注释、保留换行"一致）。 */
+function endOfLineComment(code, at) {
+  const newline = code.indexOf("\n", at);
+  return newline === -1 ? code.length : newline;
+}
+
+/** 块注释的结束位置（"星号 + 斜线"之后）；未闭合就吃到文件尾。 */
+function endOfBlockComment(code, at) {
+  const close = code.indexOf("*/", at + 2);
+  return close === -1 ? code.length : close + 2;
+}
+
+/** 块注释 / 行注释 / 字符串：装饰器判据只看**程序正文**。
+ *  JSDoc 里的 `@param`、`@deprecated` 前也满足"`@` 前是空白"，不剥注释就会把纯文档
+ *  文件也判成需要跑一次 tsc（`lib/stats-remote.ts` 的注释里就有一串）。 */
+function stripComments(code) {
+  let out = "";
+  let i = 0;
+  while (i < code.length) {
+    if (code[i] === '"' || code[i] === "'" || code[i] === "`") {
+      const copied = copyStringLiteral(code, i);
+      out += copied.text;
+      i = copied.next;
+    } else if (code.startsWith("//", i)) {
+      i = endOfLineComment(code, i);
+    } else if (code.startsWith("/*", i)) {
+      i = endOfBlockComment(code, i);
+    } else {
+      out += code[i];
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/** 声明文件不产出 JS：`.d.ts` / `.d.mts` / `.d.cts` 一律不进预转换。 */
+const DECLARATION_FILE = /\.d\.[cm]?ts$/u;
+
+/** 这个文件需要预转换吗（声明文件、后缀与装饰器形状三道筛）。 */
+export function needsDecoratorLowering(id, code) {
+  return (
+    /\.[cm]?ts$/u.test(id) &&
+    !DECLARATION_FILE.test(id) &&
+    DECORATOR_SYNTAX.test(stripComments(code))
+  );
+}
+
+/** `tsc` 的入口（本仓 devDependency；用绝对路径而不靠 PATH，免得受调用方环境影响）。
+ *  路径经 `createRequire` 解析 `typescript/package.json` 再拼 `bin/tsc`：devDependency 被
+ *  提升到 workspace 根时（本仓在伞 workspace 里就是软链到根 store），`<本文件目录>/node_modules/
+ *  typescript` 这一形并不成立，硬编码会落成加载期 ENOENT。 */
+const TSC_BIN = path.join(
+  path.dirname(createRequire(import.meta.url).resolve("typescript/package.json")),
+  "bin",
+  "tsc",
+);
 
 /**
  * 源文件后缀 → tsc 为它产出的 JS 后缀。
@@ -64,8 +136,8 @@ function emittedExtensionOf(file) {
 }
 
 /**
- * 清理 tsc 注入的装饰器管线：删掉那行**永不生效**的 metadata 发布，并给注入的调用包一层
- * 覆盖率忽略。两件事都是为了让四项 100% 的门禁只盯**我们手写的代码**。
+ * 清理 tsc 注入的装饰器管线：删掉那行**永不生效**的 metadata 发布，并把注入的调用从
+ * **源映射**里摘掉（不是给产物插提示）。两件事都是为了让四项 100% 的门禁只盯**我们手写的代码**。
  *
  * ① **metadata 发布**：降级产物里有
  *    `if (_metadata) Object.defineProperty(this, Symbol.metadata, { … });`，
@@ -79,16 +151,17 @@ function emittedExtensionOf(file) {
  * ② **注入的调用**（类静态块里的 `__esDecorate(…)`、构造器里的 `__runInitializers(…)`）：
  *    前者的上下文里带 TC39 为方法规定的 `access: { has: …, get: … }` 两枚箭头（官方实现同样
  *    不读 `context.access`），后者对本类（没有实例字段初值）是纯噪音 —— 它们的源位置又恰好
- *    压在我们的类/构造器那两行上。给这两行套上本仓既有的「v8 ignore」提示
+ *    压在我们的类/构造器那两行上。做法是把这两行在**源映射**里的映射项置空
  *    （同 lib/tool-ledger.ts 的口径：不可达或非本手写的臂要留痕）。
  *
- * ⚠ 提示落在**转换产物**里而不是源码里：这些代码是编译器生成的，理由也就该跟生成它的地方放在
- * 一起。而它只加给**测试管线**（`coverageHints`）：minifier 实测会把这几个注释原样留在产物里
- * （它认不出这是覆盖率提示），而产物里没有任何人在量覆盖率 —— 那份字节不值得发出去。
+ * ⚠ 留痕落在**源映射**里而不是产物里：产物行保持逐字原样（插注释既改字节，又会让 `mappings`
+ * 错位），只有 `coverageHints` 那条管线把映射项置空。它只加给**测试管线**：构建产物不该为
+ * 覆盖率留任何形状（旧实现往产物里插注释，minifier 认不出、会把它们原样留在产物里）。
  * ⚠ 只做**锚点明确的替换**：锚点对不上就原样返回（宁可让覆盖率当场红一次，也不猜着切文件）。
  * @param {string} code - tsc 产物
- * @param {boolean} coverageHints - 给注入的调用加 v8 忽略提示（只有测试管线要）
- * @returns {string} 清理后的产物
+ * @param {boolean} coverageHints - 把注入的调用从源映射里摘掉（只有测试管线要）
+ * @param {string[] | null} mapLines - tsc 的逐行源映射（产物行与它逐行对齐）
+ * @returns {{ code: string, mapLines: string[] }} 清理后的产物与逐行映射
  */
 function pruneInjectedPlumbing(code, coverageHints, mapLines) {
   // 目标是**任意标识符**，不是固定写 `this`：tsc 按装饰器落点给出不同的接收者 ——
@@ -143,7 +216,7 @@ function pruneInjectedPlumbing(code, coverageHints, mapLines) {
  * 把一个带装饰器的 TS 文件编译成 JS。
  * @param {string} code - 源文本（当前实现只做"要不要编"的门槛，编译交给 tsc 读盘上的原文）
  * @param {string} file - 源文件的**绝对路径**（tsc 按它定位产物名）
- * @param {boolean} [coverageHints] - 给注入的调用加 v8 忽略提示（只有测试管线要，见下）
+ * @param {boolean} [coverageHints] - 把注入的调用从源映射里摘掉（只有测试管线要，见上）
  * @returns {{code: string, map: object | null}} 编译后的代码与源映射
  */
 export function lowerStandardDecorators(code, file, coverageHints = false) {
@@ -205,7 +278,7 @@ export function lowerStandardDecorators(code, file, coverageHints = false) {
       );
     }
     if (js.length === 0) {
-      throw new Error(`danger-guard: decorator lowering produced no output for ${file}`);
+      throw new Error(`danger-guard: 装饰器降级没有产出任何字节（${file}）`);
     }
     let map = null;
     try {
@@ -230,12 +303,20 @@ export function lowerStandardDecorators(code, file, coverageHints = false) {
   }
 }
 
+/** 插件 id → 文件名：剥掉 `?` 之后的 query（`x.ts?import` / `x.ts?raw` 是同一份源码的
+ *  不同取用方式）。两条管线都必须先过它 —— 只让 Vite 侧剥 query 时，rolldown 侧那些带 query
+ *  的 id 会因后缀判据不匹配而**静默跳过**降级。 */
+function fileIdOf(id) {
+  return id.includes("?") ? id.slice(0, id.indexOf("?")) : id;
+}
+
 /** rolldown 插件：在它的解析器看到源码之前把标准装饰器编译掉。 */
 export function rolldownDecorators() {
   return {
     name: "danger-guard:standard-decorators",
     transform(code, id) {
-      return needsDecoratorLowering(id, code) ? lowerStandardDecorators(code, id) : null;
+      const file = fileIdOf(id);
+      return needsDecoratorLowering(file, code) ? lowerStandardDecorators(code, file) : null;
     },
   };
 }
@@ -246,10 +327,7 @@ export function viteDecorators() {
     name: "danger-guard:standard-decorators",
     enforce: "pre",
     transform(code, id) {
-      // `?` 之后的 query 不是文件名：Vite 用 `x.ts?import`、`x.ts?raw` 这类 id 表示同一份
-      // 源码的不同取用方式。`split("?", 1)[0]` 对不带 query 的 id 仍返回整串（含 `?` 的情况
-      // 已由下一行兜住），所以这里先判有没有 query 再切。
-      const file = id.includes("?") ? id.slice(0, id.indexOf("?")) : id;
+      const file = fileIdOf(id);
       // 单 return：两个分支只差"要不要编译"，而 lint 的 consistent-return 盯着返回值形状。
       // 第三个实参 = 覆盖率提示：**只有测试管线要**（构建产物的字节不该带它，见 pruneInjectedPlumbing）。
       return needsDecoratorLowering(file, code)

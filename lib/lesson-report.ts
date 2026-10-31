@@ -54,8 +54,18 @@ const LESSON_LOOP_SERVICE = "lessonLoop";
 
 /** 取教训总线：可选读 + 形状守卫收成一处，两条上报吃同一个口径，服务名字面量只此一份。 */
 function lessonLoopOf(context: ReportContext): LessonLoopReporter | undefined {
-  const busRaw: unknown = context.get?.(LESSON_LOOP_SERVICE);
-  return isLessonLoopReporter(busRaw) ? busRaw : undefined;
+  // `ctx.get` 与形状守卫都读宿主对象的属性：抛错 getter 或畸形替身不能把异常带进
+  // 守卫热路径（本模块的定位是"总线缺席就跳过"，不得反过来让闸门下线）。
+  let bus: LessonLoopReporter | undefined;
+  try {
+    const busRaw: unknown = context.get?.(LESSON_LOOP_SERVICE);
+    if (isLessonLoopReporter(busRaw)) {
+      bus = busRaw;
+    }
+  } catch {
+    bus = undefined;
+  }
+  return bus;
 }
 
 /** 一条上报要的三枚上下文字段（与判定链同源：可选读数口、会话 cwd、会话 id）。 */
@@ -108,7 +118,13 @@ export function reportPass(
   cost?: JudgeCost,
 ): void {
   const bus = lessonLoopOf(context);
-  if (typeof bus?.pass !== "function") {
+  let pass: unknown;
+  try {
+    pass = bus?.pass;
+  } catch {
+    return;
+  }
+  if (bus === undefined || typeof pass !== "function") {
     return;
   }
   settleLessonCall(
@@ -147,10 +163,18 @@ export function sampleJudge(
   if (isJudged(cost)) {
     noteJudgeCost(cost);
     if (collect) {
+      // 上下文求值要读宿主服务（`effectiveCwdOf` 等），抛错时只跳过这次出域上报：
+      // 本地统计已经记过，判定链不该因为一次度量增强而中断。
+      let context: ReportContext;
+      try {
+        context = contextOf();
+      } catch {
+        return;
+      }
       // judge-cost 没有规则/命令级的稳定键，判定面名就是它最细的稳定键——signature 与
       // face 同值是**刻意**的：总线侧按 signature 聚合时，judge-cost 与命令签名分属不同
       // category，不会混桶；另造一套签名反而多出一种键形要维护。
-      reportPass(contextOf(), category, cost.face, cost);
+      reportPass(context, category, cost.face, cost);
     }
   }
 }

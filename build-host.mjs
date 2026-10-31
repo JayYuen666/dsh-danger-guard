@@ -43,18 +43,24 @@ const ENTRIES = [
   },
 ];
 
+/** 同一进程内源码不会变：四个导出（与直跑落盘）共用同一次构建，
+ *  避免重复 rolldown，也让「产物 + 内联模块清单」始终来自同一批结果。
+ *  @type {Promise<import("@jayyuen66/dsh-plugin-shared/lib/build-host").HostArtifact[]> | undefined} */
+let cachedBuild;
+
 /**
  * 两个条目各跑一次构建（并发：两个条目互不依赖，串行只是在等第二次构建）。
  * @returns {Promise<import("@jayyuen66/dsh-plugin-shared/lib/build-host").HostArtifact[]>}
  */
 async function buildAll() {
-  return buildHostEntries({
+  cachedBuild ??= buildHostEntries({
     root,
     rolldown,
     minify: true,
     plugins: [rolldownDecorators()],
     entries: ENTRIES,
   });
+  return cachedBuild;
 }
 
 /**

@@ -26,6 +26,7 @@ import {
   snapshot,
 } from "./lib/settings-schema.ts";
 import type { Config, ConfigRefs } from "./lib/settings-schema.ts";
+import { reportRejectedSecretPatterns } from "./lib/secret-pattern-report.ts";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 /** 页面策略面：本包自带卡片页，关掉宿主的自动生成分页。签名整体取官方成员——
@@ -89,6 +90,16 @@ function isConfigRefs(value: unknown): value is ConfigRefs {
   });
 }
 
+/** 读数口兜底：引用面的 `get()` 抛错或交回非数组时整份快照回落底座——闸门不能因为
+ *  一次设置面形状漂移而在每次工具调用上抛错。 */
+function snapshotOrBase(config: ConfigRefs): Config {
+  try {
+    return snapshot(config);
+  } catch {
+    return BUILTIN_BASE;
+  }
+}
+
 /**
  * 装配设置条目：声明页面策略 + 挂出值面读数口。
  * @param ctx 宿主上下文
@@ -105,8 +116,18 @@ export function apply(ctx: Context, config: ConfigRefs): void {
       "[danger-guard] settings entry: config value face is not a reference surface (every field must carry get())",
     );
   }
+  // 值面形状守卫只证明"每个键有 get()"，读出来的值是否可用要到第一次 read 才知道。
+  // 在装配这一刻先探一次：坏值面在这里抛 ⇒ 本条目 FAILED、读数口不 provide，拦截半按
+  // 设计回落 BUILTIN_BASE，而不是拖到第一次工具调用才炸。
+  try {
+    snapshot(config);
+  } catch (error) {
+    throw new Error(`[danger-guard] settings entry: config values unreadable (${String(error)})`, {
+      cause: error,
+    });
+  }
   const svc: SettingsHostCtx = ctx;
-  const reader: SettingsReader = { read: () => snapshot(config) };
+  const reader: SettingsReader = { read: () => snapshotOrBase(config) };
   // provide 与页面策略都走 effect：条目重载/卸载时随 fiber 回收，不留上一份读数的幽灵。
   // label 的条目 id 复用 SETTINGS_NS（单源在 lib/settings-schema.ts），不再手写字面量。
   svc.effect(() => svc.provide(SETTINGS_READER, reader), `${SETTINGS_NS}: value reader`);
@@ -114,6 +135,10 @@ export function apply(ctx: Context, config: ConfigRefs): void {
     () => svc.settings.configure({ auto: false }, svc.fiber),
     `${SETTINGS_NS}: page policy`,
   );
+  // 非法/超长的扩展密钥模式在**装配这一刻**就点名（README 与 DETAIL 说的「加载期校验」是这条）：
+  // 静默跳过等于让用户以为保护已生效，而要等第一次编辑凭据路径才报，坏配置在日志里就没有出处了。
+  // 拦截半在密钥面判定前还会补报一次，两处共用同一张去重表，同一串只会响一次。
+  reportRejectedSecretPatterns(config.extraSecretPatterns.get());
 }
 
 // 设置面（schema / Config 形状）单源在 lib/settings-schema.ts；本条目持有它，也自用一次
