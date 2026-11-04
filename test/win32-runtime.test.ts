@@ -10,6 +10,12 @@
 // 真实路径的包含性判定一律走 `path.relative`（`isInside`），**不拼分隔符前缀**；
 // 展示形态在输出前用 `toPosix` 折一次。这一份就是那条纪律的回归钉。
 //
+// 与本仓另一条纪律的边界要说清：lib/path-format.ts 与 test/sandbox-scope.test.ts 刻意**不**伪装运行环境，
+// 而是把 pathApi 作为参数注入——那是对的（判据的平台差异该由入参决定）。本文件是那条纪律的**例外**而不是
+// 重复：它要看的正是「产品代码自己去读 node:path / node:os 时会不会踩平台假设」，注入式桩够不到那一次读取。
+// 覆盖面因此是有限的四条（家目录展开、祖先层、沙箱降级、灾难目标的 Windows 字形），与 sandbox-scope /
+// preflight-scan 的注入式 win32 用例互补而不是重叠：那两处验判据同构，这一处验读取本身。
+//
 // ⚠ 本层**测不到**的三类（只有真 Windows runner 覆盖）：8.3 短名
 // （`RUNNER~1` vs `runneradmin`）、盘符大小写不敏感、PE 加载器的 PATHEXT 解析。
 // 所以这里证明的是"路径语义判据跨平台"，不是"宿主环境跨平台"。
@@ -34,6 +40,9 @@ vi.mock("node:os", async (importOriginal) => {
   // 的 `node:os` 桩（那里也是就地定义 homedir/platform）。
   // oxlint-disable-next-line unicorn/consistent-function-scoping
   const homedir = (): string => String.raw`C:\Users\tester`;
+  // ⚠ 本文件现有四条用例只读到 `homedir()`：`os.platform()` 的唯一入口是 lib/danger-rules.ts 的
+  // `isWindowsHost()`，而那走在 bash 判据路径上，本层没有触达。留这一枚替身是为了模块替换的完整性
+  // （漏掉它，将来任何一条用例读到平台就会拿到宿主的真实值而让结论随机器变），不是它此刻被断言过。
   // oxlint-disable-next-line unicorn/consistent-function-scoping
   const platform = (): string => "win32";
   // 运行期命名空间上有 `default`（指向同一模块），类型面没有：经 unknown 取它，

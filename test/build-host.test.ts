@@ -25,8 +25,10 @@ import path from "node:path";
 import { buildHostReport, buildSettingsReport, singleEntryChunk } from "../build-host.mjs";
 import { hostFreshnessEvidence } from "./host-freshness.ts";
 
-/** 残留的本地 .ts 说明符（`from "./x.ts"`）：Node 在 node_modules 内对 .ts 直接抛 ERR_UNSUPPORTED…。 */
-const LOCAL_TS_IMPORT = /from\s*["']\.{1,2}\/[^"']*\.ts["']/u;
+/** 残留的本地 .ts 说明符。三种落点都要覆盖：`from "./x.ts"`、动态 `import("./x.ts")`、
+ *  `require("./x.ts")`，以及无 from 的副作用导入 `import "./x.ts"`——它们在 node_modules 内
+ *  同样让 Node 抛 ERR_UNSUPPORTED…，只认 `from` 一种写法会漏掉后三类而照绿。 */
+const LOCAL_TS_IMPORT = /(?:\bfrom|\bimport|\brequire)\s*\(?\s*["']\.{1,2}\/[^"']*\.ts["']/u;
 
 /** 该说明符是不是以**裸说明符**出现。`\s*` 是必须的：minify 去掉 `from "x"` 里的空格。 */
 const hasSpecifier = (code: string, specifier: string): boolean =>

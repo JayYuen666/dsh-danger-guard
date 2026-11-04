@@ -22,6 +22,8 @@ import {
   MID_BLIND_NEW_STRING,
   PREFLIGHT_SOURCE_KIND,
   SECRET_TOKEN,
+  TOOL_BASH,
+  TOOL_EDIT,
   TOOL_READ,
   addSource,
   bootSpine,
@@ -76,7 +78,7 @@ function preflightOfRequest(model: ReturnType<typeof registerModel>, index: numb
 describe("agent-loop 点对点：真回合里的实证", () => {
   afterAll(async () => {
     // 一台释放失败不能让其余测试台留在进程里：先全部试一遍，再让失败的那几台自己报出来。
-    const settled = await Promise.allSettled(stages.map(async (spine) => disposeSpine(spine)));
+    const settled = await Promise.allSettled(stages.map((spine) => disposeSpine(spine)));
     stages.length = 0;
     const failed = settled
       .filter((result): result is PromiseRejectedResult => result.status === "rejected")
@@ -94,8 +96,8 @@ describe("agent-loop 点对点：真回合里的实证", () => {
         'import "src/front";\n',
       );
       const model = registerModel(spine, [
-        toolCallReply("r1", "read", { file_path: file }),
-        toolCallReply("e1", "edit", midBlind(file)),
+        toolCallReply("r1", TOOL_READ, { file_path: file }),
+        toolCallReply("e1", TOOL_EDIT, midBlind(file)),
         textReply("done"),
       ]);
       await runTurn(spine, agent, "改一下 front.ts");
@@ -132,9 +134,9 @@ describe("agent-loop 点对点：真回合里的实证", () => {
       const first = await addSource(spine, "once-a.ts");
       const second = await addSource(spine, "once-b.ts");
       registerModel(spine, [
-        toolCallReply("r1", "read", { file_path: first }),
-        toolCallReply("r2", "read", { file_path: first }),
-        toolCallReply("r3", "read", { file_path: second }),
+        toolCallReply("r1", TOOL_READ, { file_path: first }),
+        toolCallReply("r2", TOOL_READ, { file_path: first }),
+        toolCallReply("r3", TOOL_READ, { file_path: second }),
         textReply("done"),
       ]);
       await runTurn(spine, agent, "先看两个文件");
@@ -149,8 +151,8 @@ describe("agent-loop 点对点：真回合里的实证", () => {
       const { spine, agent } = await staged();
       const file = await addSource(spine, "blind.ts");
       const model = registerModel(spine, [
-        toolCallReply("e1", "edit", midBlind(file)),
-        toolCallReply("e2", "edit", midBlind(file)),
+        toolCallReply("e1", TOOL_EDIT, midBlind(file)),
+        toolCallReply("e2", TOOL_EDIT, midBlind(file)),
         textReply("done"),
       ]);
       await runTurn(spine, agent, "改 blind.ts");
@@ -181,14 +183,14 @@ describe("agent-loop 点对点：真回合里的实证", () => {
       await capTree(spine);
       const file = await addSource(spine, "follow.ts");
       registerModel(spine, [
-        toolCallReply("e1", "edit", highBlind(file, "1")),
-        toolCallReply("r1", "read", { file_path: file }),
+        toolCallReply("e1", TOOL_EDIT, highBlind(file, "1")),
+        toolCallReply("r1", TOOL_READ, { file_path: file }),
         toolCallReply("g1", "grep", { pattern: "follow.ts", path: spine.project.root }),
         toolCallReply("g2", "grep", {
           pattern: "follow.ts",
           path: path.join(spine.project.root, "test"),
         }),
-        toolCallReply("e2", "edit", highBlind(file, "1")),
+        toolCallReply("e2", TOOL_EDIT, highBlind(file, "1")),
         textReply("done"),
       ]);
       await runTurn(spine, agent, "改导出面");
@@ -208,8 +210,8 @@ describe("agent-loop 点对点：真回合里的实证", () => {
       const file = await addSource(spine, "batch-read-first.ts");
       registerModel(spine, [
         multiCallReply([
-          ["r1", "read", { file_path: file }],
-          ["e1", "edit", midBlind(file)],
+          ["r1", TOOL_READ, { file_path: file }],
+          ["e1", TOOL_EDIT, midBlind(file)],
         ]),
         textReply("done"),
       ]);
@@ -223,8 +225,8 @@ describe("agent-loop 点对点：真回合里的实证", () => {
       const file = await addSource(spine, "batch-edit-first.ts");
       registerModel(spine, [
         multiCallReply([
-          ["e1", "edit", midBlind(file)],
-          ["r1", "read", { file_path: file }],
+          ["e1", TOOL_EDIT, midBlind(file)],
+          ["r1", TOOL_READ, { file_path: file }],
         ]),
         textReply("done"),
       ]);
@@ -242,12 +244,12 @@ describe("agent-loop 点对点：真回合里的实证", () => {
       await capTree(spine);
       const file = await addSource(spine, "quota.ts");
       registerModel(spine, [
-        toolCallReply("e1", "edit", highBlind(file, "a")),
-        toolCallReply("e2", "edit", highBlind(file, "b")),
+        toolCallReply("e1", TOOL_EDIT, highBlind(file, "a")),
+        toolCallReply("e2", TOOL_EDIT, highBlind(file, "b")),
         // 决策 ④：配额只免上层探查、不免 read ⇒ 先补上 read，配额这条路才打开。
         toolCallReply("r1", TOOL_READ, { file_path: file }),
-        toolCallReply("e3", "edit", highBlind(file, "c")),
-        toolCallReply("e4", "edit", highBlind(file, "d")),
+        toolCallReply("e3", TOOL_EDIT, highBlind(file, "c")),
+        toolCallReply("e4", TOOL_EDIT, highBlind(file, "d")),
         textReply("done"),
       ]);
       await runTurn(spine, agent, "两次盲改 → 读过 → 再两次");
@@ -268,7 +270,7 @@ describe("agent-loop 点对点：真回合里的实证", () => {
       const { spine, agent } = await staged();
       const env = spine.project.envFile;
       const model = registerModel(spine, [
-        toolCallReply("e1", "edit", {
+        toolCallReply("e1", TOOL_EDIT, {
           file_path: env,
           old_string: "OPENAI_API_KEY",
           new_string: "OPENAI_API_KEY_ROTATED",
@@ -277,13 +279,13 @@ describe("agent-loop 点对点：真回合里的实证", () => {
       ]);
       await runTurn(spine, agent, "改一下 .env 里的 key");
       assert.equal(callResultOf(agent, "e1").isError, true, "密钥闸拦下了");
-      const everyText = model.requests
-        .map((_request, index) =>
-          visibleAt(model, index)
-            .map((message) => message.text)
-            .join("\n"),
-        )
-        .join("\n");
+      // `keys()` 直接给下标：原先 `.map((_request, index) => …)` 用一个从不碰的占位形参换索引，
+      // 读起来像「这里刻意忽略请求」，而它要的只是按请求次序取可见消息。
+      const everyText = Array.from(model.requests.keys(), (index) =>
+        visibleAt(model, index)
+          .map((message) => message.text)
+          .join("\n"),
+      ).join("\n");
       assert.equal(everyText.includes(SECRET_TOKEN), false, "凭据正文泄进了模型上下文");
       const envBody = await readDisk(env);
       assert.ok(envBody.includes(SECRET_TOKEN), "文件本身没被动过");
@@ -292,7 +294,7 @@ describe("agent-loop 点对点：真回合里的实证", () => {
     it("危险命令的拒绝理由作为 tool 结果到达模型，回合继续跑而不是中断", async () => {
       const { spine, agent } = await staged();
       const model = registerModel(spine, [
-        toolCallReply("b1", "bash", { description: "清理", command: "rm -rf /" }),
+        toolCallReply("b1", TOOL_BASH, { description: "清理", command: "rm -rf /" }),
         textReply("换个说法"),
       ]);
       await runTurn(spine, agent, "清理一下根目录");

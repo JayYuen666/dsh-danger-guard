@@ -80,9 +80,10 @@ describe("引用扫描器：分层遍历（近邻优先）", () => {
 
   it("目标**不在** root 之下 ⇒ 退回从 root 扫一遍（层级链为空那条出口）", async () => {
     const outside = await mkdtemp(path.join(tmpdir(), "dg-scan-outside-"));
+    const inRoot = path.join(root, "away.ts");
     try {
       await writeFile(path.join(outside, "away.ts"), "export const away = 1;\n");
-      await writeFile(path.join(root, "away.ts"), "import './elsewhere';\n");
+      await writeFile(inRoot, "import './elsewhere';\n");
       const scan = await scanReferences({
         targetN: path.join(outside, "away.ts"),
         root,
@@ -95,6 +96,9 @@ describe("引用扫描器：分层遍历（近邻优先）", () => {
       assert.deepEqual(view.hits, []);
       assert.ok(view.dirs.includes(""), "root 自身必须被走过（起点那一层）");
     } finally {
+      // 两处的清理都得做完：root 是本 describe 共享的，留着 `away.ts` 就把这一条的现场
+      // 带进后面按 `scanned`/`hits` 精确断言的用例里（单独重跑或换顺序时结果就不一样了）。
+      await rm(inRoot, { force: true });
       await rm(outside, { recursive: true, force: true });
     }
   });
@@ -140,7 +144,11 @@ describe("引用扫描器：三条保守出口", () => {
     const scan = await scanReferences(requestOf(levelUnreachable, signal));
     const view = viewOf(scan);
     assert.equal(view.complete, false, "子树没走完就不能算完整");
-    assert.equal(view.scanned, 0, "整层的子树都没进 ⇒ 一个文件都没读");
+    // `scanned === 0` 钉的是现阶段的出口形状：某一层 resolve 抛错 ⇒ 整趟不再往下走，
+    // 因此一个文件都没读。这是一处**有意的耦合**——哪天改成「只降级这一层、其余照扫」，
+    // 这一行要跟着改成「该层的文件不在 scanned 里」，而不是删掉：删了就没有任何东西说明
+    // 这一层到底进没进。上一行的 `complete === false` 在两种形状下都成立，担不起这个判据。
+    assert.equal(view.scanned, 0, "整层的子树都没进 ⇒ 一个文件都没读（出口形状见上行注释）");
   });
 
   it("**同层多个子项**时逐项查取消：第一项之后取消 ⇒ 第二项不被 lstat（那处守卫的兑现）", async () => {

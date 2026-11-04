@@ -55,20 +55,12 @@ export function selfWritesStillPresent(targetPath: string, written: string): boo
   if (written.length > 0) {
     try {
       const stats = statSync(targetPath);
-      if (stats.isFile()) {
-        try {
-          // 读不到（不存在/无权限）⇒ 谈不上"写进去的文本还在"，交回 false。
-          result = passesProof(targetPath, written);
-        } catch {
-          result = false;
-        }
-      } else {
-        // 不是普通文件（目录 / FIFO / 字符设备）：`st_size` 不代表可读正文，而且同步
-        // `readFileSync` 会在无写者的 FIFO 上**永久阻塞**——那是主路径挂死，不是保守判定。
-        // 结论按"写进去的文本不在"收口（与目录同一档，调用方会多要一次 read）。
-        result = false;
-      }
+      // 非普通文件（目录 / FIFO / 字符设备）一律 false：`st_size` 不代表可读正文，而且同步
+      // `readFileSync` 会在无写者的 FIFO 上**永久阻塞**——那是主路径挂死，不是保守判定。
+      // 调用方据此多要一次 read。
+      result = stats.isFile() ? passesProof(targetPath, written) : false;
     } catch {
+      // stat 读不到与读正文失败是同一档：都交回 false，不把"没读成"当成"还在"。
       result = false;
     }
   }

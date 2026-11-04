@@ -1,7 +1,9 @@
-// danger-guard client 半：设置卡（总开关 + 事实门开关/放行次数/严格模式/写面阈值/引用取证
-// 检索工具名单 + 两份危险面词表）。
+// danger-guard client 半：设置卡（总开关 + 事实门开关/放行次数/严格模式/写面阈值 + 检索工具
+// 名单与词表类设置项；名单按 lib/settings-schema.ts 现量，本文件不复数）。
 // 参照 session-rescue / ctx-observe / quality-gate 的卡片模式：keyed plugins.bundle.config
-// 槽（key = bundle 包名 `@jayyuen66/dsh-danger-guard`，见 BUNDLE_PKG）+ 0.1.7 的
+// 槽（key = bundle 包名，单源在 src/bundle-pkg.ts 的 BUNDLE_PKG；本包刻意有三个串：locale
+// 命名空间 / settings 命名空间 / slot key，slot key 的派发证据链随那份单源住在一起）
+// + 0.1.7 的
 // ctx.configForms.get(条目 id) 表单（id = 设置条目 `danger-guard-settings`），React 由模块
 // 系统提供（rolldown external），只用 createElement。
 
@@ -70,11 +72,6 @@ const NS: LocaleNs = "danger-guard";
  * 卡片写的是这一条，host 拦截半读的也是这一条（两侧靠 schema-coverage / host 测试对齐）。
  */
 const SETTINGS_NS = "danger-guard-settings";
-/**
- * `plugins.bundle.config` 的 key = **bundle 的 npm 包名**，单源在 src/bundle-pkg.ts
- * （本包刻意有三个串：locale 命名空间 / settings 命名空间 / slot key；slot key 的派发
- * 证据链也随那份单源住在一起）。
- */
 /** 统计块保留自己的紧凑样式：它是只读领域内容，不是表单字段。颜色一律走主题令牌。 */
 const STATS_CSS = [
   ".dgc-stats{padding:12px 0;border-top:.5px solid var(--dsw-alias-border-l2)}",

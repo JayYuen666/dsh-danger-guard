@@ -86,11 +86,9 @@ export function askRequestOf(
   // （本档放行的那段）上；沙箱覆盖的 `rmrf` 更是"排序时 deny、处置时 allow"，只看键会让它
   // 吞掉后段。宿主经 `opts.severityOf` 把逐命中事实折进来；缺席时按 facts 的档位表求值。
   const dispositionOf = opts?.severityOf ?? severityResolverOf(facts);
-  const hit = bashVerdictOf(
-    name,
-    args,
-    opts === undefined ? { severityOf: dispositionOf } : { ...opts, severityOf: dispositionOf },
-  );
+  // 展开 undefined 就是空对象，两支同形，所以只留一个表达式：BashDangerOptions 新增必填字段时
+  // tsc 会在唯一一处提醒，不必两头对齐。
+  const hit = bashVerdictOf(name, args, { ...opts, severityOf: dispositionOf });
   let request: AskRequest | undefined;
   // 档位过滤在**本模块**（不在 lib/danger-rules.ts，也不在 lib/mode-policy.ts）：
   // 那一侧只回"检测到了什么"与"该档怎么处置"，"这一趟要不要走审批通道"是这条通道自己的事。

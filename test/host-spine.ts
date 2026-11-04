@@ -173,8 +173,12 @@ export async function addSource(spine: Spine, name: string, body = ALPHA_BODY): 
 /** 把引用扫描的遍历预算吃光（目录数超过 `PREFLIGHT_MAX_DIRS`）。只有"扫不完"的那一趟，
  *  B 面才答不出 refs / 层证据而整趟让路给 guard 的行动清单——两层用例都要用它才能读到
  *  「清单点了哪些检索工具」，以及让事实门的拒绝轮次真的推进（配额那条判据的唯一入口）。 */
+/** 吃光预算时要多造的目录数：只需比 `PREFLIGHT_MAX_DIRS` 大，留一点余量是为了让「按预算截断」
+ *  这件事与目录命名顺序无关（遍历顺序变了也仍然超）。不取更大的数：那是几百次瞬时 mkdir。 */
+const CAP_OVERFLOW_DIRS = 44;
+
 export async function capTree(spine: Spine): Promise<void> {
-  const dirs = Array.from({ length: PREFLIGHT_MAX_DIRS + 44 }, (_unused, index) =>
+  const dirs = Array.from({ length: PREFLIGHT_MAX_DIRS + CAP_OVERFLOW_DIRS }, (_unused, index) =>
     mkdir(path.join(spine.project.root, `cap${String(index)}`), { recursive: true }),
   );
   await Promise.all(dirs);
@@ -455,10 +459,15 @@ export async function createAgent(spine: Spine, cwd: string): Promise<Agent> {
   );
 }
 
-/** 收台：真 fiber 全部卸载（插件的 disposer 随之跑），临时工程目录删掉。 */
+/** 收台：真 fiber 全部卸载（插件的 disposer 随之跑），临时工程目录删掉。
+ *  rm 放在 finally：disposer 抛错是这条链路最可能的失败点，而让临时工程留在 os.tmpdir
+ *  只会把一次用例失败变成一堆待清理目录。 */
 export async function disposeSpine(spine: Spine): Promise<void> {
-  await spine.ctx.fiber.dispose();
-  await rm(spine.project.root, { recursive: true, force: true });
+  try {
+    await spine.ctx.fiber.dispose();
+  } finally {
+    await rm(spine.project.root, { recursive: true, force: true });
+  }
 }
 
 /** 直接经真 registry 派发一次调用（集成层用；点对点层走 runTurn）。 */
@@ -699,7 +708,7 @@ export const MID_BLIND_NEW_STRING = `const padded = "${"x".repeat(230)}";`;
 export function midBlind(filePath: string): Record<string, unknown> {
   return {
     file_path: filePath,
-    old_string: "const alpha = 1;",
+    old_string: ALPHA_DECL,
     new_string: MID_BLIND_NEW_STRING,
   };
 }
@@ -715,7 +724,7 @@ export function highBlindNewString(tag: string): string {
 export function highBlind(filePath: string, tag: string): Record<string, unknown> {
   return {
     file_path: filePath,
-    old_string: "const alpha = 1;",
+    old_string: ALPHA_DECL,
     new_string: highBlindNewString(tag),
   };
 }

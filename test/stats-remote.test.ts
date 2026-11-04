@@ -20,10 +20,15 @@ import { loggedText } from "./setup-logs.ts";
 import { STATS_DESCRIPTORS } from "../src/stats-reader.ts";
 import { BUNDLE_PKG } from "../src/bundle-pkg.ts";
 
-/** 从真 Context 上取回读面（服务键缺席时 `get` 给 undefined —— 断言里当场点名）。 */
+/** 从真 Context 上取回读面：缺席与形状不符都在取回这一刻点名，不留到调用 `stats()` 时才炸成 `is not a function`。 */
 function statsServiceOf(ctx: Context): { stats: () => StatsSnapshot } {
   const raw: unknown = ctx.get(STATS_SERVICE_KEY, false);
-  assert.ok(raw !== undefined && raw !== null, "读面没注册到 STATS_SERVICE_KEY 上");
+  assert.ok(
+    typeof raw === "object" &&
+      raw !== null &&
+      typeof (raw as { stats?: unknown }).stats === "function",
+    "读面没注册到 STATS_SERVICE_KEY 上，或注册的对象没有 stats() 方法",
+  );
   return raw as { stats: () => StatsSnapshot };
 }
 

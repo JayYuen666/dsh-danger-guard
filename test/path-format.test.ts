@@ -35,21 +35,23 @@ describe("brand：类型层禁止跨世界混用", () => {
     const shellWord = asPosixPath("/etc");
     // @ts-expect-error PosixPath 不可当 OsPath：`/etc` 是命令文本里的词面，不是宿主路径
     const attempt = (): string => wantsOsPath(shellWord);
-    assert.equal(typeof attempt, "function", "这一行只为让 ts-expect-error 有落点");
+    // 断言的是**调用结果**，不是「箭头函数是不是个函数」：后者恒真，什么也钉不住。
+    // 这一行同时钉住 brand 的运行期零成本——红只可能来自上面那行类型判据。
+    assert.equal(attempt(), "/etc");
   });
 
   it("把宿主路径喂给 shell 词法层 ⇒ 编译期红（反方向的同一类错）", () => {
     const realPath = asOsPath(String.raw`D:\w\proj`);
     // @ts-expect-error OsPath 不可当 PosixPath：宿主分隔符在 Windows 上是 `\`
     const attempt = (): string => wantsPosixPath(realPath);
-    assert.equal(typeof attempt, "function", "同上");
+    assert.equal(attempt(), String.raw`D:\w\proj`);
   });
 
   it("win32 字形与 POSIX 词面也不互通", () => {
     const windowsShape = asWin32Path(String.raw`C:\Windows`);
     // @ts-expect-error Win32Path 不可当 PosixPath：`C:\Windows` 的语义只在 Windows 读法里
     const attempt = (): string => wantsPosixPath(windowsShape);
-    assert.equal(typeof attempt, "function", "同上");
+    assert.equal(attempt(), String.raw`C:\Windows`);
   });
 
   it("跨世界矩阵的其余方向与裸 string 都被类型层挡住", () => {
@@ -65,10 +67,11 @@ describe("brand：类型层禁止跨世界混用", () => {
     const bare = "/tmp";
     // @ts-expect-error 裸 string 不能直接进 brand 形参
     const bareToOs = (): string => wantsOsPath(bare);
-    assert.equal(
-      [posixToWin, winToOs, osToWin, bareToOs].every((fn) => typeof fn === "function"),
-      true,
-      "四条负向断言只为让 ts-expect-error 有落点",
+    // 断言落在**调用结果**上：brand 在运行期是零成本，四条负向判据的红只该来自上面那四行。
+    // （原写法断言 `typeof fn === "function"`，箭头函数恒真是函数，这一句钉不住任何东西。）
+    assert.deepEqual(
+      [posixToWin(), winToOs(), osToWin(), bareToOs()],
+      ["/etc", String.raw`C:\Windows`, "/w/proj", "/tmp"],
     );
   });
 });
@@ -80,10 +83,11 @@ describe("brand：运行期零成本", () => {
     assert.equal(asWin32Path(String.raw`C:\a`), String.raw`C:\a`);
   });
 
-  it("`plainPath` 交回普通字符串视图，可参与字符串运算", () => {
+  it("`plainPath` 交回的就是那一枚普通字符串视图", () => {
+    // 三个 world 一律逐字比。原先 OsPath 这一支只比 `length` 与 `endsWith`：一次等长而内容不同
+    // 的变换（大小写或分隔符归一）照样过关，而 Posix / Win32 两支比的是整串——同一件事不该两套判据。
     const real = asOsPath("/w/proj/src/a.ts");
-    assert.equal(plainPath(real).length, real.length);
-    assert.equal(plainPath(real).endsWith("a.ts"), true);
+    assert.equal(plainPath(real), "/w/proj/src/a.ts");
     assert.equal(plainPath(asPosixPath("~")), "~");
     assert.equal(plainPath(asWin32Path("C:")), "C:");
   });

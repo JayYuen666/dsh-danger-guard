@@ -528,7 +528,7 @@ describe("不可判定输入与投递水位", () => {
 });
 
 describe("第 4 项自检：FactNeed 全覆盖 + gapLine 分支可产出（防不可达分支）", () => {
-  it("nEED_ORDER 覆盖 FactNeed 全部字面量——收敛键不静默丢项", () => {
+  it("收敛键：NEED_ORDER 覆盖 FactNeed 全部字面量，不静默丢项", () => {
     // 若有人在 FactNeed 加新 need（如 ci/scan/lint）却忘了加进 NEED_ORDER，
     // needsKey 会把它从收敛比对里漏掉：补上会反复"多一项"，永远不收敛 → 配额放行。
     // 本测试在编译期（satisfies）与运行期（size + 存在性）双保险。

@@ -77,10 +77,12 @@ describe("产物可加载：两个 host 产物能被 Node 真的 import 进来",
   it("装饰器**没有**原样落进产物（本轮踩过的那一类：rolldown 不降级标准装饰器）", () => {
     assert.ok(existsSync(path.join(pkgDir, "host.js")), "host.js 不存在：先跑 npm run build");
     const host = readFileSync(path.join(pkgDir, "host.js"), "utf8");
-    // 源码里那个装饰器用法还在（注释里提到过），但**不能**出现在可执行位置：
-    // `@Remote("stats")` 这种行首装饰器形状一旦出现，就是预转换没生效 —— 而那是**非法 JS**，
-    // 真跑起来会由上面那条加载用例当场抛出（语法错在 import 期就炸）。
-    assert.doesNotMatch(host, /^\s*@Remote\(/mu, "装饰器没被预转换：产物是非法 JS");
+    // 源码里那个装饰器用法还在（注释里提到过），但**不能**出现在可执行位置：`@Remote("stats")`
+    // 的形状一旦出现就是预转换没生效 —— 那是非法 JS，真跑起来由上面那条加载用例当场抛出。
+    // 判据不锚行首：产物是 minify 过的单行形态，锚 `^\s*` 会让它只可能以「不在行首」的形状出现，
+    // 那种情况下这条反而恒绿。字符串字面量里出现 `@Remote(` 不是本产物已有形态（服务键是
+    // `dangerGuardStats` 一类），漏检的代价比误报大，所以按形状判而不是按行位置判。
+    assert.doesNotMatch(host, /@Remote\s*\(/u, "装饰器没被预转换：产物是非法 JS");
     // ⚠ 这里**不**再断言 `__esDecorate`：产物开了 minify，那枚标识符会被 mangle（实测 0 次），
     // 断言它会变成恒红/恒绿之间的摇摆。降级到底成没成，唯一可信的证据是真加载（上面两条）
     // 加上源侧的契约用例（test/stats-remote.test.ts 拿 remoteMethods() 对标记）。

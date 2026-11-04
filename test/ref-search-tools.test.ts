@@ -180,7 +180,7 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
   });
 
   describe("默认名单逐条复现修复前的判定", () => {
-    it("bUILTIN_BASE 的默认名单=内置单源常量（防三处漂移）", () => {
+    it("默认名单：BUILTIN_BASE 等于内置单源常量（防三处漂移）", () => {
       const ctx = createMockCtx();
       applyPlugin(ctx);
       // 0.1.7 没有 register 的 base：底座就是拦截半读不到设置值面时回落的 BUILTIN_BASE，
@@ -194,13 +194,17 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
     it("grep 与 glob 的项目级检索各计入一次引用取证（pattern/include 口径）", () => {
       const ctx = createMockCtx();
       applyPlugin(ctx);
+      // 两个键名各喂一次：签名读的是 `sigOf(pattern, include)`，只钉 pattern 时
+      // 实现改成"只读 pattern"也不会红 —— 而 include 正是 glob 惯用的那一个。
       for (const tool of ["grep", "glob"]) {
-        const log = searchLog(tool, { path: root, pattern: TARGET_BASENAME });
-        assert.equal(
-          fire(ctx, `default-${tool}`, log, MID_ARGS),
-          undefined,
-          `${tool} 仍计入引用取证`,
-        );
+        for (const key of ["pattern", "include"]) {
+          const log = searchLog(tool, { path: root, [key]: TARGET_BASENAME });
+          assert.equal(
+            fire(ctx, `default-${tool}-${key}`, log, MID_ARGS),
+            undefined,
+            `${tool} 的 ${key} 口径都要计入引用取证`,
+          );
+        }
       }
     });
 
@@ -228,6 +232,25 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       assert.ok(
         fire(ctx, "default-zg-pattern-blind", patternOnly, MID_ARGS) !== undefined,
         "严格口径不读 pattern/include：签名取错字段就不算取证",
+      );
+      // 标题承诺的三位里 fts 与 query 已有用例，vector 以前没有：它和 fts 同槽
+      // （`sigOf(fts, vector)`），只读 fts 的实现当时不会红 —— 语义检索那条腿就此失联。
+      const byVector = searchLog("zg_search", { vector: TARGET_REL, root });
+      assert.equal(
+        fire(ctx, "default-zg-vector", byVector, MID_ARGS),
+        undefined,
+        "vector 与 fts 同槽：按语义检索查过也要记账",
+      );
+      const byQueries = searchLog("zg_search", { queries: [TARGET_BASENAME], root });
+      assert.equal(
+        fire(ctx, "default-zg-queries", byQueries, MID_ARGS),
+        undefined,
+        "复数写法 queries 与 query 同槽",
+      );
+      const includeOnly = searchLog("zg_search", { root, include: TARGET_BASENAME });
+      assert.ok(
+        fire(ctx, "default-zg-include-blind", includeOnly, MID_ARGS) !== undefined,
+        "严格口径不读 include：那一位只属于 pattern 口径",
       );
     });
 

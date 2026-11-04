@@ -484,7 +484,10 @@ describe("danger-guard host 接线", () => {
       name: "edit",
       arguments: { file_path: fx(".ssh", "authorized_keys") },
     });
-    assert.ok(result !== undefined);
+    assert.ok(result !== undefined, "密钥路径的 edit 必须被拒");
+    // 只断「非 undefined」分不清是密钥面拦的还是事实门拦的：文案要点名密钥/凭据面，
+    // 与同文件其余密钥用例同一条口径。
+    assert.match(result, /密钥|凭据/u);
   });
 
   it("正常命令放行；文档类编辑放行（test/ 已收紧为过门）", () => {
@@ -643,7 +646,7 @@ describe("danger-guard host 接线", () => {
     assert.ok(ctx.guardInstalled!.fn(withLog(failLog, "sref")) !== undefined, "失败 grep 仍拒");
   });
 
-  it("pTC 模式接线：run_code 子调用（tool/ptc-dispatch-start/dispatch）同样算取证", () => {
+  it("子调用接线：PTC 模式下 run_code 的 tool/ptc-dispatch-start/dispatch 同样算取证", () => {
     // PTC 模式只暴露 run_code 顶层调用，read/grep 以子调度入流（harness core/tools
     // ptc.ts 追加 tool/ptc-dispatch-* 事件）。取证器此前只认 tool/call+tool/result，
     // 子调用证据永远记不上 → gaps 永不收敛（见 shared scanToolEvents 的 PTC 归并）。
@@ -1210,7 +1213,7 @@ describe("证据记账的键形与签名匹配（判定侧与取证侧同源）"
     const { call, ok } = makeEvents();
     const target = fx(SRC_DIR, "noise.ts");
     const log = [
-      call("bash", { command: "cat /w/proj/src/noise.ts" }),
+      call("bash", { command: `cat ${fx("src", "noise.ts")}` }),
       ok(),
       call("read", { file_path: target }),
       ok(),

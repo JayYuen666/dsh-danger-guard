@@ -69,6 +69,7 @@ import { askRequestOf, AskDeduper, dedupKeyOf } from "./lib/confirm.ts";
 // 爆炸半径预演：常量表与渲染是纯函数（可脱离宿主单测），跑子进程那一趟在本文件。
 import {
   BLAST_COMMANDS,
+  BLAST_TIMEOUT_MS,
   blastPreflightSkippedOf,
   measureBlastOf,
   withBlast,
@@ -608,8 +609,10 @@ const rootCache = new Map<string, string>();
  *  they settle but never abandons their promise"），一次卡住的扫描会把整次工具调用永久挂死。
  *  这是工程上界、不是产品策略，故不落设置面（配置面只收紧凭证，不放宽成本）。
  *  大仓里的常态成本由 lib/preflight-scan.ts 的文件/目录**预算**先收住（截断即返），
- *  这一枚只兜"单枚 syscall 卡住"那种罕见形状。 */
-const PREFLIGHT_TIMEOUT_MS = 3000;
+ *  这一枚只兜"单枚 syscall 卡住"那种罕见形状。
+ *  单源在 lib/blast-radius.ts 的 BLAST_TIMEOUT_MS：预检与爆炸半径预演是同一件事——一趟有界的
+ *  外部命令执行，两处各写一枚 3000 的话，「同值」只是一句注释，改一边不会有任何门响。 */
+const PREFLIGHT_TIMEOUT_MS = BLAST_TIMEOUT_MS;
 
 /** 引用扫描缓存：`会话id|目标` → 结果 + 扫描时的目标版本位。
  *  version 是新旧判据（与 lib/read-basis.ts 的新鲜度同一条自校口径）：目标被会话外改过就重扫；

@@ -83,6 +83,57 @@ describe("boundFieldsIn：注释与提示文案里的写法不算绑定", () => 
     ].join("\n");
     assert.deepEqual([...boundFieldsIn(src)], ["realField"]);
   });
+
+  /** 匹配面钉住：哪些写法算绑定、哪些刻意不算，各自的理由写在断言消息里。
+   *  不钉住的话，将来放宽正则的人看不出自己动的是哪一侧。 */
+  it("写入惯用法的匹配面（表驱动）", () => {
+    const bound = [
+      'props.set("viaSet");',
+      "props.unset('viaUnset');",
+      'fireAndForget("viaFireAndForget");',
+      'writer.writeSet("viaWriteSet");',
+      'store.commit("viaCommit");',
+      'writer.set<string>("viaGenerics");',
+      "props.set(`viaBacktick`);",
+      `writer.set(
+        "viaMultiline",
+      );`,
+    ];
+    assert.deepEqual(
+      [...boundFieldsIn(bound.join("\n"))].toSorted(),
+      [
+        "viaBacktick",
+        "viaCommit",
+        "viaFireAndForget",
+        "viaGenerics",
+        "viaMultiline",
+        "viaSet",
+        "viaUnset",
+        "viaWriteSet",
+      ],
+      "五种方法名 + 泛型实参段 + 无插值模板字面量首参 + 跨行实参都要认下来",
+    );
+    for (const miss of [
+      {
+        src: "props['set']('viaComputed');",
+        why: "计算属性：方法名成了数据，正则无从判断这个 set 是不是设置面",
+      },
+      {
+        src: "fireAndForget(`a.b`);",
+        why: "反引号里的内容不是整段标识符就不算：认它等于把任意表达式当字段名",
+      },
+      {
+        src: "cache.set('viaCache');",
+        why: "排除表里那几枚接收者（localStorage / sessionStorage / Map / Set / WeakMap / WeakSet / cache）不算绑定",
+      },
+      { src: "props.set(\"unpaired');", why: "引号不配对的写法不算（后向引用要求同一种引号收尾）" },
+    ]) {
+      assert.deepEqual([...boundFieldsIn(miss.src)], [], miss.why);
+    }
+    // 排除表认的就是那几枚字形：小写局部变量名（`map`、`store`）落在表外，会被算成绑定。
+    // 这是「宁可宽不可严」的另一面——误认让门禁变宽，漏认则当场报错、逼人来登记接收者。
+    assert.deepEqual([...boundFieldsIn('map.set("viaLowercaseMap");')], ["viaLowercaseMap"]);
+  });
 });
 
 describe("hostSchemaFields：结构匹配不被字符串与注释带偏", () => {
@@ -149,6 +200,32 @@ describe("clientBoundFields：测试面不参与绑定", () => {
       assert.deepEqual([...bound], ["realField"]);
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("扫描面为空时抛在布局上，而不是交回空集合", async () => {
+    // 空集合在这里有两种成因：客户端入口不在这两棵树里（包根 client.ts），或 src/ 下只剩测试面。
+    // 两种都没东西可判，而调用方拿到空集合会说不出成因地说「schema 字段全都没绑」，
+    // 把「门禁自己不认识这种布局」写成一条指向卡片的红。所以这里必须当场报错。
+    const noTrees = await mkdtemp(path.join(tmpdir(), "dg-schema-none-"));
+    const testsOnly = await mkdtemp(path.join(tmpdir(), "dg-schema-tests-only-"));
+    try {
+      await writeFile(path.join(noTrees, "client.ts"), "props.set('rootEntryField', 1);\n");
+      await mkdir(path.join(testsOnly, "src"), { recursive: true });
+      await writeFile(path.join(testsOnly, "src", "card.test.ts"), "props.set('t', 1);\n");
+      await assert.rejects(
+        () => clientBoundFields(noTrees),
+        /一个源文件都没扫到/u,
+        "入口在包根：既没有 src/ 也没有 lib/，必须先红在布局上",
+      );
+      await assert.rejects(
+        () => clientBoundFields(testsOnly),
+        /一个源文件都没扫到/u,
+        "src/ 下只有测试面：等于没有客户端源码可判，同样不许静默交出空集合",
+      );
+    } finally {
+      await rm(noTrees, { recursive: true, force: true });
+      await rm(testsOnly, { recursive: true, force: true });
     }
   });
 });

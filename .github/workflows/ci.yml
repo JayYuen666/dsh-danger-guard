@@ -23,6 +23,13 @@ concurrency:
 # 门槛只需要读代码。写成白名单而不是省略：省略会拿到仓库默认权限，而默认可能是读写。
 permissions:
   contents: read
+# pnpm 取具体补丁版本，不写主版本 12：`version: 12` 让每次运行拿上游最新的 12.x，而补丁版
+# 之间在本仓是可观察的行为差异——本仓 cordis.patch.yml 就记着 12.0.0 的 add 本地目录撞
+# pnpm#14437、可用下限 ≥12.3.0。门禁绿的那棵树必须由确定的工具链解出来，取值与伞根
+# packageManager 那枚同源；publish.yml 里另有同一枚字面值（GitHub Actions 没有跨文件的
+# env，两个文件各声明一次是现状，抬版本时两边一起动）。
+env:
+  PNPM_VERSION: 12.11.2
 jobs:
   gate:
     name: gate (${{ matrix.os }}, node ${{ matrix.node }})
@@ -53,9 +60,9 @@ jobs:
           # 本仓的 workflow 不用 git 写动词，token 没必要留在 .git/config 里：
           # 后续步骤会跑仓库自己的 install/构建/测试脚本，也就跑得到依赖里的脚本。
           persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 12
+          version: ${{ env.PNPM_VERSION }}
       # registry-url 留空：本仓 CI 不发布，装依赖走包自己的 .npmrc（@jayyuen66 指向公共 npm）。
       # 配上 registry-url 会让 setup-node 生成一份用户级 .npmrc，把 CI 的解析口径改成和开发者不一样。
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -136,9 +143,9 @@ jobs:
           # 本仓的 workflow 不用 git 写动词，token 没必要留在 .git/config 里：
           # 后续步骤会跑仓库自己的 install/构建/测试脚本，也就跑得到依赖里的脚本。
           persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 12
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24

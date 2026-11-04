@@ -339,6 +339,20 @@ function rejectionProbe(): { reasons: unknown[]; stop: () => void } {
   };
 }
 
+/**
+ * rejection 观测窗口：连续跑两轮宏任务。
+ *
+ * 这两条用例的末判据是 `probe.reasons` 为空 —— 一条"没有发生"的断言。单轮定时器够不够由
+ * Node 的调度决定，窗口一旦短于判定时刻，回归就读成静默绿。本机 v26.12.1 实测：rejection
+ * 刚创建、排一个微任务、跑一个 `nextTick` 时探针都还没收到；到第一轮 `setTimeout(0)` 收到。
+ * 用两轮不是把一轮当常量信，而是让窗口明显宽于实测所需；其余 Node 档位（下限 22 与 24）
+ * 本机没有二进制，未实测。
+ */
+async function rejectionWindow(): Promise<void> {
+  await sleep(0);
+  await sleep(0);
+}
+
 describe("lessonLoop 总线降级（守卫热路径绝不因总线故障失败）", () => {
   it("总线缺失（get 返回 undefined）→ 危险命令照常被拒", () => {
     const ctx = createMockCtx();
@@ -383,8 +397,7 @@ describe("lessonLoop 总线降级（守卫热路径绝不因总线故障失败�
     const probe = rejectionProbe();
     try {
       assert.equal(typeof ctx.guardInstalled!.fn(bashExec), "string", "异步失败不得影响拦截");
-      // 让 rejection 的微任务落地，再让 Node 跑一轮宏任务（unhandledRejection 在宏任务边界判定）。
-      await sleep(0);
+      await rejectionWindow();
     } finally {
       logs.restore();
       probe.stop();
@@ -581,6 +594,38 @@ describe("enabled=false 时守卫完全静默（含总线与分片零副作用�
     assert.equal(ctx.guardInstalled!.fn(bashExec), undefined);
     assert.equal(ctx.guardInstalled!.fn(editExec), undefined);
     assert.equal(reports.length, 0);
+
+    // 「不建分片」以前只是标题里的一句话：三条断言都看不出分片状态，
+    // 停用期照样计数到配额的实现也会绿。读数口是引用即现读（与 host.ts 的 settingsConfig 同形），
+    // 所以就地切回 enabled 再用同一枚 session id 打：停用期若建过分片，这里会直接配额放行。
+    // 后面三连是同一断言的反向一侧 —— 证明分片确实从这一句才开始建、且数得到配额，
+    // 少了它，"首拒"可能只是因为判定链整个没跑。
+    const offId = "s-disabled-then-on";
+    for (const round of [1, 2, 3]) {
+      assert.equal(
+        ctx.guardInstalled!.fn(editExecReadOnly(offId)),
+        undefined,
+        `停用期第 ${round} 次：同一目标不得被记账`,
+      );
+    }
+    assert.equal(reports.length, 0, "停用期一条上报都没发");
+    ctx.value = { ...ctx.value, enabled: true };
+    assert.equal(
+      typeof ctx.guardInstalled!.fn(editExecReadOnly(offId)),
+      "string",
+      "启用后第一次仍是首拒 ⇒ 停用期没有留下计数",
+    );
+    assert.equal(typeof ctx.guardInstalled!.fn(editExecReadOnly(offId)), "string", "二拒");
+    assert.equal(
+      ctx.guardInstalled!.fn(editExecReadOnly(offId)),
+      undefined,
+      "第三次按内置 maxDenies=2 配额放行 ⇒ 分片从启用那一刻数起",
+    );
+    assert.equal(
+      reports.length,
+      2,
+      "启用后两次拒绝各上报一条、配额放行不报 ⇒ 翻转真的生效了（否则上面的「首拒」可能只是闸门还关着）",
+    );
   });
 });
 
@@ -729,8 +774,7 @@ describe("pass 信号上报的完整契约（总线同时提供 report/pass）",
         undefined,
         "异步失败不得把放行改成拒绝",
       );
-      // 让 rejection 的微任务落地，再让 Node 跑一轮宏任务（unhandledRejection 在宏任务边界判定）。
-      await sleep(0);
+      await rejectionWindow();
     } finally {
       logs.restore();
       probe.stop();

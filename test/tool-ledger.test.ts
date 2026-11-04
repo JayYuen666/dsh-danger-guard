@@ -194,7 +194,7 @@ describe("投影台账 ≡ scanToolEvents", () => {
     ]);
   });
 
-  it("pTC 子调用：start 记调用、dispatch 记成败", () => {
+  it("子调用：PTC 的 start 记调用、dispatch 记成败", () => {
     push(
       ptcCall("s1", "read", { file_path: "/a/b.ts" }),
       ptcSettle("s1", "read", false),
@@ -536,7 +536,7 @@ describe("stateOf 回填与单元形状", () => {
     assert.equal(callsOf(state)[0]?.callId, undefined, "读回 shared 记录时还原成 undefined");
   });
 
-  it("旧版（stateVersion 1，name 允许 null）的持久行判为不可采信 ⇒ 回退全量扫描", () => {
+  it("持久行的 name 为 null 或缺失 ⇒ 判为不可采信，回退全量扫描", () => {
     // 升级兼容面：老用户磁盘上躺着 name: null 的行。判据交给 zod（name 现在必填串），
     // 整份台账作废、读侧交回 undefined，host 回退全量扫描 = 迁移前的行为——宁可多扫一次，
     // 也不能让一份形状对不上的旧表参与新鲜度判定。

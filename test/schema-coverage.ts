@@ -403,8 +403,12 @@ export function boundFieldsIn(src: string): Set<string> {
   // 各种写入惯用法：props.set('x' / set('x' / unset('x' / fireAndForget('x' / writeSet('x'
   //   不要求限定 receiver——各包惯用法不同（props.set / fireAndForget / writer.set），
   //   收得太紧会假阴性。已知不属于设置面的接收者单独排除。
+  //   两处放宽各自解决一类假阴性（漏认=门禁红，本来就要人工判一次布局）：
+  //   `set<string>('x')` 的泛型实参段，以及 `` fireAndForget(`x`) `` 这种无插值的模板字面量。
+  //   引号用后向引用配对，`"x'` 这种不配对写法不再算命中；三种引号都只收**整段就是一个
+  //   标识符**的情形，带 `${}` 的模板不匹配（那里面能藏任意表达式）。
   for (const match of code.matchAll(
-    /\b(?:set|unset|fireAndForget|writeSet|commit)\s*\(\s*["'](?<field>[A-Za-z_$][\w$]*)["']/gu,
+    /\b(?:set|unset|fireAndForget|writeSet|commit)\s*(?:<[^<>()]*>)?\s*\(\s*(?<quote>["'`])(?<field>[A-Za-z_$][\w$]*)\k<quote>/gu,
   )) {
     const receiver = code.slice(0, match.index);
     if (!NON_UI_RECEIVER.test(receiver)) {
@@ -477,13 +481,22 @@ async function walk(dir: string): Promise<string[]> {
   return out;
 }
 
-/** client 侧实际绑定的字段名集合（src/** + lib/** + client-entry 同级单文件）。 */
+/** client 侧实际绑定的字段名集合。扫描面就是那两棵树：`src/**` 与 `lib/**`。
+ *  入口不在两棵树里（例如包根的 `client.ts` / `index.ts`）时不做静默处理 —— 下面的守卫
+ *  会把「布局不在扫描范围内」与「卡片漏了控件」分成两条不同的红。 */
 export async function clientBoundFields(pkgDir: string): Promise<Set<string>> {
   const out = new Set<string>();
   const sources = [
     ...(await walk(path.join(pkgDir, "src"))),
     ...(await walk(path.join(pkgDir, "lib"))),
   ];
+  if (sources.length === 0) {
+    throw new Error(
+      `client 侧一个源文件都没扫到：${pkgDir} 下既没有 src/ 也没有 lib/。` +
+        "本门禁只认这两棵树为客户端源码面；客户端入口若放在别处，这里必须先红在布局上，" +
+        "而不是交回空集合让调用方去报「schema 字段全都没绑」。",
+    );
+  }
   for (const src of sources) {
     for (const field of boundFieldsIn(src)) {
       out.add(field);

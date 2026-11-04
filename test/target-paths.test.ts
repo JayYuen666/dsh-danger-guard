@@ -83,12 +83,19 @@ describe("resolveTarget：绝对形也折成规范形（它同时是缓存的键
 
   it("空串原样交回：模型没给目标（`edit`/`write` 之外的工具会带空 path）", () => {
     assert.equal(resolveTarget("", W_ROOT), "");
+    // `target === ""` 与 `cwd === undefined` 是同一条出口的另一半：两样都没有时也不许
+    // 落到「拿进程目录补一个」——那是把不存在的目标猜成一条真路径。
+    assert.equal(resolveTarget("", undefined), "");
     assert.equal(officialPathKeyOf("", undefined), "");
   });
 
   it("cwd 缺席时相对路径原样交回（那时 cwd 是插件进程的目录，拿它归一是猜）", () => {
+    // 契约由共用的归一入口 `resolveTarget` 承担：`officialPathKeyOf` 只是它的一层薄壳，
+    // 只断言薄壳会让「入口自己走错分支」没有任何观察面。
+    assert.equal(resolveTarget("a/.env", undefined), "a/.env");
     assert.equal(officialPathKeyOf("a/.env", undefined), "a/.env");
     // 绝对形与 cwd 无关，仍然归一。
+    assert.equal(resolveTarget(`${W_ROOT}/./a/.env`, undefined), path.join(W_ROOT, "a/.env"));
     assert.equal(officialPathKeyOf(`${W_ROOT}/./a/.env`, undefined), path.join(W_ROOT, "a/.env"));
   });
 

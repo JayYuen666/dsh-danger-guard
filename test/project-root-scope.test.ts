@@ -10,11 +10,14 @@
 // 为什么经 guard 断言：`projectRootOf` / `isProjectScopeOf` 都是模块私有函数，外部唯一
 //   可达路径就是 `tools.guard` 的返回值（同 test/host-tier-settings.test.ts 的理由）。
 //
-// 断言设计（可判定性，不比对文案措辞）：
+// 断言设计（可判定性为主）：
 //   1) 文案里给出的检索起点必须是目标的**祖先目录**；
 //   2) 沿那个起点做一次检索，门禁必须放行 —— 这两条合起来就是「提示是可照做的」；
 //   3) 对照支：会话 cwd 确实是祖先时，起点仍取 cwd（范围更大），不回退成目标父目录。
 //   起点从文案的反引号路径里取（与语言无关）：文案改版只会让用例红，不会静默失效。
+//   唯一的例外是 TEST_LAYER_REQUIREMENT：「这一层有没有被算进缺项」在 guard 的返回值里
+//   没有非文案的可观察面（那一面只有 allow/deny 与路径），所以它只能比对文案里的那枚标记，
+//   收成具名常量是为了改版时只有一处要改、且红的是「判据没了」而不是散在各用例里的字符串。
 import { describe, it, afterAll, beforeAll } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -104,6 +107,12 @@ function searchEvents(searchPath: string, pattern: string): SessionEvent[] {
 const isAncestorDir = (candidate: string, target: string): boolean =>
   candidate !== target &&
   target.startsWith(candidate.endsWith(path.sep) ? candidate : `${candidate}${path.sep}`);
+
+/**
+ * 「test 层被算进缺项」在拒绝文案里的标记（同 test/ledger-lifecycle.test.ts 的 TEST_LAYER_GAP 一处口径）。
+ * 默认语言文案，替身不给 locale 描述符（见上面 createMockCtx 那条注释）。
+ */
+const TEST_LAYER_REQUIREMENT = /test 层触达/u;
 
 /** 文案里出现的绝对路径（反引号包起来的那几枚），与语言、措辞无关。 */
 const BACKTICKED = /`(?<token>[^`]+)`/gu;
@@ -230,12 +239,14 @@ describe("项目根回落与引用取证起点必须同源（提示可照做）"
     await mkdir(nested, { recursive: true });
     const target = path.join(nested, "same.mjs");
 
-    const insideDenial = fire(ctx, { target, sessionId: "two-cwd-inside", cwd: outsideRoot });
+    // 两趟都用同一枚会话：拒绝计数与台账保持连续，这一问一答的差别就只能出自根缓存的键形。
+    // 各换一个 sessionId 的话，「键里带的其实是 sessionId」那种实现也照样能过，这一问就白问。
+    const insideDenial = fire(ctx, { target, sessionId: "two-cwd", cwd: outsideRoot });
     assert.equal(firstRootOf(insideDenial, target), outsideRoot, "cwd 是祖先 ⇒ 起点取 cwd");
 
     // 同一枚目标，换到与它分处两棵树的会话目录：起点必须回落成目标父目录。
     // 只按 targetN 缓存时这里会吃到上一趟的根（= 别人的 cwd），起点错位而判定不报错。
-    const outsideDenial = fire(ctx, { target, sessionId: "two-cwd-outside", cwd: cwdElsewhere });
+    const outsideDenial = fire(ctx, { target, sessionId: "two-cwd", cwd: cwdElsewhere });
     assert.equal(
       firstRootOf(outsideDenial, target),
       nested,
@@ -257,21 +268,21 @@ describe("项目根回落与引用取证起点必须同源（提示可照做）"
     const target = path.join(narrow, "mod.mjs");
 
     // ① 窄根会话先评估：它的层集合里没有 test。
-    const narrowDenial = fire(ctx, { target, sessionId: "layer-narrow", cwd: narrow });
+    const narrowDenial = fire(ctx, { target, sessionId: "layer-scope", cwd: narrow });
     assert.ok(
       typeof narrowDenial === "string" && narrowDenial.length > 0,
       "窄根会话必须先给拒绝理由（否则下面的负向断言是空转）",
     );
     assert.ok(
-      !narrowDenial.includes("test 层触达"),
+      !TEST_LAYER_REQUIREMENT.test(narrowDenial),
       `窄根会话不该被要求一层它自己的根里不存在的 test 层，实际：${narrowDenial.slice(0, 200)}`,
     );
     // ② 同一枚目标、换成宽根会话：它的根**看得见** test/，因此必须把那一层算进缺项。
     //    缓存键少 root 这一位时，这里会吃到①写下的空层集合 ⇒ 这一层的要求被静默吃掉
     //    （方向是**放宽**门禁，正是最不该失守的那一侧）。
-    const wideDenial = fire(ctx, { target, sessionId: "layer-wide", cwd: wide }) ?? "";
+    const wideDenial = fire(ctx, { target, sessionId: "layer-scope", cwd: wide }) ?? "";
     assert.ok(
-      wideDenial.includes("test 层触达"),
+      TEST_LAYER_REQUIREMENT.test(wideDenial),
       `宽根会话必须要求 test 层，实际：${wideDenial.slice(0, 200)}`,
     );
   });

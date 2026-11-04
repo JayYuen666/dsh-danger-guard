@@ -105,7 +105,16 @@ describe("askDeduper：同一会话同一命令只上报一次", () => {
   });
 
   it("perSession 只收正安全整数：非法容量直接拒绝，避免分片永不清空", () => {
-    for (const invalid of [0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    // MAX_SAFE_INTEGER + 1 过得了 Number.isInteger、过不了 isSafeInteger：分片表拿它当容量
+    // 会算错上限，所以这一枚必须在拒绝名单里。
+    for (const invalid of [
+      0,
+      -1,
+      2.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
       assert.throws(() => new AskDeduper(invalid), RangeError, String(invalid));
     }
   });

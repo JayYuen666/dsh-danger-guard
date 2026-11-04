@@ -217,7 +217,8 @@ function pruneInjectedPlumbing(code, coverageHints, mapLines) {
  * @param {string} code - 源文本（当前实现只做"要不要编"的门槛，编译交给 tsc 读盘上的原文）
  * @param {string} file - 源文件的**绝对路径**（tsc 按它定位产物名）
  * @param {boolean} [coverageHints] - 把注入的调用从源映射里摘掉（只有测试管线要，见上）
- * @returns {{code: string, map: object | null}} 编译后的代码与源映射
+ * @returns {{code: string, map: { sources?: string[]; mappings?: string } | null}} 编译后的代码与源映射
+ *  （声明成实际形状而不是 `object`：调用方要钉 sources 时不必再各自 cast 一次）
  */
 export function lowerStandardDecorators(code, file, coverageHints = false) {
   if (code.length === 0) {

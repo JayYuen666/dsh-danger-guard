@@ -5,7 +5,7 @@
 // 编排（两阶段草稿→替换、说明符正典化、清单口径）统一住在 @jayyuen66/dsh-plugin-shared/
 // lib/build-types，一处可改；本文件只定位本仓依赖图里的 tsc 入口并转交目录约定。
 // 为什么需要后处理与两阶段——见 shared 同名切面的文件头。
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { buildDeclarations } from "@jayyuen66/dsh-plugin-shared/lib/build-types";
@@ -36,7 +36,13 @@ function tscEntry() {
   if (typeof bin !== "string" || bin.length === 0) {
     throw new Error(`typescript 的 package.json 没有可用的 bin.tsc：${manifestPath}`);
   }
-  return path.resolve(path.dirname(manifestPath), bin);
+  const entry = path.resolve(path.dirname(manifestPath), bin);
+  // 清单写着入口、盘上却没有，是依赖被换过或装坏的形态；在这里点名，比让 shared 去 spawn
+  // 一个不存在的文件、以一条与成因无关的 ENOENT 失败要好读。
+  if (!existsSync(entry)) {
+    throw new Error(`typescript 声明的 tsc 入口不在盘上：${entry}（清单 ${manifestPath}）`);
+  }
+  return entry;
 }
 
 /** 产出 types/：跑 tsc 出声明，再逐个改写相对说明符。 */

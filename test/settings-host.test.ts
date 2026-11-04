@@ -11,7 +11,7 @@ import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import settingsPlugin from "../settings-host.ts";
 import type { SettingsReader } from "../settings-host.ts";
-import { BUILTIN_BASE, SETTINGS_READER } from "../lib/settings-schema.ts";
+import { BUILTIN_BASE, ConfigSchema, SETTINGS_READER } from "../lib/settings-schema.ts";
 import { reportRejectedSecretPatterns } from "../lib/secret-pattern-report.ts";
 import { loggedText } from "./setup-logs.ts";
 import type { Config, ConfigRefs } from "../lib/settings-schema.ts";
@@ -252,7 +252,7 @@ describe("danger-guard 设置条目（settings-host.ts）", () => {
     assert.equal(read.enabled, BUILTIN_BASE.enabled);
   });
 
-  it("bUILTIN_BASE 是冻结的：降级路径把它直接交给下游，就地改写当场暴露而不是静默生效", () => {
+  it("常量冻结：BUILTIN_BASE 被降级路径直接交给下游，就地改写会当场暴露而不是静默生效", () => {
     assert.equal(Object.isFrozen(BUILTIN_BASE), true, "对象本体冻结");
     for (const value of Object.values(BUILTIN_BASE)) {
       if (Array.isArray(value)) {
@@ -263,8 +263,12 @@ describe("danger-guard 设置条目（settings-host.ts）", () => {
 
   it("config 键在本条目上：设置条目 FAILED 只影响设置面", () => {
     assert.equal(typeof settingsPlugin.apply, "function");
-    assert.equal(settingsPlugin.inject.join(","), "settings");
-    assert.equal(Object.hasOwn(settingsPlugin, "Config"), true, "严格 schema 挂在设置条目上");
+    assert.deepEqual(settingsPlugin.inject, ["settings"], "设置条目只注入 settings 一项");
+    assert.equal(
+      settingsPlugin.Config,
+      ConfigSchema,
+      "挂在设置条目上的必须是那枚 schema 本体，不是同名对象",
+    );
   });
 });
 

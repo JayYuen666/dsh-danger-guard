@@ -43,7 +43,9 @@ export const INIT_PLACEHOLDER = new Proxy(
 /** 按序把一串已提交事件折进初态（等价官方 drive **只做 init/apply 折叠**时的当前态——
  *  官方 drive 若还带状态版本校验、restore 前置判断或批次保护，不在本替身的覆盖面内）。
  *  事件位不得重复（重复 = 夹具的 seq 生成器出错，fold 出来的是一份行序错乱的台账，
- *  对照因此失效）；跳号允许——作废判据那条用例故意构造它。 */
+ *  对照因此失效）；跳号与**回绕**都允许——「作废是粘性的」那条用例要造的正是
+ *  `seq=9` 之后夹具从 1 重新计数这一形状（跳号一旦发生，后面再干净的事件也不恢复台账），
+ *  所以这里不校验单调性，只挡同一位折两次。 */
 export function foldLedger(events: readonly SessionEvent[]): ToolLedger {
   let state = toolLedgerProjection.init(INIT_PLACEHOLDER, INIT_PLACEHOLDER);
   const seenSeqs = new Set<number>();

@@ -63,16 +63,26 @@ describe("disasterTargetPathOf：家目录形态", () => {
   });
 
   it("`HOME` 是相对路径时不把 `~` 当可判目标", () => {
-    const saved = process.env["HOME"];
+    // os.homedir() 的可读来源随平台变：POSIX 读 HOME，Windows 读 USERPROFILE。只注入一枚时，
+    // 另一平台读到的仍是真实家目录（绝对形），这条用例就会在那边判成「可判」。两枚一起改、
+    // 一起恢复，测的才是「家目录本身是相对形」这一个条件。
+    const savedHome = process.env["HOME"];
+    const savedProfile = process.env["USERPROFILE"];
     try {
       process.env["HOME"] = "relative-home";
+      process.env["USERPROFILE"] = "relative-home";
       assert.equal(disasterTargetPathOf("~", CWD), undefined);
       assert.equal(disasterTargetPathOf("~/Documents", CWD), undefined);
     } finally {
-      if (saved === undefined) {
+      if (savedHome === undefined) {
         delete process.env["HOME"];
       } else {
-        process.env["HOME"] = saved;
+        process.env["HOME"] = savedHome;
+      }
+      if (savedProfile === undefined) {
+        delete process.env["USERPROFILE"];
+      } else {
+        process.env["USERPROFILE"] = savedProfile;
       }
     }
   });

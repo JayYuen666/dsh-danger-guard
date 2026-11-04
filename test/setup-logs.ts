@@ -29,11 +29,17 @@ const MIN_TEMPLATE_CHARS = 6;
 
 // 模块初始化即校验模板集合：失校必须显式红，不能等某条日志碰巧不匹配才暴露。
 assert.ok(LOG_TEMPLATES.length > 0, "LOG_TEMPLATES 不得为空");
+// 账本的可信度取决于这份清单不被就地改动：`readonly string[]` 只挡编译期，运行期一次
+// push 就能让未认领的日志变成"已认领"。清单是 Object.freeze 的，这里把它钉成判据。
+assert.ok(Object.isFrozen(LOG_TEMPLATES), "LOG_TEMPLATES 必须是冻结的（运行期不可增删）");
 for (const fragment of LOG_TEMPLATES) {
   assert.ok(
     fragment.trim().length >= MIN_TEMPLATE_CHARS,
     `日志模板片段过短（< ${String(MIN_TEMPLATE_CHARS)} 字符）：${JSON.stringify(fragment)}`,
   );
+  // 片段不许含换行：拼文本时空白被压成单空格，带换行的片段因此永远命中不了——那是一条
+  // 看起来在认领、实际永不认领的判据，只能在装载时挡住。（片段里的空格是允许的。）
+  assert.ok(!/[\n\r]/u.test(fragment), `日志模板片段含换行：${JSON.stringify(fragment)}`);
 }
 
 /** 插件会用到的四个 console 级别（联合类型取属性，避免以字符串索引 Console）。 */

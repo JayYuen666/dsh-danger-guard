@@ -13,6 +13,8 @@ on:
   workflow_dispatch: {}
   schedule:
     - cron: "23 4 * * 1"
+  # 分支名写死 main，而 job 内 `if` 读 default_branch：`on.push.branches` 不支持表达式，
+  # 两者要一致就得让默认分支保持 main（改名时这一行与门控会各说一套，push 入口静默失效）。
   push:
     branches: [main]
 # 同一 ref 只留一轮：schedule / push / branch_protection_rule 可以同时或连续触发，
@@ -55,6 +57,6 @@ jobs:
           path: results.sarif
           retention-days: 5
       - name: Upload to code-scanning
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: results.sarif

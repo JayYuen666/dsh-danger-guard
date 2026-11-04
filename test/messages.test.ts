@@ -21,9 +21,10 @@ describe("displayReasonOf：一枚键在全部语言下的文案", () => {
     assert.ok(out.en.length > 0, "官方把 en 定成必填成员");
   });
 
-  it("同一枚 key 在不同语言下是各自的文案（不是同一句复读）", () => {
+  it("同一枚 key 逐 locale 各取自己那份表", () => {
+    // 只钉「取的是自己那张表」：中英内容是否相同属于文案决定（同一术语可以同形），
+    // 拿 notEqual 绑上去会让一次无害的改版变成与实现无关的红。
     const out = displayReasonOf("rmrf");
-    assert.notEqual(out["zh"], out.en);
     assert.equal(out["zh"], MESSAGES.zh.rmrf);
     assert.equal(out.en, MESSAGES.en.rmrf);
   });
@@ -50,6 +51,10 @@ describe("fillTemplate：槽位插值", () => {
       "a x.ts b /proj",
     );
     assert.equal(fillTemplate("no slots", {}), "no slots");
+    // 槽位存在但模板里没有那枚占位符：原样返回（不因“有条目没消费掉”而改写）。
+    assert.equal(fillTemplate("untouched", { who: "x" }), "untouched");
+    // 同一占位符出现多次要全部替换：只替换首次出现的实现会在第二处留下 `{who}`。
+    assert.equal(fillTemplate("{who} 与 {who}", { who: "a" }), "a 与 a");
     assert.equal(fillTemplate("{missing} stays", {}), "{missing} stays");
   });
 

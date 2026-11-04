@@ -31,11 +31,22 @@ const attributeOf = (input: {
 }): ReturnType<typeof attributeExternalChange> =>
   attributeExternalChange({ mtimeJump: true, pendingStaleBase: -1, ...input });
 
-/** 按会话那份台账（`readBasisLedgers` 的第 0 项；注解保证它一定在）。 */
-const basisTable = (): Map<string, unknown> => readBasisLedgers()[0]!;
+/** 内部台账的按位取用：先钉住返回形状再取用。`!` 把「条目缺失」吞成一次 undefined 解引用，
+ *  顺序或长度变了应当在明确的断言上红，而不是拿着 pending 去断言 basis（`size === 0` 那一类
+ *  断言在错位时照样成立）。 */
+function ledgerAt(index: number): Map<string, unknown> {
+  const ledgers = readBasisLedgers();
+  assert.equal(ledgers.length, 2, "read-basis 交回两张台账：按会话的那份与暂存的那份");
+  const table = ledgers[index];
+  assert.ok(table instanceof Map, `台账第 ${String(index)} 项必须存在`);
+  return table;
+}
+
+/** 按会话那份台账（`readBasisLedgers` 的第 0 项）。 */
+const basisTable = (): Map<string, unknown> => ledgerAt(0);
 
 /** 暂存那份台账（第 1 项）。 */
-const stagedTable = (): Map<string, unknown> => readBasisLedgers()[1]!;
+const stagedTable = (): Map<string, unknown> => ledgerAt(1);
 
 /** 目标目录：按平台根拼，不写死 POSIX 形（Windows 上 `/w` 是「当前盘相对」，落点会漂）。 */
 const WORK_ROOT = path.resolve(path.parse(process.cwd()).root, "w");
@@ -111,6 +122,8 @@ describe("attributeExternalChange：自证要真的知道，不是「没说不�
 
     // 两个 -1 相等（host.ts 在"本会话没有历史位"时会把 jumpSeq 退到 -1）：水位停在 -1，
     // 于是这一轮判不出外部改动。这是那枚回落值的已知代价，不是自证被误信。
+    // 这两行断言钉的是**现状**：哪天不再退到 -1，或对「从未编辑过 + 有跳变」一律判外部，
+    // 这里会先红 —— 那是行为改了要连着改断言，不是回归；判外部才是收紧方向。
     const bothMinusOne = attributeExternalChange({
       lastEditSeq: -1,
       selfTextPresent: true,

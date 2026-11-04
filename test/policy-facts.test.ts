@@ -230,17 +230,27 @@ describe("policyFactsOf：沙箱覆盖事实原样透传", () => {
 
 describe("policyFactsOf：会话形状与覆盖读法的边界", () => {
   it("覆盖函数抛错时判定抛出（宿主服务的失败不吞：吞掉就等于换了一档）", () => {
+    // 抛的那一枚要先拿到手：只写 assert.throws 的话，同一条路径上任何一处读数出错
+    // （shell.sandboxMode 的 getter、presets.current、配置形状检查）都能让它绿，
+    // 而本用例的口径是「overrideOf 的失败原样冒出来」。比身份，不比消息文本。
+    const boom = new Error("session unreadable");
     const services = {
       shell: { sandboxMode: WORKSPACE_MODE },
       sandboxPolicy: {},
       approval: {
         config: { policy: "never" },
         overrideOf: () => {
-          throw new Error("session unreadable");
+          throw boom;
         },
       },
     };
-    assert.throws(() => factsFrom(services));
+    let thrown: unknown;
+    try {
+      factsFrom(services);
+    } catch (error) {
+      thrown = error;
+    }
+    assert.equal(thrown, boom, "必须是 overrideOf 抛的那一枚，且没被包成别的错误");
   });
 
   it("覆盖返回 undefined ⇒ 回落服务配置（不是「读不到就算能问」）", () => {

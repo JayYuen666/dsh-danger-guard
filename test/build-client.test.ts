@@ -71,27 +71,33 @@ await declareSchemaCoverage(import.meta.url, {
   allowUnbound: [
     {
       field: "preflightEnabled",
-      reason: "本轮只落设置面与拦截半：卡片控件（含 ui-messages 两语文案）不在本次规格内",
+      reason:
+        "设计上的永久选择：preflightEnabled 是 .volatile()，设置条目以 auto: false 注册表单，改它只能走设置行的 config: 块",
     },
   ],
 });
 
+/** 读产物文本，缺文件时给出可行动指引：三处判据共用一份读取路径，
+ *  免得产物缺失时两处报裸 ENOENT（只有路径、没有「先跑 build:client」那一层）。 */
+async function clientBundleText(): Promise<string> {
+  const clientJsPath = fileURLToPath(new URL(CLIENT_BUNDLE_SPEC, import.meta.url));
+  const exists = await stat(clientJsPath)
+    .then(() => true)
+    .catch(() => false);
+  assert.ok(exists, `client.js 必须存在（npm run build:client 产物）：${clientJsPath}`);
+  return readFile(clientJsPath, "utf8");
+}
+
 describe("danger-guard client 构建", () => {
   it("client.js 已产出且含设置卡与开关文案", async () => {
-    const clientJsPath = fileURLToPath(new URL(CLIENT_BUNDLE_SPEC, import.meta.url));
-    const exists = await stat(clientJsPath)
-      .then(() => true)
-      .catch(() => false);
-    assert.ok(exists, "client.js 必须存在（npm run build:client 产物）");
-    const text = await readFile(clientJsPath, "utf8");
+    const text = await clientBundleText();
     assert.ok(text.includes("danger-guard"), "模块名");
     assert.ok(text.includes("危险拦截"), "卡片标题");
     assert.ok(text.includes("factGateEnabled"), "事实门开关字段");
   });
 
   it("卡片 props 契约正确：读 useCard，不读会崩的 props.hooks（v7 修复）", async () => {
-    const clientJsPath = fileURLToPath(new URL(CLIENT_BUNDLE_SPEC, import.meta.url));
-    const text = await readFile(clientJsPath, "utf8");
+    const text = await clientBundleText();
     // 框架 InjectFace/PropsHooks（client-runner）：注入 { hooks: { card } } → prop useCard
     assert.ok(text.includes("useCard"), "必须用 useCard 读快照");
     // ⚠ 判据粒度：原来的 `props.hooks.card` 在压缩产物里**不可能**出现（`props` 会被 mangle）
@@ -99,9 +105,24 @@ describe("danger-guard client 构建", () => {
     assert.ok(!text.includes(".hooks.card"), "不得读会崩的 props.hooks.card 属性链");
   });
 
+  it("产物只调宿主平台模块里稳定的 zod API：`.safeParse` 在，`.validate` 不在", async () => {
+    const text = await clientBundleText();
+    // 浏览器里的 `zod` 由宿主壳层提供（`PLATFORM_MODULES`），比本仓 catalog 那一份旧；
+    // `.validate` 只在较新的 zod 上存在，本仓的类型检查与单测用的是较新那份，所以用它在
+    // 真机上只会渲染出一行「…validate is not a function」。属性名不被 mangle，这两条可判。
+    assert.ok(
+      !text.includes(".validate("),
+      "client.js 调用了 .validate(：宿主平台模块那一份 zod 没有这个方法",
+    );
+    // 反向一侧：形状校验整条腿被删掉时，上面那条会因为「本来就没有」而恒绿。
+    assert.ok(
+      text.includes(".safeParse("),
+      "client.js 里没有 .safeParse(：跨进程返回值的形状校验不见了",
+    );
+  });
+
   it("产物入口只列 0.1.7 仍在的服务（configForms 取代已移除的 settingsScope）", async () => {
-    const clientJsPath = fileURLToPath(new URL(CLIENT_BUNDLE_SPEC, import.meta.url));
-    const text = await readFile(clientJsPath, "utf8");
+    const text = await clientBundleText();
     // inject 清单是装配契约，产物里必须原样可查：`settingsScope` 在 installed 0.1.7 全树
     // 零命中，只要它回到清单里，整条 client 入口就挂不上（症状 = 设置卡静默消失）。
     // 替代面 = configForms（installed dsh-client-ui-settings/lib/types/client/

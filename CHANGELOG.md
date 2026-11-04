@@ -1,3 +1,33 @@
+## 0.1.12
+
+开发基线抬到 `0.2.2-alpha.3`，宿主支持窗口从单条范围改成两条宿主线的并集；默认配置与拦截行为不变。同一批改动按审查判据加固了测试与发布链：补上几条点名成因的红，替掉两处只会抛裸 `ENOENT` 或静默放过的形状。需要留意的是发布元数据——`peerDependencies` 与 `engines.dsh` 现在覆盖 `0.2.1-rc.3` 与 `0.2.2-alpha.2` 两条线，安装器的 peer 解析因此会落到较新的那一支。另有一处真实宿主上的修复：设置卡的统计块此前在浏览器里渲染成一行 `…validate is not a function`，见 Fixed 第一条。
+
+### Changed
+
+- **宿主开发基线**：`devDependencies` 里的 `@deepseek-ai/dsh-*` 全族抬到 `0.2.2-alpha.3`，`@deepseek-ai/cordis` 抬到 `4.0.6-alpha.2`，`@deepseek-ai/schemastery` 抬到 `3.18.6-alpha.2`；根 catalog 与 overrides 的投影同步，`pnpm-lock.yaml` 随之重解。
+- **支持窗口写成并集**：`peerDependencies` 里的四枚宿主包与 `engines.dsh` 由 `^0.2.1-rc.3` 改为 `^0.2.1-rc.3 || ^0.2.2-alpha.2`。caret 只吃自己那条元组内的预发布版本，单条范围会让安装器把新线判成不满足；宿主装载门读 `engines.dsh` 且带 `includePrerelease`，不受这条影响。并集窗口按干净目录里的 `npm install` 实测过：退 0，无 `ERESOLVE`。
+- **发布链的 pnpm 取值**：`ci.yml` 的两个 job 与 `publish.yml` 从 `version: 12` 改为 `env.PNPM_VERSION: 12.11.2`，与伞根 `packageManager` 同源；浮动主版本会让门禁与发布在补丁版之间漂移，而本仓的 `cordis.patch.yml` 记着可用下限 ≥12.3.0。
+- **CodeQL**：删掉 `packages: read`（本仓的 CodeQL 步骤没有 `packs` / `queries` 输入）；fork PR 的 `analyze` 改 `continue-on-error`（外部贡献者的 token 只读，上传 SARIF 必然 403，而跳过整步在分支保护里记作通过，等于「未扫描即绿」），其余事件仍判红。
+- **README 双语窗口口径**：两份都写明「发布时点取证到的最高版本不是区间上限」，并把逐版取证的判据说明为宿主 `--dump-config` 的层行；设置卡与它的命名空间调用另在发布基线上全量取证一次。
+- **动作钉版**：`pnpm/action-setup` 由 6.1.0 抬到 6.1.1（`ci.yml` 两处、`publish.yml` 一处），`github/codeql-action` 的 init / analyze / upload-sarif 由 4.39.1 抬到 4.39.2。其余动作已是最新；每一枚的 SHA 都按上游 tag 解到 commit 再与注释版本核对，annotated tag 多解一层。
+- **`.gitignore`**：产物与缓存条目一律加前导斜杠（`/client.js`、`/coverage/`、`/.toolchain/` 等），补 `/*.tgz` 与 `.DS_Store`。workflow、dependabot 与 scorecard 的注释不再写死宿主族版本号，改为指向根表。
+
+### Added
+
+- **产物缺席是一条点名红**：`test/dist-size.test.ts` 在量体积之前先判产物在不在盘上，缺件时提示「先跑 build」，与「体积回退」分成两条不同的红；预算常量旁边写明余量口径与顶穿时的处置。
+- **客户端扫描面的空集自检**：`test/schema-coverage.ts` 扫不到任何客户端源文件时抛在布局上，而不是交回空集合让调用方去报「字段全都没绑」。写入惯用法的匹配面同时补上 `set<string>('x')` 的泛型实参段与无插值模板字面量两类，引号改为后向引用配对，`"x'` 这类不配对写法不再算命中。
+- **宿主契约用例的判据**：`rejection` 的观测窗口从单轮宏任务改成两轮，并写明为什么一轮不够；「停用期不建分片」补上反向断言——切回启用后用同一 session id 打，配额若被停用期预支会直接放行。`lru` 补容量 1、恰好填满、默认容量三例。预检的目录预算溢出改用具名常量，遍历顺序变化不再影响这条用例的成立。
+- **收台进 `finally`**：`test/host-spine.ts` 的 fiber dispose 与临时目录清理拆开，dispose 抛错时不再把临时工程留在 `os.tmpdir`。
+
+### Fixed
+
+- **Windows 两格的两条真实红**：`test/disaster-target.test.ts` 只注入 `HOME` 时，Windows 的 `os.homedir()` 读的是 `USERPROFILE`，用例会把真实家目录当成「可判」；改为两枚环境变量一起注入、一起恢复。`lib/self-write-proof.ts` 把 stat 失败与读正文失败合并成同一层 `catch`（结论同为 false），让「缺失路径」那条跨平台用例覆盖它；`chmod 0o000` 那条在 Windows 上显式跳过——chmod 只切换只读属性，不撤读权限，读完仍是可读的。
+- **设置卡的统计块在真实宿主上只剩一行错误**：`src/stats-reader.ts` 的形状校验原先调用 zod 的 `.validate`。本仓 `devDependencies` 那份 zod 有这个方法，而浏览器里的 `zod` 由宿主壳层的平台模块提供、版本更旧，没有它——类型检查与单测全绿，真机卡片上统计块却渲染成 `…validate is not a function`。改用 `safeParse(...).success`；`test/build-client.test.ts` 补一条两侧判据：产物里不得出现 `.validate(`，并且必须仍有 `.safeParse(`（否则「本来就没有」会让前一条恒绿）。
+- **`build-types.mjs`**：`typescript` 清单里声明的 `tsc` 入口不在盘上时点名路径与清单，而不是让子进程以一条与成因无关的 `ENOENT` 失败。
+- **预检超时与爆炸半径预演的超时改为单源**：`host.ts` 的 `PREFLIGHT_TIMEOUT_MS` 直接取 `lib/blast-radius.ts` 的 `BLAST_TIMEOUT_MS`（取值不变）。两处各写一枚同值常量时，「同值」只是一句注释，改一边不会有任何门响。
+- **`lib/confirm.ts`**：`bashVerdictOf` 的两个分支合并成一个表达式；`BashDangerOptions` 新增必填字段时由 tsc 在一处提醒，不必两头对齐。
+- **注释与文档的漂移**：`src/client-entry.ts` 不再复述设置项清单与 `BUNDLE_PKG` 的来源；`decorator-transform.mjs` 的返回类型写成实际形状（`sources` / `mappings`），调用方钉源映射时不必各自 cast；client 构建头注明 `src/*.ts` / `lib/*.ts` 也是输入。
+
 ## 0.1.11
 
 一轮跨面审查修复：shell 词法与包装词判据重建、沙箱让路前提收紧、事实门与预检读面收口，扩展密钥模式补上上报与保存回路；发布链与 CI 同步加固。默认配置不变；需要留意的行为变化是 read-only 档的管道命令与自动审查硬拦范围这两处收紧。
@@ -38,7 +68,7 @@
 
 ### Added
 
-- **额外可写根参与沙箱覆盖**：`sandboxPolicy.resolve()` 交回 `additionalWritableRoots` 时，那些目录也进可写根表；根表里有一枚读不出来就整份不留 scope（不完整的根表会把被丢根之下的目标误判成沙箱完全覆盖，从而让路）。旧宿主没有这一位时按「没有额外 grant」处理。
+- **额外可写根参与沙箱覆盖**：`sandboxPolicy.resolve()` 交回 `additionalWritableRoots` 时，那些目录也进可写根表；根表里有一枚读不出来就整份不留 scope——**方向是不让路**：不完整的根表会把被丢根之下的目标误判成沙箱完全覆盖，宁可保持硬拒（fail-closed），也不冒着放行一次真实删除的风险。旧宿主没有这一位时按「没有额外 grant」处理。
 - **随包发插件页文档**：`locale/en.json` / `locale/zh.json` 给出 `meta.title` / `meta.description` / `meta.detail`，详情页是 `docs/DETAIL.md` / `docs/DETAIL.zh.md`；`files` 与 `exports` 同步补齐。
 
 ### Changed

@@ -93,17 +93,17 @@ describe("effectiveDispositionOf：惰性与覆盖", () => {
 
   it("策略面同样只读一次（排序与收口共用同一份缓存）", () => {
     let reads = 0;
+    // 宿主面整份复用 confiningHost，只换 policyRaw 计数那一枚：三处字面复制会在 confiningHost
+    // 变更时漏改，而这条用例要钉的恰好只是「只读一次」。
     const effective = effectiveDispositionOf({
+      ...confiningHost,
       facts: FACTS,
       session: undefined,
       cwd: undefined,
-      shellRaw: confiningHost.shellRaw,
       policyRaw: () => {
         reads += 1;
         return confiningHost.policyRaw();
       },
-      canonicalize: confiningHost.canonicalize,
-      tempDir: confiningHost.tempDir,
     });
     assert.equal(effective.dispositionOf(rmrfWith(["/etc/foo"])), "allow");
     assert.equal(
@@ -270,11 +270,25 @@ describe("effectiveDispositionFactory：cwd 的铸造边界", () => {
     // cwd 若被原样品牌化，`.` 会按 process.cwd() 解析出一个与 /ws 无关的绝对形，
     // 一次真实的工作区删除会被误判成"沙箱已覆盖"而放行。
     assert.equal(effective.dispositionOf(rmrfWith(["."])), "deny");
+    // 排序与收口同一份事实：覆盖后 facts 也不得报"沙箱已覆盖"。
+    assert.equal(
+      effective.verdictOf("rmrf", rmrfWith(["."]).fix).facts.sandboxCovers,
+      false,
+      "覆盖后事实同样不得声称沙箱让路",
+    );
+  });
+
+  it("空串 cwd 与缺席同判：不给 brand，也不折出沙箱覆盖", () => {
+    const effective = effectiveDispositionFactory(confiningHost)(undefined, "", FACTS);
+    assert.equal(effective.dispositionOf(rmrfWith(["."])), "deny");
+    assert.equal(effective.verdictOf("rmrf", rmrfWith(["."]).fix).facts.sandboxCovers, false);
   });
 
   it("绝对 cwd 照常参与归一：相对目标按它解析，不绝对化时才判覆盖", () => {
     const effective = effectiveDispositionFactory(confiningHost)(undefined, "/elsewhere", FACTS);
     // `/elsewhere` 之下没有任何可写根（根只有 /ws 与 /tmp 系）→ 让路。
+    // 这一条同时是品牌化生效的证明：把工厂里的绝对性判断改成恒 `cwd: undefined` 时，
+    // `.` 退回相对形态、按不让路处理，这条断言就红（变异实测过）。
     assert.equal(effective.dispositionOf(rmrfWith(["."])), "allow");
   });
 

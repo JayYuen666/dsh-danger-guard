@@ -76,6 +76,18 @@ describe("客户端读面：ctx.get 取远程面、挂载一次、按 remote.<ns
     assert.equal(createStatsReader({ get: () => ({ $mount: 1 }) }), undefined);
   });
 
+  it("并发首读只挂一次：两路同时进入时共享同一枚在途挂载", async () => {
+    // 串行两次的幂等测不到最容易破的那一种：实现在 `await` 之后才记下 mounted 时，
+    // 两条并发刷新会各挂一次而所有串行用例照绿。
+    const host = fakeHost({ namespace: namespaceOf({ ok: true, value: SNAPSHOT }) });
+    const read = createStatsReader(host.ctx);
+    assert.ok(read !== undefined);
+    const [first, second] = await Promise.all([read(), read()]);
+    assert.deepEqual(first, SNAPSHOT);
+    assert.deepEqual(second, SNAPSHOT);
+    assert.equal(host.mounts(), 1, "$mount 必须在首个 await 之前就记下来");
+  });
+
   it("正常一路：挂载幂等（刷新多次只挂一次）、命名空间按 remote.dangerGuardStats 读、返回快照", async () => {
     const host = fakeHost({ namespace: namespaceOf({ ok: true, value: SNAPSHOT }) });
     const read = createStatsReader(host.ctx);
@@ -198,12 +210,26 @@ describe("客户端读面：ctx.get 取远程面、挂载一次、按 remote.<ns
 });
 
 describe("topLines：排序与裁剪", () => {
-  it("limit 只收正整数：非正/NaN 交回空表，而不是 slice 的错位语义", () => {
+  it("limit 只收正整数：非正/NaN/Infinity/超安全整数一律空表，而不是 slice 的错位语义", () => {
     const counts = { alpha: 1, beta: 2 };
     assert.deepEqual(topLines(counts, 0), []);
     assert.deepEqual(topLines(counts, -1), []);
     assert.deepEqual(topLines(counts, Number.NaN), []);
     assert.deepEqual(topLines(counts, 2.5), [], "非整数按 0 处理");
+    // 这三类走的都是 `Number.isSafeInteger(limit) && limit > 0` 的同一支，但少了任何一类，
+    // 移除守卫后 `slice` 给的就不是空表：Infinity 会把整份表原样交回（"只要前 N 条"变成全给），
+    // 超出安全整数的值则取决于实现怎么处理。
+    assert.deepEqual(topLines(counts, Number.POSITIVE_INFINITY), [], "Infinity 不等于「不限」");
+    assert.deepEqual(topLines(counts, Number.NEGATIVE_INFINITY), []);
+    assert.deepEqual(
+      topLines(counts, Number.MAX_SAFE_INTEGER + 1),
+      [],
+      "超过安全整数的值不是合法条数（它已经不是自己那枚常量的精确表示了）",
+    );
+    // 类型面收不住"调用方漏传"：`limit: number` 在运行期仍可能收到 undefined（JS 调用方或
+    // 上游可选字段忘了判），那一支必须与 0 同形，而不是让 slice 自己解释 undefined。
+    const missing = undefined as unknown as number;
+    assert.deepEqual(topLines(counts, missing), [], "漏传按空表处理");
   });
 
   it("并列时按键码点序（不随宿主 locale 变），次数降序在前", () => {

@@ -99,8 +99,12 @@ const STATS_SNAPSHOT_SCHEMA: z.ZodType<StatsSnapshot> = z.object({
   window: countOf,
 });
 
+/** 校验只走 `safeParse`：客户端 bundle 里的 `zod` 由宿主壳层提供（`PLATFORM_MODULES` 里的
+ *  `zod`），它比本仓 catalog 那一份旧，`.validate` 在那份上不存在。而本仓的类型检查与单测
+ *  用 catalog 那份，`.validate` 是在的——所以这类写法只会在真实宿主的卡片上炸成一行
+ *  「…validate is not a function」。对着宿主平台模块写的校验只能用跨版本稳定的 API。 */
 const isStatsSnapshot = (value: unknown): value is StatsSnapshot =>
-  STATS_SNAPSHOT_SCHEMA.validate(value);
+  STATS_SNAPSHOT_SCHEMA.safeParse(value).success;
 
 /**
  * 造出真正的读取器（挂载一次 + 每次读命名空间服务）。

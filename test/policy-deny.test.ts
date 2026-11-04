@@ -84,9 +84,10 @@ describe("policyDenyText：三段文案的顺序与内容", () => {
       facts: neverAsk,
       messages: ZH,
     });
+    // 整段逐字钉这一条就够：第二行必须就是「问不了」那句，措辞随 ZH 表一起走。
+    // 早先这里还跟两条 /不允许询问/ 与 /改成会询问/ 的正则——那是把 ZH 表的文案再抄一遍，
+    // 改版时多一处要维护，判据却不比这一行更多。
     assert.equal(text, `${ZH.gitForcePush}\n${ZH.askBlockedGeneric}`);
-    assert.match(text, /不允许询问/u, "点明这档问不了");
-    assert.match(text, /改成会询问/u, "出路指向审批策略，而不是让用户留在原地换档");
   });
 
   it("同一枚键在三档下文案不同（成因不同就不能说同一句话）", () => {
@@ -106,8 +107,10 @@ describe("policyDenyText：三段文案的顺序与内容", () => {
 
 describe("policyDenyFlags：与文案同一份判据", () => {
   it("deny 档两类都算（本档硬拒 + 降级硬拒）；判据即 mode-policy 的 decideRule", () => {
-    // isDenied 已删：guard 的两个调用点直接调 decideRule（判据单源在 mode-policy），
-    // 这里钉的是 policyDenyFlags 与 decideRule 同源。
+    // 判据单源在 lib/mode-policy.ts：`policyDenyFlags` 的 verdict 取 `decideRule`，
+    // `policyDenyText` 的降级尾巴取同一张表上的 `deniedByPolicy`（host.ts 那一处调用点用的就是这两枚，
+    // 都不直接调 decideRule）。这里钉的是两条对同一组 (facts, key) 给同一结论——各判一套就会出现
+    // 「文案说硬拒而标志位不是」那种互斥的下一步。
     assert.equal(decideRule(WORKSPACE, "pipeShell"), "deny", "本档硬拒");
     assert.equal(decideRule({ ...WORKSPACE, askable: false }, "gitForcePush"), "deny", "降级硬拒");
     assert.equal(decideRule(WORKSPACE, "gitForcePush"), "ask", "ask");

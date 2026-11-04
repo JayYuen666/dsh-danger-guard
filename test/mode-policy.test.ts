@@ -211,9 +211,8 @@ describe("完全权限档的两个分支：零兵底只属于「问不了」的�
   };
 
   it("问不了 ⇒ 零兵底（`noVerify` 除外，它不靠问也不靠沙箱）", () => {
-    for (const key of ALL_RULE_KEYS) {
-      assert.equal(decideRule(FULL_ACCESS, key), EXPECTED[FULL][key], key);
-    }
+    // 整档的逐键矩阵已在上面那个 describe 里按同一份 EXPECTED[FULL] 遍历过，这里不再跑第二遍
+    // （同一 facts、同一期望表、同一遍历，多跑一次不增加任何判据）。
     // 单点钉住那条例外：整档 allow 会把它一起放掉，而这正是本条的缺口。
     assert.equal(decideRule(FULL_ACCESS, "noVerify"), "deny");
   });
@@ -326,11 +325,9 @@ describe("severityResolverOf：扫描层按真实档位排序（串行命令的�
     for (const key of ALL_RULE_KEYS) {
       assert.equal(severity({ key }), decideRule(READ_ONLY_FACTS, key), key);
     }
-  });
-
-  it("同一键重复求值结果稳定（内部有记忆，但语义与逐次求值一致）", () => {
-    const severity = severityResolverOf(READ_ONLY_FACTS);
-    assert.equal(severity({ key: "gitForcePush" }), severity({ key: "gitForcePush" }));
+    // 这条遍历同时就是「重复求值稳定」的判据：memo 是每次 `severityResolverOf` 自己带一枚
+    // `Map`（lib/mode-policy.ts），闭包各判各的，跨 facts 复用那一条在结构上不可能发生。
+    // 再写一条 `severity(k) === severity(k)` 只是恒真断言——纯函数对它必然成立，钉不住任何回归。
   });
 
   it("串行命令按真实档位择优：前段放行不会吞掉后段该问的那一条", () => {
