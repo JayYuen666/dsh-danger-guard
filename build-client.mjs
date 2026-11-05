@@ -22,7 +22,7 @@ export { singleEntryChunk } from "@jayyuen66/dsh-plugin-shared/lib/build-artifac
 // 外置清单 = 既有 react 家族 + zod（宿主 `PLATFORM_MODULES` 里本卡值导入的第三方运行时）。
 // 不复用 shared 的默认清单，也不 import 它的新导出：消费者 CI 装的是 registry 上那份 shared，
 // 新导出在它发布之前不存在；这里只用 shared 已经发布的 `REACT_RUNTIME_MODULES` 做基座。
-const CLIENT_EXTERNALS = [...REACT_RUNTIME_MODULES, "zod"];
+const CLIENT_EXTERNALS = [...REACT_RUNTIME_MODULES, "zod", "@jayyuen66/dsh-plugin-shared/client"];
 
 // 外置判据（构建与测试同一份）：登记过的精确说明符外置，react 家族里没登记的构建期失败。
 export const isExternalModule = clientExternalPredicate(CLIENT_EXTERNALS);

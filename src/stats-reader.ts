@@ -24,7 +24,7 @@ import type { InvocationDescriptor, RemoteResult } from "@deepseek-ai/dsh-typert
 // 槽位键与 descriptor 的 package 位共用一枚单源（src/bundle-pkg.ts）：两处各写一遍时，
 // 改名漏一处没有任何编译期信号，表现是"读不到"而不是报错。
 import { BUNDLE_PKG } from "./bundle-pkg.ts";
-import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
+import { isRecord } from "@jayyuen66/dsh-plugin-shared/client";
 import { z } from "zod";
 
 // 形状从**叶子**模块取，不从 lib/judge-stats.ts：后者带 node:os/node:path，

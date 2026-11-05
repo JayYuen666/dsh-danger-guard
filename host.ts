@@ -64,6 +64,10 @@ import type {
   EditDangerOptions,
   Fix,
 } from "./lib/danger-rules.ts";
+import { writeGateDecisionOf } from "./lib/write-gate.ts";
+import type { FactGateDenyInput } from "./lib/write-gate.ts";
+import { riskFactsOf, tierOf, writeTargetsOf } from "./lib/write-targets.ts";
+import type { FactTier, WriteTarget } from "./lib/write-targets.ts";
 // 需确认档的判定与两句话构造（宿主无关的那一半，可脱离宿主单测）。
 import { askRequestOf, AskDeduper, dedupKeyOf } from "./lib/confirm.ts";
 // 爆炸半径预演：常量表与渲染是纯函数（可脱离宿主单测），跑子进程那一趟在本文件。
@@ -192,7 +196,7 @@ import {
 // `SessionEvent` 是**官方**判别联合（shared 从 @deepseek-ai/dsh-session 原样 re-export，
 // 两个 PTC 变体由 @deepseek-ai/dsh-tools/types 官方增强并入）：本文件不再自声明
 // 「最小投影」，按 event.type 分支即收窄 data，宿主换形状就编译不过。
-import { scanToolEvents } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
+import { applyPatchTargetsOf, scanToolEvents } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 import type {
   SessionEvent,
   ToolCallRecord,
@@ -458,12 +462,14 @@ interface HostCtx {
    *  回退扫描——写进 `isDangerGuardHost` 的硬前置等于把闸门下线（同 session-rescue 的口径：
    *  探针只能探"真会直接调的方法"）。child 面按本包用到的那一位投影。 */
   /** 官方可选注入面。两枚重载按"具体在前"排：`["fs"]` 那一条的入参形状与通用条的
-   *  `{ sessionProjections }` 不互相 assignable，写反了会被通用臂吃掉。 */
+   *  `{ sessionProjections }` 不互相 assignable，写反了会被通用臂吃掉。回调的返回域跟着官方
+   *  `Plugin.Function`（返回 `any`）走，比 `void` 宽：cordis 把返回值当子 fiber 的 setup 屏障，
+   *  投影那一条要能把注册的 promise 交回去。 */
   inject?: {
     (deps: ["fs"], activate: (child: { fs: PreflightFs }) => void): unknown;
     (
       deps: readonly string[],
-      activate: (child: { sessionProjections: ProjectionsRegistry }) => void,
+      activate: (child: { sessionProjections: ProjectionsRegistry }) => void | Promise<void>,
     ): unknown;
   };
 }
@@ -876,68 +882,6 @@ function scopeCoversLayer(root: string | undefined, layer: FactLayer): boolean {
   return root !== undefined && isInside(root, layer.dir);
 }
 
-/** 触及导出面/签名的关键字：改动文本含这些词 → 波及面大概率超出文件自身，升档。 */
-const SIG_KEYWORD_RE =
-  /\b(?:export|default|declare|pub|fn|func|def|class|interface|type|enum|struct|trait|impl|public|protected)\b/u;
-
-/** 高风险路径：manifest / lockfile / 构建配置 / CI / cordis 装配——改一个字符也能全局波及。 */
-// ⚠ 前缀必须容**两种**分隔符（`[/\\]`）：宿主真实路径在 Windows 上是 `C:\\proj\\package.json`，
-// 只认 `(?:^|\/)` 时 `package.json` 前面是 `\\` ⇒ 恒不匹配 ⇒ 改版本号不再升档
-//（实测 Windows runner 上该用例红：`denied` 为 undefined，落到了最低档）。
-const RISKY_PATH_RE =
-  /(?:^|[/\\])(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|npm-shrinkwrap\.json|bun\.lockb?|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|pyproject\.toml|poetry\.lock|uv\.lock|requirements\.txt|setup\.py|tsconfig[^/]*\.json|vite\.config\.[cm]?[jt]s|webpack\.config\.[cm]?js|cordis\.(?:ya?ml|json)|Makefile|Dockerfile|docker-compose\.ya?ml|\.env(?:\.[\w-]+)?|schema\.sql)$/u;
-
-/**
- * 取证档位（定稿：按写面风险分档，配 strictMode 回到"每文件全探查"）。
- * 升档用**三元信号**而非只看大小——`package.json` 改一个版本号是"写面极小、爆炸半径
- * 最大"的典型，单靠 size 会把它放进最低档。
- */
-type FactTier = "low" | "mid" | "high";
-
-interface RiskFacts {
-  /** 本次调用能否创建文件（write / str_replace_editor create）。 */
-  creatable: boolean;
-  /** 高风险路径（manifest/lockfile/CI/装配）。 */
-  riskyPath: boolean;
-  /** 改动文本是否触及导出面/签名关键字。 */
-  sigChanged: boolean;
-  /** 写面字符数；**取不到**（write 整文件覆盖、str_replace_editor edits 数组）。 */
-  contentChars: number | undefined;
-  strictMode: boolean;
-  smallChars: number;
-  bigChars: number;
-}
-
-/**
- * 定档。缺信息一律**升档**：宁可多要一次探查，不可少要。
- *   high：新建 / 大段重写 / 触及导出签名 / 高风险路径（manifest·lockfile·装配）/ strictMode
- *   low ：小改且不触及签名且非高风险路径（只要 read）
- *   mid ：其余（read + 项目级引用探查）
- */
-function tierOf(facts: RiskFacts): FactTier {
-  if (facts.strictMode || facts.creatable) {
-    return "high";
-  }
-  if (facts.sigChanged) {
-    return "high";
-  }
-  // 取不到写面大小 → 保守升档
-  if (facts.contentChars === undefined) {
-    return "high";
-  }
-  if (facts.contentChars > facts.bigChars) {
-    return "high";
-  }
-  // 改一个版本号也能全局波及：size 是最差的代理
-  if (facts.riskyPath) {
-    return "high";
-  }
-  if (facts.contentChars <= facts.smallChars) {
-    return "low";
-  }
-  return "mid";
-}
-
 /**
  * 设置面读数降级告警：**只响一次**。守卫谓词每次工具调用都跑，坏设置在修复前会一直
  * 存在——逐次刷屏会把日志冲干净，反而盖掉真正的拦截记录（`strArray` 的降级告警同口径）。
@@ -993,41 +937,6 @@ function settingsConfig(svc: HostCtx): Config {
     warnSettingsFallback(error);
     return BUILTIN_BASE;
   }
-}
-
-/**
- * 从一次写调用提取风险事实。缺信息一律留 undefined → tierOf 保守升档：
- * write 是整文件覆盖（无"改动面"可言）、str_replace_editor 是 edits 数组，两者都
- * 算不出可靠 diff 尺寸，宁可多要取证。
- * `sigChanged` 是"写面小但波及大"的主要机器信号：改一行 `export const TIMEOUT`
- * 远比改一百行局部变量危险。
- */
-function riskFactsOf(
-  name: string,
-  args: Record<string, unknown>,
-  // 目标路径由调用方（已用 editTargetPath 归一化）传入，不在这里二次取键——
-  // 两侧取键形不一致正是"门禁要的路径"与"证据记账的路径"漂移的根源。
-  target: string,
-): Pick<RiskFacts, "creatable" | "riskyPath" | "sigChanged" | "contentChars"> {
-  let contentChars: number | undefined;
-  let sigChanged = false;
-  if (name === "edit") {
-    const oldS = typeof args["old_string"] === "string" ? args["old_string"] : undefined;
-    const newS = typeof args["new_string"] === "string" ? args["new_string"] : undefined;
-    // **字段缺失 ≠ 改动很小**：取不到就留 undefined → tierOf 保守升档。旧写法用 ''
-    // 兜底使长度算成 0，`0 <= smallChars` 会把"信息缺失"直接降到最低档（只要 read），
-    // 恰好把「缺信息一律要更多」反过来——被自家接线测试抓到。
-    if (oldS !== undefined && newS !== undefined) {
-      contentChars = oldS.length + newS.length;
-    }
-    sigChanged = SIG_KEYWORD_RE.test(newS ?? "") || SIG_KEYWORD_RE.test(oldS ?? "");
-  }
-  return {
-    creatable: name === "write" || (name === "str_replace_editor" && args["command"] === "create"),
-    riskyPath: RISKY_PATH_RE.test(target),
-    sigChanged,
-    contentChars,
-  };
 }
 
 /**
@@ -1592,6 +1501,20 @@ function applyToolCall(
   layers: FactLayer[],
   call: ToolCall,
 ): void {
+  if (call.name === "apply_patch") {
+    // 多目标补丁没有单一的 file_path：只要本次评估的目标出现在补丁的任一操作/目的路径里，
+    // 这次调用就是该目标的写证据。补丁正文不提供单文件最终内容，故 `editTexts` 留空，
+    // 下游按“内容不可自证”保守处理（不会 fail-open）。
+    const hit = applyPatchTargetsOf(call.a).some(
+      (target) =>
+        ctx.norm(target.path) === ctx.targetN ||
+        (target.moveTo !== undefined && ctx.norm(target.moveTo) === ctx.targetN),
+    );
+    if (hit) {
+      remember(ledger.editCalls, call.callId, call.seq);
+    }
+    return;
+  }
   switch (call.name) {
     case "read":
     case "str_replace_editor":
@@ -2199,6 +2122,11 @@ interface FactEvidenceQuery {
   readonly args: Record<string, unknown>;
   readonly target: string;
   readonly session: SessionLogFace | undefined;
+  /**
+   * `apply_patch` 的每个目标按操作类型给：Add 与 Move 的目的路径可创建，Update/Delete
+   * 与 Move 的源路径不是新文件。其余工具的 `creatable` 仍由 `riskFactsOf` 从参数现算。
+   */
+  readonly creatableOverride?: boolean;
   /** 只有一种场合用：预检的 A 面（读检视）此刻**还没有**写参数，无从按写面风险定档，
    *  只能按"要 refs 的最低必要档"（mid）问一次——按 high 问会顺带要层证据（那不是 A 面的
    *  职责，也答不出证据），按 low 问则根本没有 refs 这项要求。
@@ -2227,9 +2155,9 @@ function factEvidenceOf(
   readings: EvidenceReadings,
   query: FactEvidenceQuery,
 ): { tier: FactTier; input: FactEvidenceInput } {
-  const { name, args, target, session, tierOverride } = query;
+  const { name, args, target, session, tierOverride, creatableOverride } = query;
   // 风险事实：creatable（新建豁免 read）、riskyPath、sigChanged、写面大小。
-  const facts = riskFactsOf(name, args, target);
+  const facts = riskFactsOf(name, args, target, creatableOverride);
   const tier =
     tierOverride ??
     tierOf({
@@ -2253,43 +2181,68 @@ function factEvidenceOf(
  * 无目标路径 → undefined 直接放行；否则返回判别结果供 guard 回调翻译成 return/report。
  * deny 只回传渲染输入（`FactDenial`），拒绝理由是 guard 回调按 rt.messages 现渲染的。
  */
-function evaluateFactGate(
-  rt: GuardRuntime,
-  name: string,
-  args: Record<string, unknown>,
-  session: SessionLogFace | undefined,
-  factGate: FactGate,
-): FactGateOutcome | undefined {
+interface FactGateEval {
+  readonly rt: GuardRuntime;
+  readonly name: string;
+  readonly args: Record<string, unknown>;
+  readonly session: SessionLogFace | undefined;
+  readonly factGate: FactGate;
+}
+
+function evaluateFactGateForTarget(evalCtx: FactGateEval, target: WriteTarget): FactGateOutcome {
+  const { rt, name, args, session, factGate } = evalCtx;
   const { cfg } = rt;
-  const target = editTargetPath(name, args) ?? undefined;
-  let outcome: FactGateOutcome | undefined;
-  if (target !== undefined) {
-    // 状态键与证据键同源（归一化目标）；档位与缺项由同一条认定链现算。
-    const { tier, input } = factEvidenceOf(readingsOf(rt), { name, args, target, session });
-    // maxDenies 取 settings 运行时值；numOf 保证非法/0 回落内置默认（0 等于关掉事实门）。
-    const decision = factGate.check(
-      name,
-      resolveTarget(target, rt.cwd),
-      session?.id,
-      input,
-      numOf(cfg.maxDenies, DEFAULT_MAX_DENIES),
+  // 状态键与证据键同源（归一化目标）；档位与缺项由同一条认定链现算。
+  const { tier, input } = factEvidenceOf(readingsOf(rt), {
+    name,
+    args,
+    target: target.path,
+    session,
+    creatableOverride: target.creatable,
+  });
+  // maxDenies 取 settings 运行时值；numOf 保证非法/0 回落内置默认（0 等于关掉事实门）。
+  const decision = factGate.check(
+    name,
+    resolveTarget(target.path, rt.cwd),
+    session?.id,
+    input,
+    numOf(cfg.maxDenies, DEFAULT_MAX_DENIES),
+  );
+  if (decision.kind === "quota") {
+    // 连续无证据拒绝达上限 → 配额放行警示（配额放行不算"遵守规则"，不报 pass）
+    noteQuotaRelease();
+    console.warn(
+      `[danger-guard] fact-gate: ${target.path} 连续无证据拒绝达上限，配额放行（maxDenies）`,
     );
-    if (decision.kind === "allow" || decision.kind === "quota") {
-      // 连续无证据拒绝达上限 → 配额放行警示（配额放行不算"遵守规则"，不报 pass）
-      if (decision.kind === "quota") {
-        noteQuotaRelease();
-        console.warn(
-          `[danger-guard] fact-gate: ${target} 连续无证据拒绝达上限，配额放行（maxDenies）`,
-        );
-        outcome = { kind: "pass", target, quota: true };
-      } else {
-        outcome = { kind: "pass", target };
-      }
-    } else if (decision.kind === "indeterminate") {
-      outcome = { kind: "indeterminate", target };
-    } else {
-      outcome = { kind: "deny", target, tier, denial: decision.denial };
+    return { kind: "pass", target: target.path, quota: true };
+  }
+  if (decision.kind === "allow") {
+    return { kind: "pass", target: target.path };
+  }
+  if (decision.kind === "indeterminate") {
+    return { kind: "indeterminate", target: target.path };
+  }
+  return { kind: "deny", target: target.path, tier, denial: decision.denial };
+}
+
+/**
+ * 评估一次写调用的取证档位 + 决策（含配额放行警示）。
+ * 无目标路径 → undefined 直接放行；否则返回判别结果供 guard 回调翻译成 return/report。
+ * 多目标来自 `apply_patch`：任一目标 deny/indeterminate 即整体拒绝，首个拒绝的文案与
+ * 目标就是交回模型的那一条；全部通过时用最后一条 pass 上报（前面某一枚的 quota 不单独
+ * 保留，避免把一次配额放行说成整条补丁都遵守了规则）。
+ */
+function evaluateFactGate(
+  evalCtx: FactGateEval,
+  targets: readonly WriteTarget[],
+): FactGateOutcome | undefined {
+  let outcome: FactGateOutcome | undefined;
+  for (const target of targets) {
+    const current = evaluateFactGateForTarget(evalCtx, target);
+    if (current.kind === "deny" || current.kind === "indeterminate") {
+      return current;
     }
+    outcome = current;
   }
   return outcome;
 }
@@ -3175,14 +3128,17 @@ function factGateDenyOf(
   wiring: GuardWiring,
   exec: GuardExecution,
   rt: GuardRuntime,
-  name: string,
-  args: Record<string, unknown>,
+  input: FactGateDenyInput,
 ): string | undefined {
+  const { name, args, targets } = input;
   let deny: string | undefined;
   const { messages } = rt;
   if (rt.cfg.factGateEnabled) {
     // 缺项清单由 evidenceFor 现算：先按写面风险定档，再按档要求 read/refs/逐层。
-    const outcome = evaluateFactGate(rt, name, args, exec.agent?.session, wiring.gate);
+    const outcome = evaluateFactGate(
+      { rt, name, args, session: exec.agent?.session, factGate: wiring.gate },
+      targets,
+    );
     if (outcome?.kind === "pass") {
       // 取证通过 = 规则场景被触发且被遵守 → pass 信号（配额放行除外）。
       if (outcome.quota !== true) {
@@ -3262,6 +3218,38 @@ function secretJudgeOf(
   return { reason, cost };
 }
 
+/** 回给模型的拒绝理由随官方 locale 偏好走。偏好读一次即缓存，靠宿主推送失效：
+ *  describe() 不便宜（installed dsh-settings 对**每个**活跃条目做 schema.toJSON() +
+ *  JSON.stringify 算 revision，再投影 value/base/user 三份），而 tools.guard 是全仓最热的
+ *  路径——每次 bash/edit/write 都过这道谓词。失效链：写配置 → emit('app-boot/config-reload')
+ *  → SettingsForms 监听它并 invalidate() → 微任务里 describe() → 对 raw 变化的条目
+ *  emit('settings/document-updated', ns, revision)。 */
+function localeMessagesOf(svc: HostCtx): () => DangerGuardMessages {
+  let cachedPreference: unknown = undefined;
+  let hasCachedPreference = false;
+  svc.on?.("settings/document-updated", (ns: unknown) => {
+    if (ns === LOCALE_SETTINGS_NAMESPACE) {
+      hasCachedPreference = false;
+    }
+  });
+  /** locale 条目的偏好值；未投影出来 → undefined（中文默认）。**缺席不缓存**：locale 条目
+   *  可能晚于本条目才到位，缓存一次缺席就把语言跟随永久钉死——代价只是缺席时每次判定多
+   *  一次 describe()。 */
+  return () => {
+    if (!hasCachedPreference) {
+      const row = svc.settings.describe().find((desc) => desc.ns === LOCALE_SETTINGS_NAMESPACE);
+      if (row !== undefined) {
+        cachedPreference = row.value;
+        hasCachedPreference = true;
+      }
+    }
+    return messagesFor(
+      MESSAGES,
+      resolveLocalePreference(hasCachedPreference ? cachedPreference : undefined),
+    );
+  };
+}
+
 /**
  * 装配闸门（**拦截半**，profile 条目 `danger-guard`）。
  *
@@ -3282,14 +3270,17 @@ function wireReadFaces(
   fsBox: PreflightFsBox,
   askDeduper: AskDeduper,
 ): void {
-  svc.inject?.(["sessionProjections"], (child) => {
-    void mountLedgerReader(child.sessionProjections, {
+  // 回调把注册那一段的 promise 交回出去：cordis 把插件回调的返回值当作子 fiber 的 setup
+  // 屏障来等待（`_execute` 对 thenable 走 `effect.then(safeCollect)`），所以宿主在本插件
+  // 就绪之前就读得到这条投影。就地 `void` 掉等于让注册在后台跑完。
+  svc.inject?.(["sessionProjections"], (child) =>
+    mountLedgerReader(child.sessionProjections, {
       publish: (reader) => {
         ledgerBox.value = reader === undefined ? undefined : (session) => asLedger(reader(session));
       },
       effect: (factory) => svc.effect(factory, "danger-guard: tool-ledger reader"),
-    });
-  });
+    }),
+  );
 
   svc.inject?.(["fs"], (child) => {
     fsBox.value = child.fs;
@@ -3327,41 +3318,7 @@ export function apply(ctx: Context): void {
   // 而宿主按 fiber 记账页面策略（settings/index.ts:311 presentations.get(entry.fiber)）。
   // 拦截半不再碰 configure，服务面守卫也就只探 describe。
 
-  // 回给模型的拒绝理由随官方 locale 偏好走：用户在「设置 → 常规」改语言后，下一次工具调用
-  // 就是新文案（不重启、也不给本包另开一个 locale 设置项）。跨命名空间读在 0.1.7 只有
-  // describe() 一条路（`settings.get(ns)` 已删除）：locale 偏好走它，官方 locale 条目不在
-  // 组合里时找不到描述符 → value 为 undefined → 中文默认。本包自己的设置值面**不走**
-  // describe()——值面由设置条目挂的读数口给（见 settingsConfig）。
-  //
-  // 偏好读一次即缓存，靠宿主推送失效：describe() 不便宜（installed dsh-settings 对**每个**
-  // 活跃条目做 schema.toJSON() + JSON.stringify 算 revision，再投影 value/base/user 三份），
-  // 而 tools.guard 是全仓最热的路径——每次 bash/edit/write 都过这道谓词。失效链：写配置
-  // → emit('app-boot/config-reload') → SettingsForms 监听它并 invalidate() → 微任务里
-  // describe() → 对 raw 变化的条目 emit('settings/document-updated', ns, revision)。
-  let cachedPreference: unknown = undefined;
-  let hasCachedPreference = false;
-  svc.on?.("settings/document-updated", (ns: unknown) => {
-    if (ns === LOCALE_SETTINGS_NAMESPACE) {
-      hasCachedPreference = false;
-    }
-  });
-
-  /** locale 条目的偏好值；未投影出来 → undefined（中文默认）。**缺席不缓存**：locale 条目
-   *  可能晚于本条目才到位，缓存一次缺席就把语言跟随永久钉死——代价只是缺席时每次判定多
-   *  一次 describe()。 */
-  const localePreferenceOf = (): unknown => {
-    if (!hasCachedPreference) {
-      const row = svc.settings.describe().find((desc) => desc.ns === LOCALE_SETTINGS_NAMESPACE);
-      if (row !== undefined) {
-        cachedPreference = row.value;
-        hasCachedPreference = true;
-      }
-    }
-    return hasCachedPreference ? cachedPreference : undefined;
-  };
-
-  const localeMessages = (): DangerGuardMessages =>
-    messagesFor(MESSAGES, resolveLocalePreference(localePreferenceOf()));
+  const localeMessages = localeMessagesOf(svc);
 
   const factGate = new FactGate();
   // 判定统计的客户端读面（**可选**：探不到注册口就什么都不装）。挂在**这一半**而不是设置半，
@@ -3470,34 +3427,18 @@ export function apply(ctx: Context): void {
         );
       };
       sample(judge.cost);
-      const bashDenial = judge.denial;
-      if (bashDenial === undefined) {
-        // 2) 密钥/凭据路径编辑
-        const secret = secretJudgeOf(wiring, exec, rt, name, args);
-        sample(secret.cost);
-        // 3) 事实强制门（强校验：持续拒绝到取证齐备为止）。目标路径经 editTargetPath 归一化，
-        //    与取证记账（callPathOf）同一个键形；上报签名用类别级稳定键（目标路径改放 evidence）。
-        deny = secret.reason ?? factGateDenyOf(wiring, exec, rt, name, args);
-      } else {
+      const decideBash = (denial: BashDenial): string | undefined => {
         // 处置由**档位表**与**逐命中实际处置**共同给（`lib/mode-policy.ts` + 沙箱覆盖）：
         // 同一枚规则键在不同权限预设下结论不同，而 `ask` 档由 `tools/pre-execute` 的审批
         // 通道收口 —— 两条路用同一个工厂、同一份实际处置规则，所以同一枚命中不会在两处得到
-        // 不同结论，也不会被"排序时 deny、处置时 allow"的空档吞掉。收口走 `verdictOf`：
-        // "排序与收口同一处置"由结构保证，手写 `decideRule(facts, key)`（漏掉覆盖）的
-        // 写法在这里没有成员可调。
-        const { command, key, fix } = bashDenial;
+        // 不同结论，也不会被"排序时 deny、处置时 allow"的空档吞掉。收口走 `verdictOf`。
+        const { command, key, fix } = denial;
         const { verdict, facts: covered } = effective.verdictOf(key, fix);
+        let decision: string | undefined;
         // 三档收口：allow 只记读数（沙箱让路不算"放过"——那是交给宿主拦），
         // deny 交给下面的工厂出文案与上报，ask 什么都不做。
-        if (verdict === "allow") {
-          // 沙箱让路那格交给宿主收口，不计入"本档放过了什么"，也不算规则被遵守。
-          if (!(key === "rmrf" && covered.sandboxCovers)) {
-            noteAllowedHit(key, facts.mode);
-            // 放行也是「规则被遵守」：这张 armed 卡唯一能拿到 suppressed 的来源。
-            reportPass(reportContextOf(wiring, exec), DANGEROUS_BASH_CATEGORY, command, judge.cost);
-          }
-        } else if (verdict === "deny") {
-          deny = denyFromPolicy({
+        if (verdict === "deny") {
+          decision = denyFromPolicy({
             wiring,
             exec,
             name,
@@ -3508,7 +3449,34 @@ export function apply(ctx: Context): void {
             messages,
             cost: judge.cost,
           });
+        } else if (verdict === "allow" && !(key === "rmrf" && covered.sandboxCovers)) {
+          // 沙箱让路那格交给宿主收口，不计入"本档放过了什么"，也不算规则被遵守。
+          noteAllowedHit(key, facts.mode);
+          // 放行也是「规则被遵守」：这张 armed 卡唯一能拿到 suppressed 的来源。
+          reportPass(reportContextOf(wiring, exec), DANGEROUS_BASH_CATEGORY, command, judge.cost);
         }
+        return decision;
+      };
+      const bashDenial = judge.denial;
+      if (bashDenial === undefined) {
+        // 2) 密钥/凭据路径编辑 → 3) 事实强制门（`apply_patch` 逐目标过门）。
+        const { deny: writeDeny, secretCost } = writeGateDecisionOf(
+          {
+            scan: writeTargetsOf,
+            secret: (tool, toolArgs) => secretJudgeOf(wiring, exec, rt, tool, toolArgs),
+            fact: (tool, toolArgs, targets) =>
+              factGateDenyOf(wiring, exec, rt, { name: tool, args: toolArgs, targets }),
+            opaque: messages.applyPatchOpaque,
+          },
+          name,
+          args,
+        );
+        if (secretCost !== undefined) {
+          sample(secretCost);
+        }
+        deny = writeDeny;
+      } else {
+        deny = decideBash(bashDenial);
       }
     }
     return deny;

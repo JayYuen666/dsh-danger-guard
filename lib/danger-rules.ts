@@ -3109,7 +3109,7 @@ function commandDanger(
  * - edit / write（dsh-tool-fs）→ args.file_path（兼容 args.path）；
  * - str_replace_editor（dsh-tool-str-replace-editor 并存编辑器）→ args.path，
  *   但 command=view 是只读，返回 null（不拦、不过事实门）；
- * - 其它工具 → null。
+ * - 其它工具 → null（`apply_patch` 是多目标，由 host 的 `writeTargetsOf` 逐枚解析）。
  * 放宽到这里会让只读工具也过"首次编辑先给事实"的门，那是死锁而不是防护。
  */
 export function editTargetPath(

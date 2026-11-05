@@ -49,7 +49,9 @@ interface MockCtx {
   settings: { describe: () => { ns: string; value: unknown; revision: number }[] };
   get: (name: string) => unknown;
   effect: (fn: () => (() => void) | undefined, label?: string) => void;
-  inject?: (deps: string[], activate: (child: { sessionProjections: unknown }) => void) => void;
+  inject?: (deps: string[], activate: (child: { sessionProjections: unknown }) => unknown) => void;
+  /** 每条注入回调的返回值。宿主靠它做子 fiber 的 setup 屏障，所以这一位必须是 thenable。 */
+  injectionResults: unknown[];
   value: Config;
   guardInstalled: { fn: (exec: Record<string, unknown>) => string | undefined } | null;
   effects: (() => void)[];
@@ -113,6 +115,7 @@ function createMockCtx(
     guardInstalled: null,
     effects: [],
     effectLabels: [],
+    injectionResults: [],
     projections,
     provide: { value: options.provideProjections ?? true },
     tools: {
@@ -136,7 +139,7 @@ function createMockCtx(
     inject(deps, activate) {
       // cordis 语义：依赖到位才激活回调，缺席时整条路径不运行。
       if (deps.includes("sessionProjections") && ctx.provide.value) {
-        activate({ sessionProjections: registry });
+        ctx.injectionResults.push(activate({ sessionProjections: registry }));
       }
     },
   };
@@ -445,6 +448,29 @@ describe("w5 注册的两种协议与卸载", () => {
     denyOf(ctx, guardExec("s-post", log, after));
     assert.equal(ctx.projections.handleReads.length, 1, "卸载后不再走投影读口");
     assert.ok(after.value > 0, "回到扫描");
+  });
+
+  it("注入回调把注册交回成 thenable：读口随回调兑现就位，不是后台挂上", async () => {
+    const log = evidenceLog();
+    const ctx = createMockCtx({ protocol: "handle" });
+    applyPlugin(ctx);
+    const [setup] = ctx.injectionResults;
+    assert.equal(
+      typeof (setup as { then?: unknown } | undefined)?.then,
+      "function",
+      "回调必须把这次注册交回给宿主——cordis 按子 fiber 的 setup 屏障等待它",
+    );
+    ctx.projections.fold.value = foldOf(log);
+    // 兑现之前注册还在飞：这一格钉的是「读口不是提前发布的」，也是 `void` 写法回潮时唯一的红点。
+    const early = { value: 0 };
+    denyOf(ctx, guardExec("s-early", log, early));
+    assert.equal(ctx.projections.handleReads.length, 0, "注册未兑现前不许走投影读口");
+    assert.ok(early.value > 0, "注册未兑现时回退扫描");
+    await setup;
+    const late = { value: 0 };
+    denyOf(ctx, guardExec("s-late", log, late));
+    assert.equal(ctx.projections.handleReads.length, 1, "兑现后走投影读口");
+    assert.equal(late.value, 0, "兑现后不再扫全量日志");
   });
 
   it("读口内部抛错 ⇒ 交回无台账并回退扫描，异常不冒进判定链", async () => {

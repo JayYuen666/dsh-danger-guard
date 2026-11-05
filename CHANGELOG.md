@@ -1,3 +1,20 @@
+## 0.1.13
+
+`apply_patch` 纳入三条防线；宿主开发基线抬到 `0.2.2-rc.1`，支持窗口滚到 `^0.2.1-rc.5 || ^0.2.2-alpha.3`，`engines.node` 地板抬到 `>=24.9.0`；设置卡的组件面改由 shared 的 `./client` 供。默认配置与拦截行为不变，需要留意的是 `engines.node` 抬高后 node 22 装不上本包，以及窗口滚动后安装器的 peer 落点。
+
+### Added
+
+- **`apply_patch` 覆盖**：凭据路径、首次编辑事实门与写台账都按补丁的每个操作目标检查；move 的源与目的路径都算。补丁解析用 shared 的官方 `dsh-fs-patch` 封装；空补丁、解析失败或目标数超过预算时 fail-closed。
+
+### Changed
+
+- **宿主开发基线**：`devDependencies` 的 `@deepseek-ai/dsh-*` 全族抬到 `0.2.2-rc.1`，`@deepseek-ai/cordis` 抬到 `4.1.0`，`@deepseek-ai/schemastery` 抬到 `3.19.0`；`@deepseek-ai/dsh-ptc-runtime` 从 devDependencies 移除（源码与测试都不再引用它）。根 catalog 与 overrides 的投影同步，`pnpm-lock.yaml` 随之重解。
+- **支持窗口与 Node 地板**：`engines.dsh` 与四枚 `@deepseek-ai/dsh*` peer 由 `^0.2.1-rc.3 || ^0.2.2-alpha.2` 改为 `^0.2.1-rc.5 || ^0.2.2-alpha.3`；`@deepseek-ai/schemastery` 的 peer 由 `^3.18.6-alpha.1` 放宽为 `^3.18.5 || ^3.18.6-alpha.1`，好让宿主两条线各自的实装版本（rc 线 `3.18.5`、`0.2.2-rc` 线 `3.19.0`）都能被同一条范围收下；devDependencies 仍是精确钉版，那是编译期的纪律。`engines.node` 由 `>=22.12.0` 抬到 `>=24.9.0`：`0.2.2` 线宿主自己的地板就是这一枚，写低了等于承诺一个宿主不会启动的运行环境。
+- **卡片组件改由 shared 的 `./client` 供**：`src/client-entry.ts` 与 `src/stats-reader.ts` 的运行期值导入从 `./lib/card-ui`、`./lib/card-diff`、`./lib/record` 迁到 `./client`，`package.json` 新增 `dsh.client.external`，`build-client.mjs` 的外置清单同步；`cordis.patch.yml` 因此插入一条**不写 id** 的 `@jayyuen66/dsh-plugin-shared` 组件行——写 id 会在插件页多出一个可关闭的组件，关掉后本包设置卡失去组件供应。shared 的声明下限随之抬到 `^0.2.4`。
+- **CI 的 node 矩阵收敛**：`ci.yml` 的 `node: [22, 24]` 加 macOS 排除改为单格 `node: [24.9]`，`ci.yml` 与 `publish.yml` 的 `node-version` 由 `24` 改为 `24.9`，与 `engines.node` 同值；门禁跑在一个本包已声明不支持的运行环境上，证的是别的东西。
+- **拦截半体积预算随 `apply_patch` 上浮**：`test/dist-size.test.ts` 的预算由 125,500 B 抬到 128,000 B（实测 126,645 B，余量口径不变）。
+- **文档纠偏**：dsh 徽章由 `^0.2.1-rc.3` 抬到 `^0.2.1-rc.5`，与 `engines.dsh` 首条同值；「确认它真的在工作」里 `--no-verify` 那一档写反了——`noVerify` 四档全拒（`lib/mode-policy.ts` 的 `BASE` 表每一列都是 `deny`，自动审查档也硬拒），原文却写「自动审查放行」，读的人会以为换档就能过；`factGateEnabled` 的管辖面补上「补丁目标无法完整核对时的拒绝不在它管辖内」；组合层的条目数由「两行」改为「三条条目」，并写明 shared 那一行刻意不写 id 的后果；双语两侧各补上对方已有的一句（英文侧的事实门逐目标、中文侧的官方补丁解析器）。
+
 ## 0.1.12
 
 开发基线抬到 `0.2.2-alpha.3`，宿主支持窗口从单条范围改成两条宿主线的并集；默认配置与拦截行为不变。同一批改动按审查判据加固了测试与发布链：补上几条点名成因的红，替掉两处只会抛裸 `ENOENT` 或静默放过的形状。需要留意的是发布元数据——`peerDependencies` 与 `engines.dsh` 现在覆盖 `0.2.1-rc.3` 与 `0.2.2-alpha.2` 两条线，安装器的 peer 解析因此会落到较新的那一支。另有一处真实宿主上的修复：设置卡的统计块此前在浏览器里渲染成一行 `…validate is not a function`，见 Fixed 第一条。

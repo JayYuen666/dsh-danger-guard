@@ -11,8 +11,8 @@
   <a href="https://www.npmjs.com/package/@jayyuen66/dsh-danger-guard"><img src="https://img.shields.io/npm/d18m/@jayyuen66/dsh-danger-guard?style=flat-square" alt="npm downloads (18 months)" /></a>
   <a href="https://github.com/JayYuen666/dsh-danger-guard/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-danger-guard/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
-  <img src="https://img.shields.io/badge/node-%3E%3D22.12-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.3-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/node-%3E%3D24.9-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.5-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -54,9 +54,9 @@
 - **它拦截，不是建议。** 判定挂在 `ctx.tools.guard` 的同步谓词上：返回字符串即拒绝该次调用。宿主把理由变成这次调用的错误结果，所以模型读到的是"为什么被拒、改成什么写法"，不是静默失败。
 - **三条防线：**
   - `bash` / `pwsh` 危险命令（`lib/danger-rules.ts` 的 `bashVerdictOf`）：git 钩子绕过、灾难性 `rm`、下载即执行、长驻 dev server、git 破坏族、基础设施破坏族。
-  - 编辑/写类工具上的凭据与密钥路径（`secretPathDeny`）——按**参数键形**识别，**不看工具名**，因为工具名会随 provider 漂移。
+  - 编辑/写类工具上的凭据与密钥路径（`secretPathDeny`）——单目标编辑器按**参数键形**识别，`apply_patch` 走官方补丁解析器取目标，**不看工具名**，因为工具名会随 provider 漂移。
     - 编辑面还有**第二枚**拒绝键 `opaqueTarget`：目标路径长到超出可判定上限时，既没确认为凭据、也没确认不是，所以判拒绝，文案是"别原样重试、把路径贴给用户确认"。与 bash 侧 `nestedShellUnconfirmed` 同一个原则——**判不了不等于安全**。（超长的**命令**走的是 `nestedShellUnconfirmed`。）
-  - 首次编辑事实门（`lib/fact-gate.ts`）：没读过目标就改，或碰了高风险面却没有层证据，会被拒，并把缺的证据一并附上。
+  - 首次编辑事实门（`lib/fact-gate.ts`）：没读过目标就改，或碰了高风险面却没有层证据，会被拒，并把缺的证据一并附上。`apply_patch` **按每个操作目标逐枚过门**（move 的源与目的都算）；空补丁、官方解析器不接受的补丁、或目标数超出 `APPLY_PATCH_TARGET_LIMIT`（128）时整条拒绝而不是部分生效，且这条拒绝**不受 `factGateEnabled` 影响**。
     - 「读过」只认**成功的**调用：证据台账按 `callId` 串联 `tool/call` 与 `tool/result`，缺 `callId` 的调用状态未知，**不算证据**（真宿主先记调用再派发，一条还没执行或已失败的调用在日志里与成功的长得一样）。
     - 「读到的是哪一版」在 `lib/read-basis.ts`：观测基线与失效点同一条记录，且**只在拿到成功结果之后**才提交——一次失败或被拦的读不会把基线推向前而吞掉中间发生的外部改动；外部改动判出来之后一直有效，直到真的补上一次成功读取（或预检把正文当场递进结果里）。
 - **预检自己把那份证据取到手**（两个面挂两条瀑布，分工按"证据在什么时刻才真的算被看见"定）：
@@ -87,8 +87,8 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 
 卸载：`dsh plugin --profile web remove @jayyuen66/dsh-danger-guard`。包在公共 npm 上，安装不需要凭据，也不需要配作用域源。
 
-- **要求 Node.js `>= 22.12`。** 本包是纯 ESM；正是这个下限让 ESM 入口的 `require()` 形式可用，所以声明了 `engines.node`。当前 `0.2.2-alpha.3` 宿主自身要求 Node `>= 24.9.0`；那一档来自宿主，不是本包的 `engines.node`。
-- **要求宿主 `dsh` 满足 `engines.dsh` 的 `^0.2.1-rc.3 || ^0.2.2-alpha.2`（覆盖 `0.2.1-rc.3` 与 `0.2.2-alpha.2` 两条宿主线，上限仍是 `<0.3.0`）。** `0.2.2-alpha.3` 只是发布时点已取证的最高版本，不是区间上限。宿主真正读的是 `engines.dsh`（`^0.2.1-rc.3 || ^0.2.2-alpha.2`），而且它**单独决定**：`evaluatePluginCompatibility` 在 `engines.dsh` 那一支就返回了，根本走不到读 `peerDependencies` 的那段——所以 `@deepseek-ai/dsh*` 那几枚 peer 在这里不参与兼容判定。预发布版本参与范围比较。宿主在 `0.2.1-rc.3` 到 `<0.3.0` 之间都满足；`0.3.0` 及以后不满足，要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。`@deepseek-ai/dsh*` 那几枚 peer 写同一条支持窗口范围，因为运行期那几份由宿主提供；`@deepseek-ai/schemastery` 仍钉宿主自带的那一版。`devDependencies` 里的精确钉版才是那条**独立的编译期纪律**（由 `test/publish-manifest.test.ts` 钉住）：本插件的类型与名义品牌与宿主 ABI 耦合，"自动跟上去"正是宿主类型面被装出第二份的那条路。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证（判据是宿主 `--dump-config` 里本包的层行；设置卡与它的命名空间调用另在发布基线上全量取证一次），窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
+- **要求 Node.js `>= 24.9`。** 本包是纯 ESM；正是这个下限让 ESM 入口的 `require()` 形式可用，所以声明了 `engines.node`。这个数字取自宿主自己的地板：`0.2.2` 系列从 `alpha.2` 起每一版宿主都声明 Node `>= 24.9.0`，把这里写得更低等于承诺一个宿主起不来的运行时。
+- **要求宿主 `dsh` 满足 `engines.dsh` 的 `^0.2.1-rc.5 || ^0.2.2-alpha.3`（覆盖 `0.2.1-rc.5` 与 `0.2.2-alpha.3` 两条宿主线，上限仍是 `<0.3.0`）。** `0.2.2-rc.1` 只是发布时点已取证的最高版本，不是区间上限。宿主真正读的是 `engines.dsh`（`^0.2.1-rc.5 || ^0.2.2-alpha.3`），而且它**单独决定**：`evaluatePluginCompatibility` 在 `engines.dsh` 那一支就返回了，根本走不到读 `peerDependencies` 的那段——所以 `@deepseek-ai/dsh*` 那几枚 peer 在这里不参与兼容判定。预发布版本参与范围比较。宿主在 `0.2.1-rc.5` 到 `<0.3.0` 之间都满足；`0.3.0` 及以后不满足，要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。`@deepseek-ai/dsh*` 那几枚 peer 写同一条支持窗口范围，因为运行期那几份由宿主提供；`@deepseek-ai/schemastery` 写窗口 `^3.18.5 || ^3.18.6-alpha.1`，两条宿主线各自的副本都收得下（`0.2.1-rc` 线是 `3.18.5`，`0.2.2-rc` 线解析到 `3.19.0`）；在这里钉一个精确值，正是 npm 更严格的 peer 解析在另一条线上止步 `ERESOLVE` 的原因。`devDependencies` 里的精确钉版才是那条**独立的编译期纪律**（由 `test/publish-manifest.test.ts` 钉住）：本插件的类型与名义品牌与宿主 ABI 耦合，"自动跟上去"正是宿主类型面被装出第二份的那条路。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证（判据是宿主 `--dump-config` 里本包的层行；设置卡与它的命名空间调用另在发布基线上全量取证一次），窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **`dependencies` 里不放任何 `@deepseek-ai/*`，这是契约**（`test/publish-manifest.test.ts` 钉着）。消费方的 profile 用 `nodeLinker: hoisted` 且 `autoInstallPeers: false` 安装，于是写在 `dependencies` 里的宿主包会被落成**真实目录**，与运行中的宿主已加载的那份并存。`@deepseek-ai/dsh-tools` 的工具运行期调度键是普通 `Symbol`（不是 `Symbol.for`），符号身份按模块实例算：宿主从 profile 副本上读那个键拿到 `undefined`，于是**每一次原生工具调用都抛**——而构建、类型检查、覆盖率门禁在此之前全部照绿。peer 与 devDependencies 都不会进 profile，所以都物化不出第二份。
 - **按值导入的宿主包必须保持外部化。** `@deepseek-ai/dsh-brand` 与 `@deepseek-ai/schemastery` 是值导入（`brandNumber`、`import Schema from …`）。外部化名单读 `dependencies` ∪ `peerDependencies`；只写 `devDependencies` 会被打包器把官方函数体内联进产物，本包就各持一份官方构造器。必需 peer 同时满足两件事：说明符仍是外部的，而消费方 profile 不多装任何东西。`zod` 是普通依赖（由 `lib/tool-ledger.ts` 与设置卡的 `src/stats-reader.ts` 值导入）。
 - **产物刻意压缩**（`build-host.mjs` 的 `minify: true`）。`test/build-host.test.ts` 用容忍空白的正则钉住 `host.js` 与 `settings.js` 里的裸说明符（压缩后写作 `from"x"`），外部化本身则走 chunk 的 `inlinedModules` 清单做结构性判据——按函数名做文本断言在 mangle 之后会永远变绿。
@@ -105,7 +105,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 1. **已装载**：设置页出现「danger-guard 危险拦截」这一行，且 `dsh --profile web --dump-config` 出现本包的层。
    - `--dump-config` 是唯一被接受的"进了层栈"信号，而它**不是只读命令**——它会重写该 profile 的根装配文件。所以判读要分别捕获 stdout 与 stderr；未匹配的 patch 目标只出现在 stderr，只看退出码什么都证明不了。
    - 层行可能是 `# == <层>`，也可能是 `# == <层>, patched by <路径>`；判据必须容得下后者，否则它会对着真实存在的层报"没装"。
-2. **有拦截**：在一个会拦它的预设下（仅可查看、工作区内修改与完全权限都拦；自动审查档放行），让 agent 跑 `git commit --no-verify`。这次调用本身必须失败并给出 `Error: <理由>` 与一条出路。若"行为毫无变化"，读法是**闸门没装**，不是规则太松。
+2. **有拦截**：让 agent 跑 `git commit --no-verify`——`noVerify` **四档全拒**（仅可查看、工作区内修改、完全权限与自动审查都拦；绕 git 钩子不是沙箱面能放出去的许可）。这次调用本身必须失败并给出 `Error: <理由>` 与一条出路。若"行为毫无变化"，读法是**闸门没装**，不是规则太松。
 3. **设置**：打开卡片改一个值，`保存` 由 disabled 转 enabled，写入回 200。非本机 loopback 页面上控件禁用并显示只读状态。
 4. **读数**：打开卡片（以及手动「刷新」）会走一次 `dangerGuardStats` 命名空间的 Remote 调用。按需拉取、不订阅——判定统计只在 agent 干活时变，而跨宿主重连缓存一份旧值正是这套设计要避开的失效。
 
@@ -122,8 +122,8 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 在 dsh 里启用
 
 - 组合包形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，由 `dsh plugin add/remove` 维护装配层。
-- 补丁是**两行（bulkhead / 隔舱）**：`- id: danger-guard`（拦截半，**没有 `Config`**，name 指向包本体）与 `- id: danger-guard-settings`（设置半，严格 schema，name 指向 `./settings` 子路径）。
-  - 卡片只由第一行带出：宿主只对**裸包名**条目扫 `dsh.client`，所以设置行写成子路径是有意的，不是漏改。
+- 补丁带**三条条目**：`- name: "@jayyuen66/dsh-plugin-shared"`（卡片组件的供应行，**刻意不写 `id`**，所以插件页不会把它列成可停用组件），其后是**隔舱那两行（bulkhead）**：`- id: danger-guard`（拦截半，**没有 `Config`**，name 指向包本体）与 `- id: danger-guard-settings`（设置半，严格 schema，name 指向 `./settings` 子路径）。
+  - 卡片只由拦截那一行带出：宿主只对**裸包名**条目扫 `dsh.client`，所以设置行写成子路径是有意的，不是漏改。
   - 卡片只在 web 平台装载，位置是设置页插件列表里的「danger-guard 危险拦截」。
 - 部署默认值写在**设置那一行**的 `config:` 上；优先级是 设置卡运行时值 > 行 config > 内置底座（`lib/settings-schema.ts` 的 `BUILTIN_BASE`）。
   - 行里的显式 `undefined` 不覆盖底座；非法数值（如 `maxDenies: 0`）回落内置默认——`0` 等于把事实门整道关掉。
@@ -149,7 +149,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 | 字段 | 类型 | 默认值 | 作用 |
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | 总开关；`false` 时三类判定全部静默，连教训上报也不发 |
-| `factGateEnabled` | boolean | `true` | 只关首次编辑事实门；危险命令与密钥面照拦 |
+| `factGateEnabled` | boolean | `true` | 只关首次编辑事实门；危险命令、密钥面，以及 `apply_patch` 目标无法完整核对时的拒绝照拦 |
 | `preflightEnabled` | boolean | `true` | 编辑前预检。关掉只是退回"拒绝后由模型自己补证"，判据一条不减 |
 | `judgeStats` | boolean | `true` | 采样判定耗时与输入规模：本地滚动摘要，加上装了 lesson-loop 时每次判定一条 `judge-cost` pass（只带面名/毫秒/字符数）。卡片上的统计读数不受它管，它也不管拒绝上报里那几格 `judgeMs` |
 | `maxDenies` | natural，1–5 | `2` | 同一目标连续"未收敛"拒绝的次数上限，超过即配额放行并告警 |
@@ -206,7 +206,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 - **干跑修饰不进判据**（`Remove-Item -WhatIf -Recurse ~` 照拦）。`-WhatIf` / `-Confirm` 只是让 pwsh 打印将做什么；把干跑算成一类可豁免形态是一个还没人拍板的策略决定，所以现状按现状钉住。
 - **裸 `~user`（词尾无分隔符）不收。** `rm -rf ~root` 展开成什么取决于本机账号表，而本闸既不碰文件系统也不查用户。**带分隔符的 `~user/…` 已收**。
 - **PATH 上的解释器跑代码串一律需确认。** `python3 -c "print(1)"` 是良性的，也仍要确认——这是"看不见就不静默放行"的定价。
-- **`bash` 重定向写入不在事实门覆盖面。** 门禁挂在 `edit` / `write` 两类工具上；`printf > f`、`tee`、`cat >`、`sed -i` 绕过"先取证"这条。纳入它要解析 shell 重定向与就地编辑器。
+- **`bash` 重定向写入不在事实门覆盖面。** 门禁挂在 `edit` / `write` / `apply_patch` 三类工具上；`printf > f`、`tee`、`cat >`、`sed -i` 绕过"先取证"这条。纳入它要解析 shell 重定向与就地编辑器。
 - **少数 `ask` 档形态是盲问。** 裸 `git checkout <path>` 与"切分支"在词法上不可分（显式的 `checkout <rev> <path>` 会判），`git push --force` 不解析目标分支。经 shell 重定向落笔的改动、以及目标在会话外被改动的残窗，同理。
 - **MSYS/Cygwin 挂载形态不折算。** 真实 Windows 宿主上 `rm -rf /c/Windows/System32` 要一张挂载表，那是新依赖加新设计决定。
 - **内容自证上限为 1 MiB。** 把一次 mtime 跳变归因给本会话自己那次编辑，要把目标读回来找写入的文本。超过这个大小就把结论记为「不知」，不在同步的工具调用主路径上整份读入，于是这次改动按外部改动处理：下一次编辑之前需要一次成功的 read。

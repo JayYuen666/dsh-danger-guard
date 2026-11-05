@@ -122,6 +122,10 @@ const SHAPE_TARGET = fx(SRC_DIR, "shape.ts");
 /** 事实门夹具的编辑目标（七处 exec 载荷共用一枚路径，散着写改一处就漏）。 */
 const EDIT_TARGET_PATH = path.join(FIXTURE_ROOT, "src", "a.ts");
 
+/** apply_patch 夹具的起止行（多条用例共用，避免重复字符串计数）。 */
+const PATCH_BEGIN = "*** Begin Patch";
+const PATCH_END = "*** End Patch";
+
 /** 项目源目录：取证日志里 grep/zg 检索的**作用域**起点（层覆盖判据吃的是它）。 */
 const SRC_DIR_PATH = path.join(FIXTURE_ROOT, "src");
 
@@ -562,6 +566,28 @@ describe("danger-guard host 接线", () => {
     assert.match(secret, /密钥|凭据/u);
   });
 
+  it("apply_patch：补丁内每个文件都过密钥闸；空/非法补丁 fail-closed", () => {
+    const secretPatch = [
+      PATCH_BEGIN,
+      `*** Add File: ${fx(".ssh", "id_rsa")}`,
+      "+token",
+      PATCH_END,
+    ].join("\n");
+    const secret = ctx.guardInstalled!.fn({
+      name: "apply_patch",
+      arguments: { input: secretPatch },
+    });
+    assert.ok(secret !== undefined, "补丁里的凭据路径必须拦");
+    assert.match(secret, /密钥|凭据/u);
+
+    const malformed = ctx.guardInstalled!.fn({
+      name: "apply_patch",
+      arguments: { input: "not a patch" },
+    });
+    assert.ok(malformed !== undefined, "无法解析的补丁必须 fail-closed");
+    assert.match(malformed, /无法完整核对|apply_patch/u);
+  });
+
   it("b1: guard rejects rm -rf / under both bash and pwsh names (no dead shell branch)", () => {
     const bashBlocked = ctx.guardInstalled!.fn({
       name: "bash",
@@ -644,6 +670,49 @@ describe("danger-guard host 接线", () => {
       fail(),
     ];
     assert.ok(ctx.guardInstalled!.fn(withLog(failLog, "sref")) !== undefined, "失败 grep 仍拒");
+  });
+
+  it("apply_patch 的既有调用进入写台账（含 move 目的路径）", () => {
+    const target = EDIT_TARGET_PATH;
+    const { call, ok } = makeEvents();
+    const withLog = makeWithLog(target, "s-ap");
+    const updatePatch = [
+      PATCH_BEGIN,
+      `*** Update File: ${target}`,
+      "@@",
+      "-old",
+      "+new",
+      PATCH_END,
+    ].join("\n");
+    const updateLog = [call("apply_patch", { input: updatePatch }), ok()];
+    const updateDenied = ctx.guardInstalled!.fn(withLog(updateLog, "s-ap1"));
+    assert.ok(updateDenied !== undefined, "同一目标的 apply_patch 记成写证据；未 read 仍拒");
+
+    const other = fx(SRC_DIR, "other.ts");
+    const otherPatch = [
+      PATCH_BEGIN,
+      `*** Update File: ${other}`,
+      "@@",
+      "-old",
+      "+new",
+      PATCH_END,
+    ].join("\n");
+    const otherLog = [call("apply_patch", { input: otherPatch }), ok()];
+    const otherDenied = ctx.guardInstalled!.fn(withLog(otherLog, "s-ap2"));
+    assert.ok(otherDenied !== undefined, "不相关目标的补丁不冒充本目标的写证据");
+
+    const movePatch = [
+      PATCH_BEGIN,
+      `*** Update File: ${other}`,
+      `*** Move to: ${target}`,
+      "@@",
+      "-old",
+      "+new",
+      PATCH_END,
+    ].join("\n");
+    const moveLog = [call("apply_patch", { input: movePatch }), ok()];
+    const moveDenied = ctx.guardInstalled!.fn(withLog(moveLog, "s-ap3"));
+    assert.ok(moveDenied !== undefined, "move 的目的路径也算本目标的写证据");
   });
 
   it("子调用接线：PTC 模式下 run_code 的 tool/ptc-dispatch-start/dispatch 同样算取证", () => {

@@ -17,8 +17,9 @@ import {
   SaveBar,
   Section,
   ToggleField,
+  diffTouched,
   splitHint,
-} from "@jayyuen66/dsh-plugin-shared/lib/card-ui";
+} from "@jayyuen66/dsh-plugin-shared/client";
 import type { ReactNode } from "react";
 import type { Context } from "@deepseek-ai/cordis";
 import type { BuiltInLocaleId } from "@deepseek-ai/dsh-client-locale/client";
@@ -37,7 +38,6 @@ import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-
 // （见下面 CardSnapshot）。lint 的 `require-module-specifiers` 禁空 import specifier，
 // 正合本意——载入官方契约就该同时*用上*它。
 import type { ConfigPageForm } from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
-import { diffTouched } from "@jayyuen66/dsh-plugin-shared/lib/card-diff";
 import {
   DEFAULT_MAX_DENIES,
   DEFAULT_SMALL_EDIT_CHARS,

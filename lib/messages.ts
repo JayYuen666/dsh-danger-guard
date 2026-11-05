@@ -101,6 +101,8 @@ export interface DangerGuardMessages {
   readonly secretPath: string;
   /** 编辑目标长到没法判（超出可判定长度上限）→ 需用户确认。 */
   readonly opaqueTarget: string;
+  /** `apply_patch` 的目标无法完整核对（空补丁、语法被拒、或目标数超过事实门预算）。 */
+  readonly applyPatchOpaque: string;
   // ── 事实强制门（lib/fact-gate.ts + host.ts 的缺项 hint）─────────────────
   /** 证据不可判定 → 交互式确认。 */
   readonly indeterminate: string;
@@ -319,6 +321,10 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
     opaqueTarget:
       "[danger-guard] 编辑目标的路径长到无法判定（超出可判定长度上限），既没确认为凭据文件、" +
       "也没确认不是。请勿原样重试，把目标路径贴给用户确认；或改用正常的短路径。",
+    applyPatchOpaque:
+      "[danger-guard] 这次 apply_patch 的补丁目标无法完整核对：补丁为空、语法未被官方解析器接受，" +
+      "或涉及的文件数超过本闸门的逐目标预算。凭据路径与先读证据都没有被检查，已拒绝。" +
+      "请把改动拆成 edit/write，或把补丁写成合法的 `*** Begin Patch` 语法、减少涉及文件数后重试。",
     indeterminate:
       "[fact-gate] 无法自动验证取证（本会话历史不可得）。若确无法取证，请向用户确认是否放行本次编辑；" +
       "用户同意放行可在设置卡临时关闭「编辑事实门」，编辑完成后再开启。此路径不消耗放行次数。",
@@ -538,6 +544,12 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "[danger-guard] The edit target path is too long to judge (past the judgeable length limit): " +
       "it is neither confirmed nor cleared as a credential file. Do not retry it verbatim — paste " +
       "the path to the user to confirm, or use a normal short path.",
+    applyPatchOpaque:
+      "[danger-guard] The targets of this apply_patch call cannot be checked completely: the patch " +
+      "is empty, the official parser rejected its syntax, or it names more files than this gate's " +
+      "per-target budget. Credential paths and read-before-edit evidence were not checked, so the " +
+      "call is denied. Split the change into edit/write calls, or use valid `*** Begin Patch` " +
+      "syntax with fewer files and retry.",
     indeterminate:
       "[fact-gate] Evidence cannot be verified automatically (this session's history is " +
       "unavailable). If gathering it really is impossible, ask the user whether to allow this " +

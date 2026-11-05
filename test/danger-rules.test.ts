@@ -24,6 +24,7 @@ import type {
   EditDenial,
   EditDenialKey,
 } from "../lib/danger-rules.ts";
+
 // 断段层单独成文件（lib/command-segments.ts）：这几条用例钉的就是"段在哪里断"，不是命中哪条规则。
 import {
   hasUnclosedQuote,
@@ -37,6 +38,9 @@ import { UI_MESSAGES } from "../src/ui-messages.ts";
 import { askRequestOf } from "../lib/confirm.ts";
 import { decideRule } from "../lib/mode-policy.ts";
 import type { PolicyFacts } from "../lib/mode-policy.ts";
+
+/** 补丁起始行在多个用例里出现；抽常量避免规则的重复字符串计数。 */
+const PATCH_BEGIN = "*** Begin Patch";
 
 /** 「工作区内修改」档：能问、不是自动审查、沙箱不管这次目标 —— 两族 ask 规则在这档仍走审批。 */
 const WORKSPACE_ASKABLE: PolicyFacts = {
@@ -4008,7 +4012,7 @@ describe("复评修复回归：密钥面的相对路径、词法归一与长度�
     const writes: Record<string, unknown>[] = [
       { command: "view", old_str: "a", new_str: "b" },
       { command: "view", edits: [{ old_str: "a", new_str: "b" }] },
-      { command: "view", patch: "*** Begin Patch" },
+      { command: "view", patch: PATCH_BEGIN },
       { action: "read", new_text: "x" },
       { action: "read", diff: "@@ -1 +1 @@" },
       { command: "view", insert_line: 3, new_str: "x" },
@@ -4034,6 +4038,34 @@ describe("复评修复回归：密钥面的相对路径、词法归一与长度�
     assert.deepEqual(
       declaredTargets({ file_path: RELATIVE_SSH_ID_RSA, command: "read", action: "view" }),
       [],
+    );
+  });
+
+  it("apply_patch 从补丁正文取全部目标（含 move 的目的路径）", () => {
+    const patch = [
+      PATCH_BEGIN,
+      "*** Add File: a.ts",
+      "+a",
+      "*** Update File: b.ts",
+      "*** Move to: c.ts",
+      "@@",
+      "-old",
+      "+new",
+      "*** Delete File: d.ts",
+      "*** End Patch",
+    ].join("\n");
+    assert.deepEqual(declaredTargets({ input: patch }), ["a.ts", "b.ts", "c.ts", "d.ts"]);
+
+    const secretPatch = [
+      PATCH_BEGIN,
+      `*** Add File: ${RELATIVE_SSH_ID_RSA}`,
+      "+token",
+      "*** End Patch",
+    ].join("\n");
+    assert.equal(
+      editDanger({ input: secretPatch })?.key,
+      "secretPath",
+      "补丁里的凭据路径同样要过密钥闸",
     );
   });
 

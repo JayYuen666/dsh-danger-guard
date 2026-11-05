@@ -3,6 +3,11 @@
 // 目标按参数键认，不按工具名认：工具名随 provider 与版本变，而"要动哪个文件"就在参数里。
 // 只读动作的声明**不能压过写载荷**：宿主工具参数根是开放对象，`write`/`edit` 的 execute
 // 只读自己认识的字段，多带的 `action:"read"` 不会改变真实写入行为。
+//
+// `apply_patch` 的目标不在参数键里，而在 `input` 的补丁正文；解析交给 shared 里那份
+// 官方 `dsh-fs-patch` 的同一实现，避免这里手抄一套会与宿主漂移的补丁文法。
+
+import { applyPatchTargetsOf } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 
 /** 标量目标键。 */
 const TARGET_PATH_KEYS = [
@@ -152,6 +157,10 @@ export function declaredTargets(args: Record<string, unknown> | undefined | null
     }
   };
   if (args && typeof args === "object" && !readOnlyAction(args)) {
+    for (const target of applyPatchTargetsOf(args)) {
+      add(target.path);
+      add(target.moveTo);
+    }
     for (const key of TARGET_PATH_KEYS) {
       add(args[key]);
     }

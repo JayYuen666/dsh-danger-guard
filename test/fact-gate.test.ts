@@ -136,6 +136,12 @@ describe("factGate：强校验状态机", () => {
     assert.match(msg, /zg_search/u, "取证清单要求优先 zg_search，无索引退 grep");
   });
 
+  it("apply_patch 也走同一状态机（多目标由 host 逐枚调用）", () => {
+    const allowed = gate.check("apply_patch", PROJECT_TARGET_FILE, undefined, done());
+    assert.equal(pass(allowed), true);
+    assert.equal(gate.check("apply_patch", "/w/proj/src/c.ts").kind, "deny");
+  });
+
   it("先调查再动手（首次调用时证据已具备）→ 直接放行，不惩罚已取证行为", () => {
     // 模型先 read+grep 过该文件才发起编辑：门禁的目的已达到，无需再拦一次。
     const okA = pass(gate.check("edit", PROJECT_TARGET_FILE, undefined, done()));

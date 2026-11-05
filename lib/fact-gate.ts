@@ -221,8 +221,9 @@ export function renderDenyMessage(denial: FactDenial, messages: DangerGuardMessa
 }
 
 /** 编辑类工具名。str_replace_editor 是 dsh-base 并存的另一套编辑器
- *  （create/str_replace/insert 是写操作）；view 只读，host 侧把它算作 read 证据。 */
-const EDIT_TOOLS = new Set(["edit", "write", "str_replace_editor"]);
+ *  （create/str_replace/insert 是写操作）；view 只读，host 侧把它算作 read 证据。
+ *  apply_patch 是多目标补丁，目标清单由 host 侧逐枚传入；这里只负责状态机按键分片。 */
+const EDIT_TOOLS = new Set(["edit", "write", "str_replace_editor", "apply_patch"]);
 
 /** 明确放行的文件面：**文档格式**扩展名（md/markdown/rst/adoc）。
  *  `.txt` 不在其中：它是通用文本容器，`CMakeLists.txt` / `requirements.txt` 是构建与

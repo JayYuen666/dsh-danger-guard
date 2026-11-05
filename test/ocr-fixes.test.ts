@@ -244,7 +244,7 @@ const sectionHeadingOf = async (file: string, needle: string): Promise<string> =
 
 describe("`preflightEnabled` 那一节的小节标题不许承诺重启（#23）", () => {
   it("两语标题都只说「卡上没有旋钮」", async () => {
-    // 全 16 个字段都被标成 volatile（`test/host.test.ts` 钉住该集合），所以本包不存在
+    // 全部设置字段都被标成 volatile（`test/host.test.ts` 钉住该集合），所以本包不存在
     // 需要重启的值；修前两语标题分别写着 "Restart-only and card-missing values" 与
     // 「要重启的，以及卡上没有的」，与同节正文「不需要重启」互相矛盾。
     const headings = await Promise.all([
