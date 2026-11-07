@@ -1,16 +1,16 @@
-// lib/judge-stats.ts —— 判定成本的**本地滚动统计**（每面一窗），零宿主依赖。
+// lib/judge-stats.ts —— 判定成本的**本地滚动统计**（每一类各一窗），零宿主依赖。
 //
 import type { StatsSnapshot } from "./stats-shape.ts";
 import type { BashDenialKey, RuleTier } from "./danger-rules.ts";
 import type { GuardMode } from "./mode-policy.ts";
-// 形状单源在零依赖叶子模块（为什么：见那枚模块的文件头）。这里转发一枚，
+// 形状唯一来源在零依赖叶子模块（为什么：见那枚模块的文件头）。这里转发一枚，
 // 让本模块的既有消费方（host 的接线与用例）不必改导入路径。
 export type { StatsSnapshot } from "./stats-shape.ts";
 
 // 为什么单列一枚模块：这段东西的读者不止判定链——它还是一条**运维读数**（设置卡那侧要
 // 展示"最近拦了什么、慢在哪"），而 host.ts 已经顶到 `eslint/max-lines` 的 2000 行预算
 // （新增规则族的接线没地方放）。抽出来两件事一起解掉：本模块只依赖 `console`，
-// 判定链与卡片读数口都单向依赖它。
+// 判定链与卡片取值接口都单向依赖它。
 //
 // 出域那一格**不在这里**：`judge-cost` 的 lesson-loop pass 由调用点按 `judgeStats` 决定
 // （见 `lib/lesson-report.ts` 的 `sampleJudge`）——本模块只管本地（进程内、退出即消失）。
@@ -19,13 +19,13 @@ export type { StatsSnapshot } from "./stats-shape.ts";
 // 前者是设置卡那一栏要展示的主体（"rmrf 5 · noVerify 4"），后者是"防死锁出口被用到了"
 // 这条信号——它比任何命中数都更该被用户看见。
 
-/** 一次判定的成本样本（哪个面、多久、多大的输入）。 */
+/** 一次判定的成本样本（哪一处、多久、多大的输入）。 */
 export interface JudgeCost {
   face: string;
   ms: number;
   length: number;
   /** 这次调用**真的跑过判定**。缺省时按 `length > 0` 折算——bash 面的零长度样本在 host
-   *  侧本来的含义就是"这一面没跑判定"；显式置位让"判定过但输入为空"不再被吞
+   *  侧本来的含义就是"这边没跑判定"；显式置位让"判定过但输入为空"不再被吞
    *  （`length` 是输入规模，不是判定标志，拿它当哨兵会把空输入的判定整个丢掉）。 */
   judged?: boolean;
 }
@@ -40,18 +40,18 @@ const MS_EDGES = [1, 5, 25, SLOW_JUDGE_MS];
 /** 输入规模分档上界（字符）：常见命令量级一路到长度上限附近。 */
 const LEN_EDGES = [256, 4096, 65_536, 262_144];
 
-/** 每个面各自一窗样本。上限就是 `STATS_WINDOW_CALLS` 条/面——不是无界历史。 */
+/** 每一类各自一窗样本。上限就是 `STATS_WINDOW_CALLS` 条/面——不是无界历史。 */
 const samplesByFace = new Map<string, JudgeCost[]>();
 
-/** 累计判定次数与其中的慢判定次数（按面）。**不受滚动窗口影响**：窗口每满一次就清零，
- *  而"这个面一共判了多少次"是只增的——两者回答的是不同问题。 */
+/** 累计判定次数与其中的慢判定次数（按这一类）。**不受滚动窗口影响**：窗口每满一次就清零，
+ *  而"这一类一共判了多少次"是只增的——两者回答的是不同问题。 */
 const callsByFace = new Map<string, number>();
 const slowByFace = new Map<string, number>();
 /** 规则键命中次数（按键）。`deny` 与 `ask` 两挡**分开记**：用户要看的是"拦了什么"，
  *  而"直接拒了"与"问过用户"是两种不同的结论。 */
 const hitsByKey = new Map<string, number>();
 const askByKey = new Map<string, number>();
-/** 档位 → 计数表（`noteRuleHit` 单源；新档位加入 `RuleTier` 时这里必须补格）。 */
+/** 档位 → 计数表（`noteRuleHit` 唯一来源；新档位加入 `RuleTier` 时这里必须补格）。 */
 const HIT_TABLE: Readonly<Record<RuleTier, Map<string, number>>> = {
   ask: askByKey,
   deny: hitsByKey,
@@ -61,7 +61,7 @@ const allowedByKey = new Map<string, number>();
 const allowedByMode = new Map<string, number>();
 /** 被去重掉的询问（同一会话同一命令重复命中）。 */
 const skippedByKey = new Map<string, number>();
-/** 事实门配额放行次数（防死锁出口）。它一旦非零，那条目标就带着长期免检。 */
+/** 事实门配额放行次数（防死锁出口）。它一旦非零，那个目标就带着长期免检。 */
 let quotaReleases = 0;
 
 /** 计数进表（`count` 的语义是"加一"而不是"设值"，写成函数免得每处都写一遍 `?? 0`）。 */
@@ -90,7 +90,7 @@ function bucketText(
   return parts.join(" ");
 }
 
-/** 没跑过判定 = 零长度样本（非 bash 调用的 bash 面、无路径键调用的密钥面）不发；
+/** 没跑过判定 = 零长度样本（非 bash 调用的 bash 面、无路径键调用的密钥检查）不发；
  *  调用方显式置位 `judged` 时以它为准。 */
 export const isJudged = (cost: JudgeCost): boolean => cost.judged ?? cost.length > 0;
 

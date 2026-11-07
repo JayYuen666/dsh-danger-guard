@@ -20,6 +20,6 @@ export type FixRole = "bypassFlag" | "disasterTarget";
  *  类型本身允许空数组，新增产出点时由它负责。 */
 export interface Fix {
   role: FixRole;
-  /** 点名的词面，按首次出现序、去重。 */
+  /** 点名的用词，按首次出现序、去重。 */
   offending: readonly string[];
 }

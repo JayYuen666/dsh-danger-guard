@@ -1,4 +1,4 @@
-// shell 词法状态机的属性面：切词、断段、结构视图、引号闭合对**任意**输入都必须有确定
+// shell 词法状态机的属性测试：切词、断段、结构视图、引号闭合对**任意**输入都必须有确定
 // 结论（判定链跑在每次工具调用的热路径上，抛错就是中断整趟判定）。结构视图「清空引号内
 // 字面文本」与 lexTokens「值剥离定界符、空词保留」两条契约用生成器扫描；lruPut 与
 // AskDeduper 的有界性按各自头注写明的契约独立建模。
@@ -77,7 +77,7 @@ describe("structureView 的「清空引号内字面文本」契约", () => {
     );
   });
 
-  it("真实执行面的管道保留：结构视图里段分隔符仍在（probe 实测 'echo \"\"| rm -rf /' 形）", () => {
+  it("真实执行过程的管道保留：结构视图里段分隔符仍在（probe 实测 'echo \"\"| rm -rf /' 形）", () => {
     const view = structureView('echo "quoted literal" | rm -rf /');
     assert.ok(view.includes("|"), view);
     assert.equal(view.includes("quoted literal"), false);
@@ -161,7 +161,7 @@ describe("lruPut 的有界 FIFO 契约", () => {
     );
   });
 
-  it("容量 0 与负数 fail-closed：当场抛 RangeError，绝不静默退化", () => {
+  it("容量 0 与负数 fail-closed：当场抛 RangeError，绝不会静默退化", () => {
     for (const cap of [0, -1]) {
       assert.throws(() => {
         lruPut(new Map<string, string>(), "a", "1", cap);

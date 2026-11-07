@@ -15,7 +15,7 @@ const CLIENT_BUNDLE_SPEC = "../client.js";
 
 // 产物开 `minify: true` 之后，文本判据的**粒度**被两件事限死（都是实测）：
 //   ① 标识符（变量/函数/参数名）会被 mangle ⇒ `const inject = [...]`、`ctx.configForms.get(…)`
-//      这种**带名字**的判据全部失效（写下去就是恒绿/恒红的假门禁）；
+//      这种**带名字**的判据全部失效（写下去就是永远通过/永远失败的假门禁）；
 //   ② 引号会被换成最短的那个（实测压成了反引号）⇒ 判据里不能写死 `"`。
 // 剩下的可信粒度是**属性名**（不 mangle）与**字面量**（引号类型可容忍）。下面两条助手就是它。
 
@@ -78,7 +78,7 @@ await declareSchemaCoverage(import.meta.url, {
 });
 
 /** 读产物文本，缺文件时给出可行动指引：三处判据共用一份读取路径，
- *  免得产物缺失时两处报裸 ENOENT（只有路径、没有「先跑 build:client」那一层）。 */
+ *  免得产物缺失时两处报不带路径信息的 ENOENT（只有路径、没有「先跑 build:client」那一层）。 */
 async function clientBundleText(): Promise<string> {
   const clientJsPath = fileURLToPath(new URL(CLIENT_BUNDLE_SPEC, import.meta.url));
   const exists = await stat(clientJsPath)
@@ -101,7 +101,7 @@ describe("danger-guard client 构建", () => {
     // 框架 InjectFace/PropsHooks（client-runner）：注入 { hooks: { card } } → prop useCard
     assert.ok(text.includes("useCard"), "必须用 useCard 读快照");
     // ⚠ 判据粒度：原来的 `props.hooks.card` 在压缩产物里**不可能**出现（`props` 会被 mangle）
-    // ⇒ 那条恒绿。属性名不 mangle，所以钉**属性链**：真出现回归时产物里就是 `X.hooks.card`。
+    // ⇒ 那条永远通过。属性名不 mangle，所以钉**属性链**：真出现回归时产物里就是 `X.hooks.card`。
     assert.ok(!text.includes(".hooks.card"), "不得读会崩的 props.hooks.card 属性链");
   });
 
@@ -114,7 +114,7 @@ describe("danger-guard client 构建", () => {
       !text.includes(".validate("),
       "client.js 调用了 .validate(：宿主平台模块那一份 zod 没有这个方法",
     );
-    // 反向一侧：形状校验整条腿被删掉时，上面那条会因为「本来就没有」而恒绿。
+    // 反向一侧：形状校验整条腿被删掉时，上面那条会因为「本来就没有」而永远通过。
     assert.ok(
       text.includes(".safeParse("),
       "client.js 里没有 .safeParse(：跨进程返回值的形状校验不见了",
@@ -125,7 +125,7 @@ describe("danger-guard client 构建", () => {
     const text = await clientBundleText();
     // inject 清单是装配契约，产物里必须原样可查：`settingsScope` 在 installed 0.1.7 全树
     // 零命中，只要它回到清单里，整条 client 入口就挂不上（症状 = 设置卡静默消失）。
-    // 替代面 = configForms（installed dsh-client-ui-settings/lib/types/client/
+    // 替代入口 = configForms（installed dsh-client-ui-settings/lib/types/client/
     // config-form.d.ts:94-98 的 Context 增强 + :142 的 get<T>(entryId): ConfigForm<T>）。
     // 三项、顺序、闭合全钉死（不放宽为包含判定）：变量名会被 mangle，故判据钉数组项本身。
     assert.match(text, INJECT_LIST, "入口 inject 清单必须是 slots / configForms / locale 三项");
@@ -180,7 +180,7 @@ describe("单文件产物的输出守卫", () => {
     assert.throws(() => singleEntryChunk(output, "entry.ts"), /2 项输出/u);
   });
 
-  it("拒绝 asset：单文件产物没有落盘 asset 的位置", () => {
+  it("拒绝 asset：单文件产物没有写到磁盘 asset 的位置", () => {
     const output = [
       outputItem("chunk", ARTIFACT_FILE, { isEntry: true, code: CHUNK_CODE }),
       outputItem("asset", "x.css"),
@@ -200,7 +200,7 @@ describe("单文件产物的输出守卫", () => {
   });
 
   it("拒绝正文为空或纯空白的 entry chunk", () => {
-    // 只带 `// GENERATED` 头、正文为空时，产物在装载期才炸，而那时宿主只报一句与根因无关的
+    // 只带 `// GENERATED` 头、正文为空时，产物在装载期才炸，而那时宿主只报一句与真正的原因无关的
     // 解析错误。构建期是唯一能把它与"正常产物"分开的地方。
     for (const blank of ["", "   ", "\n\t "]) {
       const output = [outputItem("chunk", ARTIFACT_FILE, { isEntry: true, code: blank })];

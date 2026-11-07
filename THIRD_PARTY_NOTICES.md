@@ -32,10 +32,10 @@
 
 | 维度 | 上游 ECC | 本包 |
 | --- | --- | --- |
-| 事实门要求的四项 | 引用者 / 受影响公共接口 / **数据 schema 与日期格式** / 逐字引用用户指令 | 引用者（带工具白名单口径）/ 受影响公共接口 **与需同步的测试文档** / 逐字引用用户指令 |
+| 事实门要求的四项 | 引用者 / 受影响公共接口 / **数据 schema 与日期格式** / 逐字引用用户指令 | 引用者（带工具白名单规则）/ 受影响公共接口 **与需同步的测试文档** / 逐字引用用户指令 |
 | 拒绝文案 | 所有情形共用一段固定文本，拒绝满预算后改用单行简版 | **按成因定制**：没读过 / 调用失败过 / 被别的会话改过，三种缺项给出三种不同指令 |
 | 防死锁 | 拒绝次数用尽后降级为单行文本 | `maxDenies` 配额，且**缺项变少即视为正在收敛并重置计数** |
-| 结构 | 单个 hook 文件内自含状态与取证 | 纯状态机（`lib/fact-gate.ts`）/ 指令层（`lib/gap-directives.ts`）/ 检索口径层（`lib/ref-search-policy.ts`）三段分离，判定全部是纯函数 |
+| 结构 | 单个 hook 文件内自含状态与取证 | 纯状态机（`lib/fact-gate.ts`）/ 指令层（`lib/gap-directives.ts`）/ 检索规则层（`lib/ref-search-policy.ts`）三段分离，判定全部是纯函数 |
 | 危险命令判定 | 按 hook 场景分支 | 逐段状态机拆词（`lib/command-segments.ts`），对引号闭合与分词共用一台机器 |
 
 ### 移植的**不是**什么
@@ -105,22 +105,22 @@ SOFTWARE.
 ## 运行期依赖
 
 运行期依赖的许可由各自包随包分发，本包不重复其文本：`@deepseek-ai/dsh`（宿主本体：peer 里钉住
-它能承载本包的版本面，源码不 import 它）、`@deepseek-ai/dsh-brand`、`@deepseek-ai/dsh-llm`、
+它能承载本包的版本约定，源码不 import 它）、`@deepseek-ai/dsh-brand`、`@deepseek-ai/dsh-llm`、
 `@deepseek-ai/dsh-typert-protocol`、`@deepseek-ai/schemastery`、
 `@jayyuen66/dsh-plugin-shared`、`zod`。
 
-其中 `@deepseek-ai/dsh-brand` 虽看似只服务于类型，**仍必须是运行期依赖**：宿主类型面用
-品牌串做名义类型（nominal typing），构造品牌需要真实函数值而没有 type-only 的构造途径。
+其中 `@deepseek-ai/dsh-brand` 虽看似只服务于类型，**仍必须是运行期依赖**：宿主类型声明里用带 brand 标记的串
+做名义类型（nominal typing），而构造这种值需要真实函数值，没有 type-only 的构造途径。
 若把它降为 `devDependencies`，打包器会把构造函数体内联进产物，于是每个包各得一份官方
 构造函数，单例语义随之失效。外部化清单由 `@jayyuen66/dsh-plugin-shared/lib/build-host`
 从 `dependencies` ∪ `peerDependencies` 折出（`build-host.mjs` 只声明产物表）；
 `test/build-host.test.ts` 独立读 `package.json` 取同一份包名表，断言其中没有任何一个
 出现在产物的 `inlinedModules` 里。
 
-`@deepseek-ai/dsh-llm` 由预检以值引入（`createUserMessage`，注入给模型的消息），同一条口径：
+`@deepseek-ai/dsh-llm` 由预检以值引入（`createUserMessage`，注入给模型的消息），同一条规则：
 落 `peerDependencies`、产物里保持裸说明符 —— 内联等于每包各持一份官方的消息铸造与深冻结。
 
-`@deepseek-ai/dsh-typert-protocol` 由判定统计读数面（`lib/stats-remote.ts`）以值引入：要
+`@deepseek-ai/dsh-typert-protocol` 由判定统计读数（`lib/stats-remote.ts`）以值引入：要
 `extends TypertRemoteService` 并用 `@Remote` 标记端点，**两枚都是值，没有 type-only 的构造途径**
 （与 `brandNumber` 同族）。同样落 `peerDependencies`，产物里保持裸说明符；外部化清单
 由 shared 的 `buildHostEntries` 从 `dependencies` ∪ `peerDependencies` 折出，而

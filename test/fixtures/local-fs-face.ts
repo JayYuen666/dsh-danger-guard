@@ -5,7 +5,7 @@
 // 后端下不成立。单元层的 `ctx` 是手搓桩，装不了真后端，所以这里交回一份**同样按官方六位
 // 实现**的本地读法——它只在测试里用，可以随便 `node:fs`。
 //
-// 语义对齐清单（照 installed @deepseek-ai/dsh-fs 与 dsh-fs-local 的实现写，不是自造口径）：
+// 语义对齐清单（照 installed @deepseek-ai/dsh-fs 与 dsh-fs-local 的实现写，不是自造规则）：
 //  - `resolve` **跟**软链，并把路径折成稳定身份（真后端的 targetKey 就是 realpath 一族）；
 //    目标缺席时 realpath 最深存在祖先再接剩余段（官方叫"为创建而观测缺席路径"）；
 //  - `lstat` **不跟**最后一段，并能报出 `symlink`（官方明说这一位就是给"跟之前先拒掉"的用方）；

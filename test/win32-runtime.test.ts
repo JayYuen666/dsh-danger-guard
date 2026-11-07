@@ -45,7 +45,7 @@ vi.mock("node:os", async (importOriginal) => {
   // （漏掉它，将来任何一条用例读到平台就会拿到宿主的真实值而让结论随机器变），不是它此刻被断言过。
   // oxlint-disable-next-line unicorn/consistent-function-scoping
   const platform = (): string => "win32";
-  // 运行期命名空间上有 `default`（指向同一模块），类型面没有：经 unknown 取它，
+  // 运行期命名空间上有 `default`（指向同一模块），类型上没有：经 unknown 取它，
   // 让 `os.default.homedir()` 也落在桩上，而不是回到宿主真实家目录。
   const actualDefault =
     (actual as unknown as { readonly default?: typeof actual }).default ?? actual;

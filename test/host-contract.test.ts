@@ -9,8 +9,8 @@
 //   6. 总线 report/pass 异步落库（返回 rejected Promise）时失败同样可见——
 //      旧代码只有同步 catch，异步失败既不留日志又给进程留一枚未处理拒绝。
 //   7. 会话**当前**工作目录取自官方 `ctx.workingDirectory`（宿主 0.2.1-alpha.2 起
-//      `SessionHeader.cwd` 只剩创建期快照）：密钥面、事实门、上报三处都跟到 `cd` 之后；
-//      服务缺席或交出坏形状时退回 header.cwd——可选读面缺失绝不使拦截面下线。
+//      `SessionHeader.cwd` 只剩创建期快照）：密钥检查、事实门、上报三处都跟到 `cd` 之后；
+//      服务缺席或交出坏形状时退回 header.cwd——可选读取接口缺失绝不使拦截下线。
 import { describe, it } from "vitest";
 import os from "node:os";
 import path from "node:path";
@@ -25,9 +25,9 @@ import { SETTINGS_READER } from "../lib/settings-schema.ts";
 import { MESSAGES } from "../lib/messages.ts";
 import { BLAST_COMMANDS } from "../lib/blast-radius.ts";
 // 会话日志出自官方 SessionEvent 夹具构造器（信封必填位与 ToolCallId/MessageId/SessionSeq
-// 品牌都在夹具里补一次）；fx 前缀避开与本文件里 `const result = …` 之类局部量的遮蔽。
+// 的类型品牌都在夹具里补一次）；fx 前缀避开与本文件里 `const result = …` 之类局部量的遮蔽。
 import { call as fxCall, result as fxResult } from "./fixtures/events.ts";
-// 事件类型与生产面（host.ts）同源：官方判别联合由 shared 具名 re-export。
+// 事件类型与生产代码（host.ts）同源：官方判别联合由 shared 具名 re-export。
 import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 import type { Events } from "@deepseek-ai/cordis";
 
@@ -50,7 +50,7 @@ async function runPreExecute(ctx: MockCtx, exec: unknown): Promise<PreDecision> 
   return listener(exec, () => Promise.resolve({ kind: "allow" }));
 }
 
-/** 从一次 pre-execute 的结论里取出 `ask` 臂（官方 `PreToolDecision` 是判别联合：
+/** 从一次 pre-execute 的结论里取出 `ask` 分支（官方 `PreToolDecision` 是判别联合：
  *  不显式收窄就取不到 `reason`/`displayReason` —— 这正是"形状钉在官方声明上"的体现）。 */
 function askArmOf(decision: PreDecision): Extract<PreDecision, { kind: "ask" }> {
   if (decision.kind !== "ask") {
@@ -72,7 +72,7 @@ const FIXTURE_ROOT = path.resolve(path.parse(process.cwd()).root, "w", "proj");
 const LIVE_ROOT = path.resolve(path.parse(process.cwd()).root, "w", "live");
 
 /** 取证夹具的目标文件：五种 exec 形状（有/无事件流、有/无证据、零证据）都指向同一份路径，
- *  散着写字面量改一处就漏（断言的是夹具自己造的目标，不是生产面的常量）。 */
+ *  散着写字面量改一处就漏（断言的是夹具自己造的目标，不是生产代码的常量）。 */
 const EDIT_TARGET_PATH = path.join(FIXTURE_ROOT, "src", "cfg.ts");
 /** 临时项目里那份最简单的 TypeScript 源码（多处夹具共用，避免重复字面量）。 */
 const SIMPLE_TS_SOURCE = "export const a = 1;\n";
@@ -100,9 +100,9 @@ interface LessonLoopSpy {
 }
 
 /** report 载荷的断言形状（与 lesson-loop LessonLoopReporter.report 入参对齐）。
- *  `evidence` 在这里是**必填**：入参类型把它标成可选是总线侧的宽容，而生产面
+ *  `evidence` 在这里是**必填**：入参类型把它标成可选是总线侧的宽容，而生产代码
  *  `lib/lesson-report.ts` 的 `reportDeny` 把它列成必填形参并原样带上（唯一一处 `bus.report` 调用），
- *  所以断言侧按"发出必带"读——读它就不必再写 `?.`（那条守卫在类型面是空转）。 */
+ *  所以断言侧按"发出必带"读——读它就不必再写 `?.`（那条守卫在类型上不起作用）。 */
 interface ReportPayload {
   source: string;
   category: string;
@@ -124,13 +124,13 @@ interface MockCtx {
   settings: {
     describe: () => { ns: string; value: unknown; revision: number }[];
   };
-  /** 设置面读数（bulkhead 后由**设置条目**的读数口提供，见 get）。 */
+  /** 设置界面读数（bulkhead 后由**设置条目**的取值接口提供，见 get）。 */
   value: Config;
-  /** cordis 的可选服务读法：SETTINGS_READER = 设置条目读数口，lessonLoop = 教训总线，
+  /** cordis 的可选服务读法：SETTINGS_READER = 设置条目取值接口，lessonLoop = 教训总线，
    *  workingDirectory = 官方工作目录服务（宿主 0.2.1-alpha.2 起「会话当前目录」的唯一出处）。
    *  形状不校验（本字段就是拿来交坏形状的），缺省 = 宿主没装那个 bundle。 */
   workingDirectory?: unknown;
-  /** cordis 的可选服务读法：SETTINGS_READER = 设置条目读数口，lessonLoop = 教训总线。 */
+  /** cordis 的可选服务读法：SETTINGS_READER = 设置条目取值接口，lessonLoop = 教训总线。 */
   get?: (name: string) => unknown;
   on?: (event: string, listener: (session: { id?: unknown }) => void) => () => void;
   effect: (fn: () => (() => void) | undefined) => void;
@@ -140,7 +140,7 @@ interface MockCtx {
   reflect: { provide: (name: string, value?: unknown) => () => void };
   effects: (() => void)[];
   disposedHandlers: Map<string, ((session: { id?: unknown }) => void)[]>;
-  /** 除设置读数口/log 之外的可选服务面（`shell` 等）。缺省空表 = 未装配。 */
+  /** 除设置取值接口/log 之外的可选宿主服务（`shell` 等）。缺省空表 = 未装配。 */
   extraServices: Record<string, unknown>;
 }
 
@@ -238,7 +238,7 @@ function createMockCtx(bus: LessonLoopSpy = {}, value?: Partial<Config>): MockCt
       }
     },
   };
-  // 一个 get 同时供三件事：设置读数口（bulkhead 的值面通道）、教训总线、工作目录服务。
+  // 一个 get 同时供三件事：设置取值接口（bulkhead 的值通道）、教训总线、工作目录服务。
   ctx.get = (name: string): unknown => {
     if (name === SETTINGS_READER) {
       return { read: (): Config => ctx.value };
@@ -249,7 +249,7 @@ function createMockCtx(bus: LessonLoopSpy = {}, value?: Partial<Config>): MockCt
     if (name === "lessonLoop") {
       return ctx.bus;
     }
-    // 除这几枚之外的可选服务面（本包读的：`shell` —— 沙箱模式与爆炸半径预演）。
+    // 除这几枚之外的可选宿主服务（本包读的：`shell` —— 沙箱模式与爆炸半径预演）。
     // 缺省空表 = 未装配 ⇒ 与"没装执行器"同解（闸门照常拦，预演退回盲问）。
     return ctx.extraServices[name];
   };
@@ -320,7 +320,7 @@ function warnCapture(): { lines: string[]; restore: () => void } {
 }
 
 /**
- * 未处理拒绝探针：装一枚 process 级监听，把漏网的 rejection 收进数组。
+ * 未处理拒绝收集器：装一枚 process 级监听，把漏网的 rejection 收进数组。
  * `stop` 必须在 finally 里调用——vitest 的 worker 进程被所有用例共用，
  * 残留监听会把别人的 rejection 也算到本用例头上（反之卸载后漏出的 rejection
  * 仍会被 vitest 自己的监听抓到，那是一条独立的失败信号）。
@@ -455,7 +455,7 @@ describe("bash 闸的两种结论在总线侧必须可分辨（硬拒 vs 需确�
     // 两段合起来比一条会把出路那一行的存在与内容一起糊掉——而那正是"模型知道该改什么"。
     assert.ok(denied !== undefined, "预期被拦，实际放行");
     assert.ok(denied.startsWith(`${RMRF_MESSAGE}\n`), `拒绝理由结构变了：${denied}`);
-    assert.ok(denied.includes("/"), "出路未点名触发判据的目标");
+    assert.ok(denied.includes("/"), "出路没有点名触发判据的目标");
     assert.equal(reports.length, 1);
     const rep = reports[0] as ReportPayload;
     assert.equal(rep.category, BASH_DENIAL_CATEGORY);
@@ -466,13 +466,13 @@ describe("bash 闸的两种结论在总线侧必须可分辨（硬拒 vs 需确�
   it("`-c` 体未被检查 → 走 ask 通道（guard 不拒），同类别上报且标记需确认", async () => {
     const { ctx, reports } = reportSpy();
     applyPlugin(ctx);
-    // 结论一：**guard 不再拒它**。这一档的收口在 `tools/pre-execute` 的宿主审批上
+    // 结论一：**guard 不再拒它**。这一档的统一处理在 `tools/pre-execute` 的宿主审批上
     //（`RULE_TIER.nestedShellUnconfirmed === "ask"`）—— 旧实现把一段"请贴给用户确认"
     // 的文案丢回给模型，而模型完全可以无视它直接重试；改档后模型绕不过去。
     assert.equal(
       ctx.guardInstalled!.fn(bashUnconfirmedExec),
       undefined,
-      "ask 档不该由 guard 收口（两处都收口会让用户点了允许还是被拒）",
+      "ask 档不该由 guard 统一处理（两处都统一处理会让用户点了允许还是被拒）",
     );
     // 结论二：审批请求确实发出去了，并且把它翻成了宿主认的 `ask` 决定。
     const decision = askArmOf(await runPreExecute(ctx, bashUnconfirmedExec));
@@ -483,8 +483,8 @@ describe("bash 闸的两种结论在总线侧必须可分辨（硬拒 vs 需确�
       `${NESTED_SHELL_UNDETERMINED_MESSAGE}\n${MESSAGES.zh.noteUnknown}`,
     );
     // `displayReason` 官方定成 `{ readonly en: string; readonly [locale: string]: string }`
-    // —— 人读那一面（弹窗），与回给模型的 `reason` 同源同键。
-    // 弹窗那面 = 规则本文 + 该档位的说明（只交规则本文会让用户看不到"这是哪一档"）。
+    // —— 弹窗上给人读的那句，与回给模型的 `reason` 同源同键。
+    // 弹窗文案 = 规则本文 + 该档位的说明（只交规则本文会让用户看不到"这是哪一档"）。
     assert.deepEqual(decision.displayReason, {
       en: `${MESSAGES.en.nestedShellUnconfirmed}\n${MESSAGES.en.noteUnknown}`,
       zh: `${MESSAGES.zh.nestedShellUnconfirmed}\n${MESSAGES.zh.noteUnknown}`,
@@ -502,10 +502,10 @@ describe("bash 闸的两种结论在总线侧必须可分辨（硬拒 vs 需确�
     assert.notEqual(rep.detail, RMRF_MESSAGE, "两种结论的文案不同源，模型可分辨");
   });
 
-  it("ask 档**压不过** deny 档：同一串里既有需确认段又有灾难段 → 整串按硬拒收口", async () => {
+  it("ask 档**压不过** deny 档：同一串里既有需确认段又有灾难段 → 整串按硬拒统一处理", async () => {
     const { ctx, reports } = reportSpy();
     applyPlugin(ctx);
-    // 这是引入 ask 档带出来的漏拦面：`commandDanger` 原本"首命中即返回"，而 `ask` 档命中
+    // 这是引入 ask 档带出来的漏拦：`commandDanger` 原本"首命中即返回"，而 `ask` 档命中
     // 会让扫描提前收工 ⇒ 后一段的 `rm -rf /` **从未被判定**；用户点了允许之后 guard 跑起来
     // 看到的仍是 ask 结论（按 RULE_TIER 让路）⇒ 灾难执行。严重度择优把这条堵住。
     //
@@ -516,7 +516,7 @@ describe("bash 闸的两种结论在总线侧必须可分辨（硬拒 vs 需确�
     const command = 'python3 -c "print(1)" && rm -rf /';
     const denied = ctx.guardInstalled!.fn({ name: "bash", arguments: { command } });
     assert.ok(denied?.startsWith(`${RMRF_MESSAGE}\n`) === true, `整串应按 deny 收口：${denied}`);
-    // 已按 deny 收口的串**不该再弹审批** —— 否则 `deny` 那一段会被一并批准
+    // 已按 deny 统一处理的串**不该再弹审批** —— 否则 `deny` 那一段会被一并批准
     //（审批是整次调用的放行，没有"只批准后半段"这种语义）。
     const preDecision = await runPreExecute(ctx, { name: "bash", arguments: { command } });
     assert.notEqual(preDecision.kind, "ask", "已按 deny 收口的串不该再弹审批");
@@ -596,7 +596,7 @@ describe("enabled=false 时守卫完全静默（含总线与分片零副作用�
     assert.equal(reports.length, 0);
 
     // 「不建分片」以前只是标题里的一句话：三条断言都看不出分片状态，
-    // 停用期照样计数到配额的实现也会绿。读数口是引用即现读（与 host.ts 的 settingsConfig 同形），
+    // 停用期照样计数到配额的实现也会绿。取值接口是引用即现读（与 host.ts 的 settingsConfig 同形），
     // 所以就地切回 enabled 再用同一枚 session id 打：停用期若建过分片，这里会直接配额放行。
     // 后面三连是同一断言的反向一侧 —— 证明分片确实从这一句才开始建、且数得到配额，
     // 少了它，"首拒"可能只是因为判定链整个没跑。
@@ -605,7 +605,7 @@ describe("enabled=false 时守卫完全静默（含总线与分片零副作用�
       assert.equal(
         ctx.guardInstalled!.fn(editExecReadOnly(offId)),
         undefined,
-        `停用期第 ${round} 次：同一目标不得被记账`,
+        `停用期第 ${round} 次：同一目标不得被记录下来`,
       );
     }
     assert.equal(reports.length, 0, "停用期一条上报都没发");
@@ -636,13 +636,13 @@ describe("设置面故障时闸门必须 fail closed（bulkhead 隔舱后）", (
   // 越界值让**条目 fiber** 在 apply 之前就 FAILED（vendor/cordis/src/fiber.ts:50、:641-664），
   // 闸门整体下线：一行设置笔误 = 危险命令不再被拦。
   // 现在的形态（bulkhead）：严格 schema 搬去独立条目 danger-guard-settings，本条目读它
-  // 挂出的读数口。读数口不在（设置条目 FAILED / 被禁用 / 没装）时，本测试钉住同一组结论：
-  // 闸门照装、危险命令照拦、值面回到内置默认、并且**大声**告警。
+  // 挂出的取值接口。取值接口不在（设置条目 FAILED / 被禁用 / 没装）时，本测试钉住同一组结论：
+  // 闸门照装、危险命令照拦、值回到内置默认、并且**大声**告警。
   // 真实 fiber 级的隔离证据在 test/bulkhead-isolation.test.ts（真 cordis 运行时）。
-  it("设置读数口缺失 → 闸门仍挂载、按内置默认拦、降级告警只响一次", () => {
+  it("设置取值接口缺失 → 闸门仍挂载、按内置默认拦、降级告警只响一次", () => {
     const warns: string[] = [];
     const ctx = createMockCtx();
-    // 就地替换 get：模拟"设置条目 FAILED ⇒ 它没 provide 过读数口"。
+    // 就地替换 get：模拟"设置条目 FAILED ⇒ 它没 provide 过取值接口"。
     // 展开副本会让 guardInstalled 写到原对象上（断言就永远看不到闸门），所以逐字段改。
     ctx.get = (name: string): unknown => (name === "lessonLoop" ? ctx.bus : undefined);
     ctx.value = { ...ctx.value, maxDenies: 99 };
@@ -811,7 +811,7 @@ describe("判定耗时与解析形随上报一起发（长度上限要按真实�
     assert.equal(rep.evidence["judgeLength"], "rm -rf /".length, "签名就是这条命令，长度要能对上");
   });
 
-  it("密钥面载荷带 judgeMs；解析不出真实路径时不带 resolvedPaths", () => {
+  it("密钥检查载荷带 judgeMs；解析不出真实路径时不带 resolvedPaths", () => {
     const { ctx, reports } = reportSpy();
     applyPlugin(ctx);
     const reason = ctx.guardInstalled!.fn({
@@ -819,7 +819,7 @@ describe("判定耗时与解析形随上报一起发（长度上限要按真实�
       arguments: { file_path: path.join(FIXTURE_ROOT, ".ssh", "id_rsa") },
       agent: { session: { id: "s-1", header: { cwd: FIXTURE_ROOT } } },
     });
-    assert.equal(typeof reason, "string", "键形口径下只读工具翻凭据也拦");
+    assert.equal(typeof reason, "string", "按键形那条规则，只读工具翻凭据也拦");
     const rep = reports[0] as ReportPayload;
     assert.equal(rep.category, "secret-path");
     assert.equal(typeof rep.evidence["judgeMs"], "number");
@@ -839,9 +839,9 @@ describe("判定耗时与解析形随上报一起发（长度上限要按真实�
       });
       const rep = reports[0] as ReportPayload;
       // 交的是**清单**：本机 realpath 那一形在这里，官方后端那一形要 fs 面在位才有
-      //（这个桩没装 ⇒ 清单只有一枚；两形并列的判定面见 test/danger-rules.test.ts 与
+      //（这个桩没装 ⇒ 清单只有一枚；两形并列的判定见 test/danger-rules.test.ts 与
       // test/host-preflight.test.ts 的官方通道那组用例）。
-      // 期望值必须吃**产品所用的那一个** realpath 口径：产品走同步 `realpathSync`
+      // 期望值必须吃**产品所用的那一个** realpath 规则：产品走同步 `realpathSync`
       //（`host.ts` 的 realpathOf —— 同步判定链只有它付得起），而 Windows 上同步版会把
       // 8.3 短名（`RUNNER~1`）展开成长名；`node:fs/promises` 的 `realpath` 与它不保证逐字同形。
       // 拿另一个 API 的产物当期望，测的就不是产品行为。
@@ -870,7 +870,7 @@ describe("判定耗时与解析形随上报一起发（长度上限要按真实�
 
   it("未判定样本在 noteJudgeCost 入口就被拒收：零长度不污染 calls，显式 judged 置位优先", () => {
     const before = statsSnapshot().calls["contract-unjudged"] ?? 0;
-    // 零长度且未显式判定 = "这一面没跑判定"：不发样本（calls 不涨、窗口不进）。
+    // 零长度且未显式判定 = "这边没跑判定"：不发样本（calls 不涨、窗口不进）。
     noteJudgeCost({ face: "contract-unjudged", ms: 5, length: 0 });
     assert.equal(statsSnapshot().calls["contract-unjudged"] ?? 0, before, "零长度样本被拒收");
     // 判定真的发生过（哪怕输入为空）：host 以 judged 置位表态，样本照记。
@@ -944,7 +944,7 @@ describe("判定耗时与解析形随上报一起发（长度上限要按真实�
 
   it("判定放行时发一条 dangerous-bash 的 pass（armed 卡拿「被遵守」的唯一来源）", () => {
     // 没有这条 pass，`dangerous-bash` 那张 armed 卡的 suppressed 恒为 0、复发率分母为零，
-    // 衰减裁决只能停在「不可判定」，而注入面照旧把「被遵守 0 次」说给模型听。
+    // 衰减裁决只能停在「不可判定」，而注入照旧把「被遵守 0 次」说给模型听。
     const passes: unknown[] = [];
     const ctx = createMockCtx({
       report: () => ({}),
@@ -968,7 +968,7 @@ describe("判定耗时与解析形随上报一起发（长度上限要按真实�
     );
     assert.equal(rulePasses.length, 1, "一次放行判定发一条规则 pass");
     const payload = rulePasses[0] as Record<string, unknown>;
-    assert.equal(payload["signature"], "vite", "签名是命令原文（与 deny 那条同口径）");
+    assert.equal(payload["signature"], "vite", "签名是命令原文（与 deny 那条同一条规则）");
   });
 
   it("判定为 deny 时不发 dangerous-bash 的 pass", () => {
@@ -998,7 +998,7 @@ describe("判定耗时与解析形随上报一起发（长度上限要按真实�
  *  - `stale`：会话创建时的目录——`SessionHeader.cwd` 从 alpha.2 起一直报它，里面是空的；
  *  - `live` ：`cd` 之后的当前目录，其中一条 `ssh` 软链把凭据树（`real/.ssh`）接出来。
  *  相对目标 `ssh/authorized_keys` 在两枚基准下落到不同绝对路径，于是**同一枚调用**就能分辨
- *  判据吃的是哪一枚目录：只读 header.cwd 的旧口径在 live 下判不到那棵树，是真实漏拦
+ * 判据吃的是哪一枚目录：只读 header.cwd 的旧规则在 live 下判不到凭据树，是真实漏拦
  *  （宿主 bash 已改读服务，tool-bash src/index.ts:487）。 */
 async function makeCwdPair(): Promise<{ root: string; stale: string; live: string }> {
   const root = await mkdtemp(path.join(os.tmpdir(), "dgc-workdir-"));
@@ -1021,10 +1021,10 @@ const relEditExec = (id: string, stale: string): GuardExecParam => ({
 });
 
 describe("会话当前工作目录：判据跟到 cd 之后（ctx.workingDirectory）", () => {
-  it("密钥面吃当前目录：服务在位时软链出的凭据树露形，旧口径同一枚调用判不到", async () => {
+  it("密钥检查吃当前目录：服务在位时软链出的凭据树露形，旧规则同一枚调用判不到", async () => {
     const { root, stale, live } = await makeCwdPair();
     try {
-      // 事实门关掉：本组这几条只看密钥面，别让配额轮次掺进结论。
+      // 事实门关掉：本组这几条只看密钥检查，别让配额轮次掺进结论。
       const legacy = createMockCtx({}, { factGateEnabled: false });
       applyPlugin(legacy);
       assert.equal(
@@ -1053,7 +1053,7 @@ describe("会话当前工作目录：判据跟到 cd 之后（ctx.workingDirecto
       assert.match(
         ctx.guardInstalled!.fn(relEditExec("wd-header", live)) ?? "",
         /密钥|凭据/u,
-        "可选读面缺失只是少跟一次 cd，不是判据下线",
+        "可选读取接口缺失只是少跟一次 cd，不是判据下线",
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -1084,14 +1084,14 @@ describe("会话当前工作目录：判据跟到 cd 之后（ctx.workingDirecto
     }
   });
 
-  it("会话不可得 ⇒ 不读服务也不炸：绝对路径的凭据形照判，相对 read 照常记账", () => {
+  it("会话不可得 ⇒ 不读服务也不炸：绝对路径的凭据形照判，相对 read 照常记录下来", () => {
     const ctx = createMockCtx({}, { factGateEnabled: false });
     ctx.workingDirectory = { get: () => LIVE_ROOT };
     applyPlugin(ctx);
     assert.match(
       ctx.guardInstalled!.fn({
         name: "edit",
-        // 声明形自己就带 .ssh：解析缺席也照拦（与「软链不再是出路」那组同一口径）。
+        // 声明形自己就带 .ssh：解析缺席也照拦（与「软链不再是出路」那组同一种做法）。
         arguments: { file_path: path.join(LIVE_ROOT, "real", ".ssh", "id_rsa") },
       }) ?? "",
       /密钥|凭据/u,
@@ -1099,11 +1099,11 @@ describe("会话当前工作目录：判据跟到 cd 之后（ctx.workingDirecto
     assert.equal(
       ctx.guardInstalled!.fn({ name: "read", arguments: { file_path: "a.ts" } }),
       undefined,
-      "没有会话就没有目录基准，按 resolveTarget 的无 cwd 口径走，不抛错",
+      "没有会话就没有目录基准，按 resolveTarget 的无 cwd 规则走，不抛错",
     );
   });
 
-  it("事实门吃当前目录：cd 后读过的绝对路径与相对目标同键即放行，旧口径对不上键 ⇒ 照拒", async () => {
+  it("事实门吃当前目录：cd 后读过的绝对路径与相对目标同键即放行，旧规则对不上键 ⇒ 照拒", async () => {
     const { root, stale, live } = await makeCwdPair();
     try {
       const src = path.join(live, "src");
@@ -1133,7 +1133,7 @@ describe("会话当前工作目录：判据跟到 cd 之后（ctx.workingDirecto
       assert.notEqual(
         legacy.guardInstalled!.fn(exec("wd-fact-legacy")),
         undefined,
-        "旧口径把目标归一到创建期目录的另一条路径上 ⇒ 事实门仍要取证",
+        "旧规则把目标归一到创建期目录的另一条路径上 ⇒ 事实门仍要取证",
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -1198,7 +1198,7 @@ describe("会话当前工作目录：判据跟到 cd 之后（ctx.workingDirecto
     assert.equal(reports[0]?.cwd, LIVE_ROOT, "deny 上报的归因目录是当前目录");
     ctx.value = { ...ctx.value, judgeStats: true };
     ctx.guardInstalled!.fn(bashExec);
-    assert.equal(passes[0]?.["cwd"], LIVE_ROOT, "pass 载荷同口径（不是第二份读法）");
+    assert.equal(passes[0]?.["cwd"], LIVE_ROOT, "pass 载荷按同一条规则取目录（不是第二份读法）");
     const legacyReports: ReportPayload[] = [];
     const legacy = createMockCtx({
       report: (input) => {
@@ -1213,7 +1213,7 @@ describe("会话当前工作目录：判据跟到 cd 之后（ctx.workingDirecto
 });
 
 describe("检索工具的在位探测：指令只点这台宿主上注册着的那几枚", () => {
-  // 默认名单里 grep/glob 出自宿主 stock 目录，而 zg_search（连它的 root/query/fts/vector 参数面）
+  // 默认名单里 grep/glob 出自宿主 stock 目录，而 zg_search（连它的 root/query/fts/vector 参数表）
   // 出自**另一枚插件**（本仓同级包 @jayyuen66/dsh-zvec-grep）——装不装逐台不同。没装还点名它，
   // 就是"指令不可照做"：模型照着烧一次调用，然后被同一个缺项再拒一次。
   it("stock 名字（grep/glob）免探一律点；插件工具按探测结果点", () => {
@@ -1223,7 +1223,7 @@ describe("检索工具的在位探测：指令只点这台宿主上注册着的�
     const message = ctx.guardInstalled!.fn(editWithoutEvidence("s-present"));
     assert.equal(typeof message, "string");
     assert.match(message!, /grep/u, "stock 名字照点");
-    // 实测缺陷回归：program 模式下探测面看不见原生工具，早前这下会把 glob 一并摘掉 ⇒
+    // 实测缺陷回归：program 模式下探测这一步看不见原生工具，早前这下会把 glob 一并摘掉 ⇒
     // 引用证据只剩 zg_search。stock 名字随宿主出厂，探测不到不等于不存在。
     assert.match(message!, /glob/u, "stock 名字免探，探不到也不该把门关上");
     assert.doesNotMatch(message!, /zg_search/u, "插件工具没注册就不点（探测口存在的意义）");
@@ -1250,8 +1250,8 @@ describe("检索工具的在位探测：指令只点这台宿主上注册着的�
 
 // ── 爆炸半径预演：宿主侧那一趟（`ctx.shell` 的读法与接线）──────────────────────
 //
-// 量证据那一半的判据与渲染在 `lib/blast-radius.ts`（那边的专测逐条钉上限、渲染与失败面）；
-// 这一组钉的是**宿主侧**：读哪个服务、跑的是哪条命令、`deny` 档不跑、缺席时不静默换命令。
+// 量证据那一半的判据与渲染在 `lib/blast-radius.ts`（那边的专测逐条钉上限、渲染与失败）；
+// 这一组钉的是**宿主侧**：读哪个服务、跑的是哪条命令、`deny` 档不跑、缺席时不会静默换命令。
 /** 一台"记下入参、答给定输出"的假执行器（提到模块层：它不捕获任何外层变量，
  *  放 describe 体内每轮重建 —— lint 的 consistent-function-scoping 盯这个）。 */
 const shellSpyOf = (text: string): { specs: unknown[]; shell: Record<string, unknown> } => {
@@ -1271,7 +1271,7 @@ const shellSpyOf = (text: string): { specs: unknown[]; shell: Record<string, unk
   };
 };
 
-/** 装一台带假执行器的 spine（`extraServices` 是 mock 的可选服务面）。 */
+/** 装一台带假执行器的 spine（`extraServices` 是 mock 的可选宿主服务）。 */
 const bootWithShell = (text: string): { ctx: MockCtx; specs: unknown[] } => {
   const { ctx } = reportSpy();
   const { specs, shell } = shellSpyOf(text);
@@ -1301,7 +1301,7 @@ describe("ask 档的爆炸半径预演：宿主侧读法与接线", () => {
     );
   });
 
-  it("执行面没带 signal ⇒ 只留墙钟上限，预演照跑（可选位缺席不许变成异常）", async () => {
+  it("执行过程没带 signal ⇒ 只留墙钟上限，预演照跑（可选位缺席不许变成异常）", async () => {
     const { ctx, specs } = bootWithShell(" M src/a.ts\n?? scratch.txt");
     // 官方 `ToolExecution` 把 `signal` 标成必填，但本包一律按形状收；这里送一枚缺席的，
     // 钉住"少一位可选读数"只退化成"只有墙钟上限"，而不是让 `AbortSignal.any` 拿到 undefined 抛错。
@@ -1310,7 +1310,7 @@ describe("ask 档的爆炸半径预演：宿主侧读法与接线", () => {
     assert.match(decision.reason ?? "", /scratch\.txt/u, "预演照跑，证据照给");
   });
 
-  it("执行器缺席 ⇒ **盲问**：审批照旧问，只是没有证据（不静默换一条命令）", async () => {
+  it("执行器缺席 ⇒ **盲问**：审批照旧问，只是没有证据（不会静默换一条命令）", async () => {
     const { ctx } = reportSpy();
     applyPlugin(ctx);
     const decision = askArmOf(await runPreExecute(ctx, resetExec));

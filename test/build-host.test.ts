@@ -2,17 +2,17 @@
 // 的 buildEntry 出）里跨包依赖必须保持 external 裸说明符，**且一个都不许被内联**。
 //
 // 为什么本包单独建一份：此前登记的已知缺口——danger-guard 是 9 个发布包里唯一没有
-// build-host 钉测的，它的 brandNumber 被内联进 host.js 时没人能发现。dsh-brand 这类值导入
+// build-host 这条检查盯着的，它的 brandNumber 被内联进 host.js 时没人能发现。dsh-brand 这类值导入
 // 必须外部化（落 peer，不进 dependencies，见 publish-manifest 的门禁）的裁定落地之后，
 // "说明符在、函数体不在"两件事必须一起钉：只钉前者会在有人把它挪出外部化名单（只留 dev）时
 // 静默放行内联产物。
 //
 // ⚠ 产物开 `minify: true` 之后，这两条判据的写法都变过（各有实测依据）：
-//   ① 说明符判据必须**容忍空白**：minify 后是 `from"x"` 而不是 `from "x"`（早先一句
-//      "压缩后说明符双双消失"的结论就是被这个空格差异骗出来的 —— 说明符一直在）。
+//   ①说明符判据必须**容忍空白**：minify 后是 `from"x"` 而不是 `from "x"`（早先一句
+//      "压缩后说明符双双消失"的结论就是被这个空格差异骗出来的 ——说明符一直在）。
 //   ② 内联判据必须是**结构性**的：minify 会 mangle 内联体的函数名（实测：故意不外部化
 //      dsh-brand 时，产物里 `brandNumber` 一次都查不到）⇒ 任何 `/function brandNumber\(/`
-//      式的文本判据都变成**恒绿**，而恒绿的闸门比没有闸门更坏。所以改成看 chunk 的
+//      式的文本判据都变成**永远通过**，而永远通过的闸门比没有闸门更坏。所以改成看 chunk 的
 //      `moduleIds`：本包源码全是绝对路径，依赖表里的包名一旦出现在那张清单里就是内联。
 //
 // settings.js 那条反向断言（**不**含 dsh-brand）同样是钉死的：实测设置半不导入 brand，
@@ -25,7 +25,7 @@ import path from "node:path";
 import { buildHostReport, buildSettingsReport, singleEntryChunk } from "../build-host.mjs";
 import { hostFreshnessEvidence } from "./host-freshness.ts";
 
-/** 残留的本地 .ts 说明符。三种落点都要覆盖：`from "./x.ts"`、动态 `import("./x.ts")`、
+/** 残留的本地 .ts说明符。三种位置都要覆盖：`from "./x.ts"`、动态 `import("./x.ts")`、
  *  `require("./x.ts")`，以及无 from 的副作用导入 `import "./x.ts"`——它们在 node_modules 内
  *  同样让 Node 抛 ERR_UNSUPPORTED…，只认 `from` 一种写法会漏掉后三类而照绿。 */
 const LOCAL_TS_IMPORT = /(?:\bfrom|\bimport|\brequire)\s*\(?\s*["']\.{1,2}\/[^"']*\.ts["']/u;
@@ -37,7 +37,7 @@ const hasSpecifier = (code: string, specifier: string): boolean =>
     "u",
   ).test(code);
 
-/** 本包四个依赖段的包名——**独立**取，不借构建脚本的口径。
+/** 本包四个依赖段的包名——**独立**取，不借构建脚本的规则。
  *  构建器只外部化 dependencies / peerDependencies / optionalDependencies；devDependencies
  *  一并收进来是为了让「运行期代码误引构建期依赖」以"被内联"的形状变红，而不是因为它属于
  *  外部化集合。 */
@@ -61,7 +61,7 @@ function declaredPackages(): string[] {
   ];
 }
 
-/** 说明符或模块 id 的包名段：`@scope/pkg/sub` → `@scope/pkg`，`pkg/sub` → `pkg`。 */
+/**说明符或模块 id 的包名段：`@scope/pkg/sub` → `@scope/pkg`，`pkg/sub` → `pkg`。 */
 function packageNameOf(id: string): string {
   const segments = id.split("/");
   return id.startsWith("@") ? segments.slice(0, 2).join("/") : (segments[0] ?? id);
@@ -94,27 +94,27 @@ describe("danger-guard 两份 host 产物的外部化", () => {
     const { code: host, inlinedModules } = await buildHostReport();
     assert.ok(
       hasSpecifier(host, "@deepseek-ai/dsh-brand"),
-      "dsh-brand 必须外部化（口径 A：值导入落 peerDependencies，不进 dependencies）",
+      "dsh-brand 必须外部化（规则 A：值导入落 peerDependencies，不进 dependencies）",
     );
     assert.ok(
       hasSpecifier(host, "@jayyuen66/dsh-plugin-shared/lib/record"),
       "shared/record 必须外部化（isRecord 是跨包单点）",
     );
     // 预检（Phase 2）新增的第二枚值导入：注入消息用官方 createUserMessage。它落在
-    // peerDependencies（与 dsh-brand 同一口径）——内联的代价和 brandNumber 一样：每包各持
+    // peerDependencies（与 dsh-brand 同一种做法）——内联的代价和 brandNumber 一样：每包各持
     // 一份官方实现（这里是消息 id 铸造与深冻结）。
     assert.ok(
       hasSpecifier(host, "@deepseek-ai/dsh-llm"),
       "dsh-llm 必须外部化（预检注入用它的 createUserMessage）",
     );
-    // 名字判据在 minify 下会瞎（见文件头），所以这一半改成看**打进了哪些模块**：
+    // 名字判据在 minify 下失效（见文件头），所以这一半改成看**打进了哪些模块**：
     // 依赖表里的包名出现在 chunk 里 = 它被内联了。
     assert.deepEqual(
       inlinedDependencies(inlinedModules),
       [],
       "host.js 内联了依赖表里的包（external 名单被挪动了？）",
     );
-    // 正向锚：清单非空且含本包入口，否则上面的空集断言会在构建器交回空清单时空转。
+    // 正向锚：清单非空且含本包入口，否则上面的空集断言会在构建器交回空清单时失去校验作用。
     assert.ok(
       inlinedModules.some((id) => /[\\/]host\.ts$/u.test(id)),
       "内联清单必须含本包入口源码",
@@ -224,7 +224,7 @@ describe("单文件产物的输出守卫", () => {
     assert.throws(() => singleEntryChunk(output, "entry.ts"), /2 项输出/u);
   });
 
-  it("拒绝 asset：单文件产物没有落盘 asset 的位置", () => {
+  it("拒绝 asset：单文件产物没有写到磁盘 asset 的位置", () => {
     const output = [
       outputItem("chunk", ARTIFACT_FILE, { isEntry: true, code: CHUNK_CODE }),
       outputItem("asset", "x.css"),

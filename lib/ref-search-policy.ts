@@ -1,33 +1,33 @@
-// lib/ref-search-policy.ts —— 引用取证的**口径面**：哪些检索工具算取证、各自按哪些参数判。
+// lib/ref-search-policy.ts —— 引用取证的**规则**：哪些检索工具算取证、各自按哪些参数判。
 //
 // 为什么从 lib/fact-gate.ts 拆出来：这一族回答的是"怎样算探过引用面"，与状态机决定"还缺哪几项"
-// 无关，而本包吃它的生产侧有好几个——host 的取证记账（`refPolicyOf` 每次判定现读设置）、
+// 无关，而本包吃它的生产侧有好几个——host 的取证记录（`refPolicyOf` 每次判定现读设置）、
 // 设置底座 `BUILTIN_BASE` 的默认名单、客户端卡的回退显示，以及 lib/gap-directives.ts 给模型的
-// 指令文案（内置默认兜底）。此前它们都从 fact-gate.ts 取用，只因那里是第一处落点。
+// 指令文案（内置默认兜底）。此前它们都从 fact-gate.ts 取用，只因那里是第一处位置。
 //
-// 指令里点名的**检索工具名不许写死**：口径由 host 随缺项传进来的这份策略现算（设置项
+// 指令里点名的**检索工具名不许写死**：规则由 host 随缺项传进来的这份策略现算（设置项
 // refSearchTools/refSearchStrictTools 派生）。写死就等于门禁认一套、模型看到另一套，
 // 拒绝理由失去可执行路径——那正是本包发布给第三方前必须拆掉的东西。
 
 /**
- * 检索取证的**判据口径**（按工具名配置，见 host 的 refSearchTools/refSearchStrictTools）。
- * 修复前这两套口径是 host 里 `call.name === "zg_search"` 与其余分支的硬编码，等于把门禁
+ * 检索取证的**判据规则**（按工具名配置，见 host 的 refSearchTools/refSearchStrictTools）。
+ * 修复前这两套规则是 host 里 `call.name === "zg_search"` 与其余分支的硬编码，等于把门禁
  * 凭证只发给"本机另一插件注册的那个工具名"——第三方检索工具（rg_search/semgrep_scan…）
- * 无论怎么搜都不被计入，拒绝理由与模型能走的路彻底脱节。口径本身一字未改，改的是"谁来选"：
+ * 无论怎么搜都不被计入，拒绝理由与模型能走的路彻底脱节。规则本身一字未改，改的是"谁来选"：
  *  - `"pattern"`：签名取 `pattern`/`include`，作用域取 `path`/`file_path`（原生 grep/glob 形态）。
  *  - `"strict-relative"`：签名取 `query`/`queries`/`fts`/`vector`，作用域取 `root`，且签名
- *    可凭**目标相对路径**命中（语义检索类命中面宽，只比 basename 会让 index.ts 到处顶包——
+ *    可凭**目标相对路径**命中（语义检索类命中情况宽，只比 basename 会让 index.ts 到处顶包——
  *    修复前 zg_search 那条严格判据）。
  */
 export type RefSearchCriterion = "pattern" | "strict-relative";
 
-/** 生效的检索取证判据：工具名 → 口径的映射。**记账与给模型的指令共用同一份**（单源）。 */
+/** 生效的检索取证判据：工具名 → 规则的映射。**记录与给模型的指令共用同一份**（唯一来源）。 */
 export interface RefSearchPolicy {
-  /** 计入取证的工具名 → 口径；名单之外的工具不给凭证。 */
+  /** 计入取证的工具名 → 规则；名单之外的工具不给凭证。 */
   readonly criteria: ReadonlyMap<string, RefSearchCriterion>;
-  /** 走 pattern/include 口径的名字（按配置序，渲染指令用）。 */
+  /** 走 pattern/include 规则的名字（按配置序，渲染指令用）。 */
   readonly patternTools: readonly string[];
-  /** 走严格相对路径口径的名字。 */
+  /** 走严格相对路径规则的名字。 */
   readonly strictTools: readonly string[];
 }
 
@@ -38,13 +38,13 @@ export const DEFAULT_REF_SEARCH_TOOLS: readonly string[] = Object.freeze([
   "glob",
   "zg_search",
 ]);
-/** 默认走严格口径的子集 = 修复前那个 `zg_search` 单分支。 */
+/** 默认走严格规则的子集 = 修复前那个 `zg_search` 单分支。 */
 export const DEFAULT_REF_SEARCH_STRICT_TOOLS: readonly string[] = Object.freeze(["zg_search"]);
 
 /**
- * 由两份名单构造判据映射。**只有 refSearchTools 里的名字计入取证**，严格名单只切换口径：
+ * 由两份名单构造判据映射。**只有 refSearchTools 里的名字计入取证**，严格名单只切换规则：
  * 把陌生名字只写进严格名单不会给它开任何凭证——否则"顺手配上一个还没装的插件名"就会
- * 静默扩大凭证面（本包是安全拦截插件，配置面只能收紧不能放宽）。
+ * 静默扩大凭证检查（本包是安全拦截插件，配置表只能收紧不能放宽）。
  *
  * 同一名字只记一次、空串与纯空白整条丢弃：设置层只校验 string，重复项与空串会原样进入
  * 渲染指令（"grep、grep"、空项），而 criteria 作为 Map 键本就去重——两侧不同步时，
@@ -70,8 +70,8 @@ export const refSearchPolicyOf = (
       }
     }
   }
-  // 对外只交 `ReadonlyMap` 的读面：`ReadonlyMap` 只是编译期约束，一次 `as` 断言就能拿回
-  // `set`/`delete` 改写口径。这里用不带写方法的视图挡住那条路（`Object.freeze` 对 Map
+  // 对外只交 `ReadonlyMap` 的读取接口：`ReadonlyMap` 只是编译期约束，一次 `as` 断言就能拿回
+  // `set`/`delete` 改写规则。这里用不带写方法的视图挡住那条路（`Object.freeze` 对 Map
   // 的条目无效，不能靠它）。
   const criteriaView: ReadonlyMap<string, RefSearchCriterion> = {
     get size() {
@@ -90,7 +90,7 @@ export const refSearchPolicyOf = (
     [Symbol.iterator]: () => criteria[Symbol.iterator](),
   };
   // 冻结两份名单：返回类型是 readonly，但那是编译期约束——任何一次 `as` 断言后的就地
-  // push 都会改写这份策略，而它同时是记账与指令文案的单源。
+  // push 都会改写这份策略，而它同时是记录与指令文案的唯一来源。
   return {
     criteria: Object.freeze(criteriaView),
     patternTools: Object.freeze(patternTools),
@@ -98,7 +98,7 @@ export const refSearchPolicyOf = (
   };
 };
 
-/** 内置默认判据：上下文未带策略时的兜底（文案宁可退回默认，也不能退成"谁都不认"）。 */
+/** 内置默认判据：上下文未带策略时的后备（文案宁可退回默认，也不能退成"谁都不认"）。 */
 export const DEFAULT_REF_SEARCH_POLICY: RefSearchPolicy = refSearchPolicyOf(
   DEFAULT_REF_SEARCH_TOOLS,
   DEFAULT_REF_SEARCH_STRICT_TOOLS,

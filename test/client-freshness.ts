@@ -1,4 +1,4 @@
-// test/client-freshness.ts —— 产物新鲜度指纹门禁（8 包共用，TDD）。
+// test/client-freshness.ts —— 产物一致性指纹门禁（8 包共用，TDD）。
 //
 // 背景：src/client-entry.ts 改后忘跑 node build-client.mjs，浏览器一直加载旧
 // client.js——本会话已两次踩坑（rescue 403 修复没进产物；ctx-observe 字段补齐

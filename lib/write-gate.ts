@@ -1,7 +1,7 @@
-// lib/write-gate.ts —— 写类调用的判定顺序：apply_patch 目标核对 → 密钥面 → 事实门。
+// lib/write-gate.ts —— 写类调用的判定顺序：apply_patch 目标核对 → 密钥检查 → 事实门。
 //
-// host 只注入三个已装配好的判定函数；顺序与 fail-closed 口径留在这里，避免这段
-// 分支住在 `apply` 的热路径回调里同时推高文件行数与认知复杂度。
+// host 只注入三个已装配好的判定函数；顺序与 fail-closed 规则留在这里，避免这段
+// 分支写进 `apply` 的热路径回调里同时推高文件行数与认知复杂度。
 
 import type { JudgeCost } from "./judge-stats.ts";
 import type { WriteTarget, WriteTargetScan } from "./write-targets.ts";
@@ -18,7 +18,7 @@ export interface FactGateDenyInput {
   readonly targets: readonly WriteTarget[];
 }
 
-/** host 侧注入的判定面。`scan` 解析目标，`secret`/`fact` 是已经绑定会话与配置的函数。 */
+/** host 侧注入的判定。`scan` 解析目标，`secret`/`fact` 是已经绑定会话与配置的函数。 */
 export interface WriteGateHooks {
   readonly scan: (name: string, args: Record<string, unknown>) => WriteTargetScan;
   readonly secret: (name: string, args: Record<string, unknown>) => SecretDecision;

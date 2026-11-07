@@ -1,11 +1,11 @@
-// lib/edit-targets.ts —— 一次编辑/写调用的目标路径提取（键形口径）。
+// lib/edit-targets.ts —— 一次编辑/写调用的目标路径提取（键形规则）。
 //
 // 目标按参数键认，不按工具名认：工具名随 provider 与版本变，而"要动哪个文件"就在参数里。
 // 只读动作的声明**不能压过写载荷**：宿主工具参数根是开放对象，`write`/`edit` 的 execute
 // 只读自己认识的字段，多带的 `action:"read"` 不会改变真实写入行为。
 //
 // `apply_patch` 的目标不在参数键里，而在 `input` 的补丁正文；解析交给 shared 里那份
-// 官方 `dsh-fs-patch` 的同一实现，避免这里手抄一套会与宿主漂移的补丁文法。
+// 官方 `dsh-fs-patch` 的同一实现，避免这里自己抄一套会与宿主漂移的补丁文法。
 
 import { applyPatchTargetsOf } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 
@@ -73,7 +73,7 @@ const INSERT_LINE_KEY = /^(?:insert_line|insertLine)$/u;
 const snakeKeyOf = (key: string): string =>
   key.replaceAll(/(?<head>[a-z0-9])(?<upper>[A-Z])/gu, "$<head>_$<upper>").toLowerCase();
 
-/** 白名单折成 snake_case：驼峰拼法（`newContent`/`fileText`）也要命中。 */
+/** 白名单转成 snake_case：驼峰拼法（`newContent`/`fileText`）也要命中。 */
 const WRITE_PAYLOAD_SNAKE_SET: ReadonlySet<string> = new Set(
   WRITE_PAYLOAD_KEYS.map((key) => snakeKeyOf(key)),
 );
@@ -133,7 +133,7 @@ function readOnlyAction(args: Record<string, unknown>): boolean {
   return verbs.every((verb) => READ_ONLY_VERBS.has(verb.toLowerCase())) && !hasWritePayload(args);
 }
 
-/** 一次工具调用声明的全部目标路径（键形口径，去重后按键位顺序给出）。 */
+/** 一次工具调用声明的全部目标路径（键形规则，去重后按键位顺序给出）。 */
 export function declaredTargets(args: Record<string, unknown> | undefined | null): string[] {
   const targets: string[] = [];
   const add = (value: unknown): void => {

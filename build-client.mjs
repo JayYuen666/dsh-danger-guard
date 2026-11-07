@@ -2,9 +2,9 @@
 // @ts-check
 /// <reference types="node" />
 // 构建 client.js：rolldown 把 src/client-entry.ts + lib/fact-gate.ts 打包为 CJS
-// （react / zod 精确外置），再包进 window.__ModuleLoader__.load({ id, factory }) UMD 外壳。
+// （react / zod 精确外置），再包进 window.__ModuleLoader__.load({ id, factory }) 这层 UMD 外壳。
 // id 取 package.json 的 name，与 dsh.client 模块表键一致。
-// 编排（外置判据、store 路径折叠、外壳拼装）统一住在 @jayyuen66/dsh-plugin-shared/
+// 编排（外置判据、store 路径折叠、外壳 拼装）统一实现在 @jayyuen66/dsh-plugin-shared/
 // lib/build-client；本文件只声明入口、生成头与本仓的 minify 取舍（装载器只 import()
 // 文本，注释与空白是真实装载成本；minify 下 region 标记不再出现，折叠是空操作但保留）。
 // 运行：node build-client.mjs（或 npm run build:client）。buildClient() 供测试导入。

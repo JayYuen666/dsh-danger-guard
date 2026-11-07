@@ -13,7 +13,7 @@
 // 带变量的文案用 `{name}` 占位符（与官方 client-locale 同字形），由本模块的 fillTemplate 填充；
 // 两语模板的占位符集合是否一致由测试比对（翻译漏掉插值是这类改造最容易静默发生的错）。
 import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
-// 形状单源在零依赖的 ./fix.ts（**不能**从 ./danger-rules.ts 借：那会把它拖进客户端的
+// 形状唯一来源在零依赖的 ./fix.ts（**不能**从 ./danger-rules.ts 借：那会把它拖进客户端的
 // 类型程序，而它导的是 node:os/node:path —— 实测 TS2591 `Cannot find name 'node:os'`）。
 // 这里只为了类型编译期绑住「角色 → 模板」那张表。
 import type { Fix, FixRole } from "./fix.ts";
@@ -61,7 +61,7 @@ export interface DangerGuardMessages {
   readonly pipeShell: string;
   /** 长驻开发服务器。 */
   readonly devServer: string;
-  /** 执行面里那条命令没被检查到（嵌套 shell 的 `-c` 体、解释器的代码串、超出长度上限的输入）
+  /** 执行上下文里那条命令没被检查到（嵌套 shell 的 `-c` 体、解释器的代码串、超出长度上限的输入）
    *  → 需用户确认。 */
   readonly nestedShellUnconfirmed: string;
   // ── git 破坏族（A1；全部 `ask` 档）─────────────────────────────────────────────
@@ -126,9 +126,9 @@ export interface DangerGuardMessages {
   readonly needLabelDocs: string;
   /** 已确认项与检索工具名清单的连接号。 */
   readonly listSeparator: string;
-  /** 多条探查口径子句的连接号。 */
+  /** 多条探查规则子句的连接号。 */
   readonly clauseSeparator: string;
-  /** host 注入的具体补充（如层目录、落点）的外裹括号（槽位 hint）。 */
+  /** host 注入的具体补充（如层目录、位置）的外裹括号（槽位 hint）。 */
   readonly hintWrap: string;
   /** 上下文未带目标名时的占位。 */
   readonly defaultTargetName: string;
@@ -142,9 +142,9 @@ export interface DangerGuardMessages {
   readonly gapReadFailed: string;
   /** read 缺项 · 作用域过窄（read 不受作用域影响，与默认同形；槽位 name/hint）。 */
   readonly gapReadNarrow: string;
-  /** pattern 口径的探查子句（槽位 tools/root/name）。 */
+  /** pattern 规则的探查子句（槽位 tools/root/name）。 */
   readonly probePattern: string;
-  /** 严格相对路径口径的探查子句（槽位 tools/root/name）。 */
+  /** 严格相对路径规则的探查子句（槽位 tools/root/name）。 */
   readonly probeStrict: string;
   /** refs 缺项 · 从未做过：子句清单 + 结论要求（槽位 clauses）。 */
   readonly gapRefsNever: string;
@@ -160,13 +160,13 @@ export interface DangerGuardMessages {
   readonly gapRefsExternal: string;
   /** test 层触达探查（槽位 root/name/hint）。 */
   readonly gapTestBase: string;
-  /** test 层探查落点不对（槽位 root/name）。 */
+  /** test 层探查位置不对（槽位 root/name）。 */
   readonly gapTestNarrow: string;
   /** e2e/集成层触达探查（槽位 root/name/hint）。 */
   readonly gapE2e: string;
   /** 文档层触达探查（槽位 root/name/hint）。 */
   readonly gapDocs: string;
-  /** host：窄落点清单（槽位 paths）。 */
+  /** host：等待收窄的路径清单（槽位 paths）。 */
   readonly gapNarrowScope: string;
   /** host：层目录提示（槽位 dir）。 */
   readonly gapLayerDir: string;
@@ -199,9 +199,9 @@ export interface DangerGuardMessages {
    *  这与隔离是两件事——那几份没被规则排除，只是这次没读到，里面完全可能写着引用。
    *  `complete` 只说明遍历没被预算截断，说明不了这件事。 */
   readonly preflightRefsNoneUnread: string;
-  /** 引用块·有命中且有凭据面文件被隔离的说明行（槽位 count）：命中面可能不止这些。 */
+  /** 引用块·有命中且有凭据检查文件被隔离的说明行（槽位 count）：命中情况可能不止这些。 */
   readonly preflightRefsQuarantined: string;
-  /** 扫完但有文件没读成正文（超大 / 读不动）：命中面不是全部。 */
+  /** 扫完但有文件没读成正文（超大 / 读不动）：命中情况不是全部。 */
   readonly preflightRefsUnread: string;
   /** 层探查一行（槽位 layer/dir/hits）：与引用面**同一次**扫描派生，不另花 I/O。 */
   readonly preflightLayerLine: string;
@@ -212,7 +212,7 @@ export interface DangerGuardMessages {
   /** A 面注入消息的 `source.summary`（官方要求 notice 形必须带一行说明，≤120 字）。 */
   readonly preflightSummary: string;
   // ── 权限档位说明（同一枚规则键在不同预设下成因不同，见 lib/mode-policy.ts）──────────
-  /** 仅可查看档：沙箱拒一切写，我们只补沙箱盖不到的那些面。 */
+  /** 仅可查看档：沙箱拒一切写，我们只补沙箱盖不到的那些判定。 */
   readonly noteReadOnly: string;
   /** 工作区内修改档：沙箱允许改工作区、但不提供原子性，于是包住可写根的删除要我们拦。 */
   readonly noteWorkspaceWrite: string;
@@ -709,7 +709,7 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
 /**
  * 一条 `Fix` 渲染成**单独一行**（宿主把它接在拒绝理由之后）。
  *
- * 「角色 → 用哪句模板」这张表收在中间这枚模块里，而不是调用点（host）：角色集住在
+ * 「角色 → 用哪句模板」这张表收在中间这枚模块里，而不是调用点（host）：角色集定义在
  * `lib/danger-rules.ts`，用 `Record<FixRole, …>` 写全之后，新增角色会在这里产生编译错误。
  *
  * `offending` 恒非空：lib 侧两处产出点都在组装前判过长度（空名单交出的是

@@ -13,18 +13,18 @@
 //   体内命令**一条都没被检查过**，静默放行等于把闸门交给嵌套 shell 自己决定，
 //   故改判「需用户显式确认」（见 BashDenialKey 的 nestedShellUnconfirmed）；
 // - 消息面向模型：拒绝理由就是给模型的指令，说明"为什么拦、怎么改"。**这些文案不在本文件**
-//  （中英两份单源在 lib/messages.ts）：本文件只做判定、只回传规则键，宿主在 guard 调用点
+//  （中英两份唯一来源在 lib/messages.ts）：本文件只做判定、只回传规则键，宿主在 guard 调用点
 //  用 `messagesFor(MESSAGES, locale)` 取当前语言的文案。纯函数既不读设置也不带文案，
 //  于是"语言从哪来"只有一条路，测试也只需喂键；`DangerGuardMessages[BashDenialKey]`
 //  的取值类型让"加了规则忘了写文案"停在编译期，而不是运行时回一个 undefined。
 // - 引号感知：单/双引号内的分隔符不切分，避免误伤合法命令；
-// - **词法按 POSIX 口径，不按空白**：`git commit "--no-verify"`、`rm "-rf" ~`、`"rm" -rf ~`
+// - **词法按 POSIX 规则，不按空白**：`git commit "--no-verify"`、`rm "-rf" ~`、`"rm" -rf ~`
 //   在真 shell 里都是生效写法（实测真 git 2.54 对前者**钩子未运行且提交成功**），故切词、
 //   断段、结构视图三处共用 lib/command-segments.ts 的同一套词法器，不在判据里各自 `/\s+/` 直切；
-// - 执行面同判：包装词（sudo/env/time/xargs…）与**嵌套 shell 的 `-c` 体**都不改变命令性质——
+// - 执行上下文同判：包装词（sudo/env/time/xargs…）与**嵌套 shell 的 `-c` 体**都不改变命令性质——
 //   四类规则对递归取出的体内命令同样适用（下钻深度有界）；段头是 PowerShell 家族时，
 //   它的 `-c`/`-Command` 体按 join 语义取出并**强制按 Windows 读法判**（段头就是执行器身份）；
-// - 密钥面的目标按**键形**认（`file_path`/`path`/`notebook_path`…），不按工具名认；
+// - 密钥检查的目标按**键形**认（`file_path`/`path`/`notebook_path`…），不按工具名认；
 //   真实路径（realpath / 后端进程路径）由本包的宿主侧（host.ts）解析后一并送进来，
 //   lib 侧不 import `node:fs`——判定因此始终是纯函数，"解析这一步出过错"也算不进结论里。
 
@@ -51,7 +51,7 @@ import type { Fix } from "./fix.ts";
 // 灾难目标归一与目标键提取各自单独成模块：判定层只保留规则。
 export { disasterTargetPathOf } from "./disaster-target.ts";
 export { declaredTargets } from "./edit-targets.ts";
-// 出路形状住在零依赖的 ./fix.ts（为什么不在本文件：见那枚模块的头部注释）。
+// 出路形状定义在零依赖的 ./fix.ts（为什么不在本文件：见那枚模块的头部注释）。
 export type { Fix, FixRole } from "./fix.ts";
 
 /**
@@ -110,8 +110,8 @@ export type EditDenialKey = "secretPath" | "opaqueTarget";
  * 一条拒绝交回宿主的东西：规则键 + 可选的出路（见 `lib/fix.ts` 的 `Fix`）。
  *
  * 为什么 `fix` 是**结构化**的而不是一段中英 prose：本模块是语言无关的（只回规则键，
- * 文案单源在 `lib/messages.ts`）。把话写进 lib 就等于给同一件事开第二份语言面。
- * 形状本身住在那枚零依赖的 `lib/fix.ts` 里（收在那里的理由见该文件头）。
+ * 文案唯一来源在 `lib/messages.ts`）。把话写进 lib 就等于给同一件事开第两份语言文案。
+ * 形状本身定义在那枚零依赖的 `lib/fix.ts` 里（收在那里的理由见该文件头）。
  */
 export interface BashVerdict {
   key: BashDenialKey;
@@ -142,7 +142,7 @@ export interface BashVerdict {
 export type RuleTier = "deny" | "ask";
 
 /**
- * 规则键 → 处置档。**这是唯一的归属面**：guard 与 pre-execute 各自只认自己那一档，
+ * 规则键 → 处置档。**这是唯一的归属表**：guard 与 pre-execute 各自只认自己那一档，
  * 两边读同一张表，因此不可能给出互相打架的结论。
  *
  * ⚠ 新增规则键时**必须**在这里补一格（完整性由 `Record` + tsc 强制）。补之前先问：
@@ -154,7 +154,7 @@ export type RuleTier = "deny" | "ask";
  * 无人可问时应当被拦下，而不是静默通过。
  */
 /**
- * 这些规则键的**判据面**完全落在宿主沙箱的管辖之内（"目标包不住任何可写根"时），
+ * 这些规则键的**判据**完全落在宿主沙箱的管辖之内（"目标包不住任何可写根"时），
  * 于是那条判据该让给沙箱 —— 它会给出官方认可的拒绝标记与 escalation 路径
  * （`sandbox_permissions` + `justification` → 用户审批），而我们的硬拒会**掐死那条路**
  * （guard 跑在 bash 工具之前，模型连申请的机会都没有）。
@@ -165,9 +165,9 @@ export type RuleTier = "deny" | "ask";
  * 纯事实留在语言无关、无 I/O 的这一层。
  *
  * 为什么只有 `rmrf`：
- *  - `pipeShell` 的落点在工作区**之内**（下载到 workspace 是被允许的），网络又在沙箱的
+ *  - `pipeShell` 的位置在工作区**之内**（下载到 workspace 是被允许的），网络又在沙箱的
  *    vocabulary 之外（官方原话 "Network and process visibility are outside this vocabulary"）；
- *  - `devServer` 是进程面，同样在 vocabulary 之外；
+ *  - `devServer` 是进程，同样在 vocabulary 之外；
  *  - `noVerify` 与沙箱无关。
  */
 export const SANDBOX_COVERED: ReadonlySet<BashDenialKey> = new Set(["rmrf"]);
@@ -215,7 +215,7 @@ const isBashDenialKey = (key: unknown): key is BashDenialKey =>
   typeof key === "string" && Object.hasOwn(RULE_TIER, key);
 
 /** git 的命令词（大小写敏感：POSIX 宿主上 `GIT` 是另一个名字；`git.exe` 不判成 git，
- *  与本仓既定的保守口径一致——见测试「nO_VERIFY 前有 git 别名前缀组合」）。 */
+ *  与本仓既定的保守规则一致——见测试「nO_VERIFY 前有 git 别名前缀组合」）。 */
 const GIT_BIN_NAMES = new Set(["git"]);
 
 /** 支持 --no-verify 的 git 子命令（对齐 ECC block-no-verify 清单）。 */
@@ -230,7 +230,7 @@ const SHORT_N_NO_VERIFY_SUBS = new Set(["commit", "am"]);
 
 /** 长旗标缩写的最小长度：git 接受不歧义的 `--no-verify` 前缀（`--no-veri`/`--no-verif`
  *  实测确实跳过 pre-commit 钩子），缩写同样绕过钩子 → 一并拦。
- *  下限定在 `--no-v`：更短前缀歧义面太大（--no-edit/--no-commit 都以 `--no-` 开头）。
+ *  下限定在 `--no-v`：更短前缀歧义太大（--no-edit/--no-commit 都以 `--no-` 开头）。
  *  产品决策（复核 + 真实 git 探针）：`--no-v`/`--no-ve`/`--no-ver` 在
  *  `git commit` 上与 `--no-verbose` 歧义、git 自身直接报错（那命令根本跑不起来），
  *  所以「拦下这段前缀」不会误伤任何**能正常工作**的命令——代价只是让模型改用全词。
@@ -238,9 +238,9 @@ const SHORT_N_NO_VERIFY_SUBS = new Set(["commit", "am"]);
 const NO_VERIFY_ABBREV_MIN = "--no-v".length;
 
 /**
- * 该词是不是**纯**环境赋值：`FOO=x rm -rf /` 的 rm 是命令实部（照剥）。
+ * 该词是不是**纯**环境赋值：`FOO=x rm -rf /` 的 rm 是命令实部（照旧剔除赋值）。
  * 但 `FOO=$(curl -s https://x | sh)` 不是——那枚赋值取值是命令替换，真 bash 会执行它
- * （实测 `echo "$(seq 3 | tail -1)"` 输出 `3`），把它整词当赋值剥掉等于把 `curl` 这枚词
+ * （实测 `echo "$(seq 3 | tail -1)"` 输出 `3`），把它整词当赋值剔除等于把 `curl` 这枚词
  * 从管道判定的视野里删掉（实测这一形曾静默放行）。
  */
 const isPlainEnvAssign = (word: string): boolean =>
@@ -253,14 +253,14 @@ const isPlainEnvAssign = (word: string): boolean =>
  *  引号也在这一步之外：词值已由 lexTokens 去过引号，`"git"` 到这里就是 `git`（实测
  *  `"git" --version` 正常执行，故引号包裹的命令头不是逃逸口）。 */
 /**
- * 把 `$'rm'` / `$"rm"` 这类**引号前缀**归一成裸命令词。
+ * 把 `$'rm'` / `$"rm"` 这类**引号前缀**去掉，还原成只写命令词本身的写法。
  *
  * 为什么必须有这一层：`$'...'` / `$"..."` 在 POSIX shell 里就是"按字面取这串字符"，
  * 与带引号的命令词（`"rm" -rf ~`）完全等价，实测两者在真 bash 里都执行 rm。
- * 而词法器把引号剥掉后把 `$` 留在词首，于是 `$'rm'` 读成 `$rm`，rm 词表认不出，
+ * 而词法器把引号去掉后把 `$` 留在词首，于是 `$'rm'` 读成 `$rm`，rm 词表认不出，
  * 四类规则整条不参与——这是一个现成的逃逸口，不是理论构造。
  *
- * @param word - 剥过路径的 bin 名
+ * @param word - 去掉路径前缀后的 bin 名
  * @returns 去掉引号前缀后的词
  */
 const stripQuotePrefix = (word: string): string => word.replace(DANGER_RE.leadingDollar, "");
@@ -329,7 +329,7 @@ function chrtSkip(words: readonly string[], i: number): number {
  *  `nice -n 10 npm …` 的 npm 不是取值不能吃，而 `timeout -k 5 10 rm …` 的 10 是时长必须吃，
  *  否则 rm 整个落到头外（实测逃逸口）。 */
 function isPositionalValue(bin: string, flags: number, positional: string | undefined): boolean {
-  // `nice` 的裸位置取值是 niceness；`nice rm -rf ~` 里的 rm 是命令，不是取值。
+  // `nice` 没吃过旗标取值时，位置上的那枚词是 niceness 数值；`nice rm -rf ~` 里的 rm 是命令，不是取值。
   if (bin === "nice") {
     return flags === 0 && positional !== undefined && DANGER_RE.signedInteger.test(positional);
   }
@@ -388,8 +388,8 @@ function runPrefixEnd(tokens: readonly ShellToken[]): number {
  * 是包装词时把其后每个"像命令"的词位都列为候选：option 表按定义补不完
  * （`sudo -p xrm rm -rf /` 就是这么漏的，实测该形真会执行 rm），
  * 所以这一层是**漏拦的兜底**而不是精度优化。
- * 候选面收在"非旗标、非空"的词上，因此 `xargs cat rm` 这类"参数恰好像命令词"的串
- * 至多多看一次头，仍需自己配齐旗标与灾难目标才成立——误拦面按构造是小的。
+ * 候选范围收在"非旗标、非空"的词上，因此 `xargs cat rm` 这类"参数恰好像命令词"的串
+ * 至多多看一次头，仍需自己配齐旗标与灾难目标才成立——误拦按构造是小的。
  */
 /** 只消费参数、不执行参数的常见命令：包装词后面第一枚是它们时，后续词只是数据。
  *  没有这一层，`env printf '%s' git reset --hard` 会把打印参数里的 git 当成命令头。 */
@@ -432,7 +432,7 @@ function headStarts(tokens: readonly ShellToken[]): number[] {
  *  `cmd.exe /c rd /s /q …`、`cmd /c …`、`pwsh -c "…"`、`powershell -Command "…"` 时，
  *  其后的整树删除进不到本词表（`cmd`/`pwsh` 不在 RM_BIN_WORDS，也不在 shell 下钻名单里）。
  *  补这一层要定策「`.exe` 后缀算不算命令词」与「包装器的 `-c` 体用谁的方言读」，
- *  与本仓已明确的保守口径冲突（见「git.exe 不判成 git」那条），故留作登记的洞。
+ *  与本仓已明确的保守规则冲突（见「git.exe 不判成 git」那条），故留作登记的洞。
  *  提权/时间/二次执行那类包装词（sudo/env/time/nice/timeout/xargs…）**不**在此列：
  *  它们走 runPrefixEnd + headStarts 的多点位扫描，其后那条命令照常过四类规则。 */
 const RM_BIN_WORDS: ReadonlySet<string> = new Set([
@@ -484,12 +484,12 @@ const PARAM_NAME_RE = /^-(?<name>[A-Za-z]+)/u;
  * 为什么按"参数名"判，而不是逐字母扫任意 `-词`：pwsh 的参数名同样长成 `-字母…`，
  * `Remove-Item -Force -LiteralPath C:\Users\<user>\notes.txt` 里 `-LiteralPath` 含一枚 `r`，
  * 簇扫描据此得出"递归"，与真 `-Force` 一配就把**删一个文件**判成灾难删除（当时的误拦；`-ErrorAction`、`-Filter` 同形）。改按参数名判之后，只有真是 Recurse/Force 的
- * 缩写才算旗标，其余参数名一律不进旗标面。
+ * 缩写才算旗标，其余参数名一律不进命令行旗标。
  *
  * **本函数与短簇那条的分工由命令词决定**（`hasForceRecursive` 的 `psParamTrack`），不是由
  * 词形猜：命令词是 `remove-item`/`ri` 时短簇分支整个不进，`-r`/`-R`/`-f` 也由这里按参数名
  * 缩写认下；命令词是 `rm`/`del`/`erase`/`rd`/`rmdir` 时两条**叠加**（簇扫大小写敏感，
- * `-Force` 这类 pwsh 长词只有这一面认得，簇分支不许把它挡掉）。
+ * `-Force` 这类 pwsh 长词只有按参数名的这一条认得，簇分支不许把它挡掉）。
  * 所以两侧结论**并不逐字相同**，两处差异都是明写的取舍：POSIX 轨靠宽松簇拦下
  * `rm -drf /`、`rm -RW ~` 这一类"表外字母混在能跑的簇里"的写法（此前给字母表封口就是把
  * 它们放掉的），pwsh 轨则放掉 `Remove-Item -rf <树>`——`-rf` 不是参数名，pwsh 自己报参数找不到。
@@ -508,14 +508,14 @@ function isPsParamAbbrev(word: string, name: string): boolean {
 const ENV_SYSTEM_ROOT_RE = /^(?:%systemroot%|%windir%|\$env:windir|\$env:systemroot)(?:[\\/]|$)/iu;
 
 /** Windows **用户根**的未展开形态：`%USERPROFILE%` 与
- *  `$env:USERPROFILE` 展开后删的就是那棵树，未展开的字面串在任何读法下都不是一个
+ *  `$env:USERPROFILE` 展开后删的就是整个用户目录树，未展开的字面串在任何读法下都不是一个
  *  合法的相对目标 ⇒ 与 ENV_SYSTEM_ROOT_RE 同理，不随轨道/平台退出。
- *  为什么另起一条而不是往系统根那条里加一枚 alternation：两条指的不是同一棵树，
+ *  为什么另起一条而不是往系统根那条里加一枚 alternation：两条指的不是同一棵目录树，
  *  各自要说清自己拦的是什么（家目录在 POSIX 侧由 `$HOME`/`HOME_EXPANSION_RE` 闭合、
  *  Windows 侧由字面家目录比较闭合，此前唯独漏了这枚未展开写法）。 */
 const ENV_USER_ROOT_RE = /^(?:%userprofile%|\$env:userprofile)(?:[\\/]|$)/iu;
 
-/** 一枚选项词贡献的旗标面：递归 / 强制 / 大写 `R`（后者只在 POSIX 短簇上取得）。 */
+/** 一枚选项词贡献的命令行旗标：递归 / 强制 / 大写 `R`（后者只在 POSIX 短簇上取得）。 */
 interface FlagSet {
   force: boolean;
   recursive: boolean;
@@ -543,7 +543,7 @@ const CLUSTER_NO_FLAGS: FlagSet = { force: false, recursive: false, upperR: fals
  *  `path` 表示取值就是要删的路径（仍算目标），`skip` 表示取值只是模式/枚举（既非目标也非旗标）。
  *  实测 `Remove-Item -Exclude ~ -Recurse ./build` 曾因 `~` 被当目标而误拦——那枚 `~` 是
  *  `-Exclude` 的取值，不是删除对象。
- *  匹配口径见 `psValueRole`：**全名或四字母以上的前缀**，不收 `-f` 这类单字母缩写
+ *  匹配规则见 `psValueRole`：**全名或四字母以上的前缀**，不收 `-f` 这类单字母缩写
  *  （`-f` 与 `-Filter` 撞前缀，认了就把 `rm -f ~` 的 `~` 当取值吃掉，反手造出漏拦）。 */
 const PS_VALUE_PARAM_ROLES: Readonly<Record<string, "path" | "skip">> = {
   path: "path",
@@ -587,7 +587,7 @@ function isPsSwitchOff(word: string): boolean {
 
 /**
  * 一枚选项词 → 旗标贡献（`hasForceRecursive` 循环体的判据）。
- * 三条面**按命中即止排序**，先长旗标、后短簇：
+ * 三条规则**按命中即止排序**，先长旗标、后短簇：
  * - 显式假值（`-Recurse:$false`）最先出局：参数名再对，开关关着就不算递归/强制。
  * - `--force`/`--recursive` 与 cmd 侧 `/q`/`/f`/`/s`：等值比较，命中即返回，**不再**走簇
  *   （`--force` 形状上也会被 `SHORT_FLAG_CLUSTER_RE` 拒掉，但 `/f` 在 POSIX 轨上不该进簇，
@@ -620,10 +620,10 @@ function flagsOfWord(word: string, cmdDialect: boolean, psParamTrack: boolean): 
 }
 
 /**
- * 灾难级门槛（`hasForceRecursive` 扫完旗标后的收尾判据；抽成函数只是为了把圈复杂度留在
- *  lint 闸内，表达式本身与主函数 doc 一一对应，三条 disjunct 分属两轨、门槛**不同**）：
+ * 灾难级的判定条件（`hasForceRecursive` 扫完旗标后的收尾判据；抽成函数只是为了把圈复杂度留在
+ *  lint 闸内，表达式本身与主函数 doc 一一对应，三条 disjunct 分属两轨、判定条件**不同**）：
  * - `recursive && force`：两轨共用的基线，递归 + 强制必成灾。
- * - `upperR`：POSIX 轨既有口径——大写 `-R` 单独即灾难级。它**只由簇扫描喂**，而簇分支在
+ * - `upperR`：POSIX 轨既有规则——大写 `-R` 单独即灾难级。它**只由簇扫描喂**，而簇分支在
  *   cmdlet 轨上整个不进 ⇒ 这一项在 cmdlet 轨上恒为假（整条判据于是退化成"必须有 force"，
  *   这正是 `Remove-Item -R ~` 从拦转放的机理）。
  * - `psParamTrack && recursive`：补的就是上面那一格。cmdlet 轨上任何 Recurse 形态（`-R` ≡ `-r`
@@ -642,32 +642,32 @@ function isDisasterGradeFlagSet(
  * rm 递归+强制判定：短旗标簇整簇宽松扫字母、--recursive/--force 长旗标、
  * -f -r 分写都认。**"递归算不算单独成灾"按命令词轨分别说，不是无条件性质**：
  * - POSIX/cmd 轨（`psParamTrack` 为假）：递归**且**强制才成灾，唯一例外是簇里的大写 `-R`
- *   单独即灾难级（无 `-f` 也拦，仓内既有口径）⇒ `rm -r ~` 放行、`rm -R ~` 拦。
+ *   单独即灾难级（无 `-f` 也拦，仓内既有规则）⇒ `rm -r ~` 放行、`rm -R ~` 拦。
  * - cmdlet 轨（`remove-item`/`ri`）：**任何 Recurse 形态单独命中灾难目标即灾难级，不要求
  *   `-Force`**（`-R` ≡ `-r` ≡ `-rec` ≡ `-Recurse`，参数名不区分大小写 ⇒ 是一枚而不是四种拼法）。
- * 两条门槛的不对称是**语义不对称的镜像**，不是漏洞：`Remove-Item -Recurse ~` 不给 `-Force`
+ * 两条判定条件的不对称是**语义不对称的镜像**，不是漏洞：`Remove-Item -Recurse ~` 不给 `-Force`
  * 也**静默删整树**（pwsh 只对只读/受保护项报错跳过，普通文件直接删）；POSIX `rm -r ~` 不给
- * `-f` 会在受保护项上逐个提示。所以"递归单独成灾"的门槛在两轨本来就不同，判据跟着不同才是
- * 照实描述（README 的"拦/放行"两格按轨分述，同一处口径）。
+ * `-f` 会在受保护项上逐个提示。所以"递归单独成灾"的条件在两轨本来就不同，判据跟着不同才是
+ * 照实描述（README 的"拦/放行"两格按轨分述，同一处规则）。
  * `--` 视为选项结束（后面全是路径，不再扫旗标）。
- * 两条旗标面**按命令词分派**（`psParamTrack`，由调用点从 bin 算好传进来）：
+ * 两条命令行旗标**按命令词分派**（`psParamTrack`，由调用点从 bin 算好传进来）：
  * - `remove-item`/`ri` 是"只有 PowerShell 才这么写"的拼法 ⇒ 短簇分支不进，`-字母…` 词一律
  *   交给下面那两条 `isPsParamAbbrev`（参数名缩写，大小写不敏感，RM_BIN_WORDS 同源理由）。
  *   否则 `-LiteralPath`/`-Filter` 里那枚 `r` 会被当成递归（那处误拦的由来）。
  *   代价明写：`Remove-Item -rf <树>` 这类**非法 pwsh 写法**随之放行。
- *   反过来，参数名面认下的 Recurse 一律成灾（上面那条 cmdlet 门槛），于是 `-WhatIf` 这类
+ *   反过来，参数名认下的 Recurse 一律成灾（上面那条 cmdlet 判定条件），于是 `-WhatIf` 这类
  *   dry-run 修饰**不识别**：`Remove-Item -WhatIf -Recurse <树>` 照拦。登记为现存局限——
  *   "判据不读 dry-run"不是本次改动引入的（`-WhatIf -Recurse -Force <树>` 一直照拦），
  *   暂不扩范围修（要修得先定策"dry-run 是否算一种独立的、可豁免的形态"）。
  * - `rm`/`del`/`erase`/`rd`/`rmdir` 同时存在于 POSIX/cmd 侧 ⇒ 短簇分支照走，且参数名两条
  *   **叠在它之后**（不是 else-if 的替代分支）：簇扫大小写敏感，`-Force -r`、`-Force --recursive`
- *   这类 pwsh 长词得靠参数名那一面补上 force，否则 POSIX 命令词上反而放出改动前拦着的
+ *   这类 pwsh 长词得靠按参数名的那一条补上 force，否则 POSIX 命令词上反而放出改动前拦着的
  *   整树删除（pwsh 里 `rm` 就是 Remove-Item 的别名）。POSIX 的 fail-closed 语义不为 pwsh 的
- *   便利让路：两种语义在这个命令词上重叠时宁可误拦。**这一侧的门槛一个字不变**：
+ *   便利让路：两种语义在这个命令词上重叠时宁可误拦。**POSIX 这条轨的判定条件一个字不变**：
  *   `rm -r ~` 仍放行、`rm -R ~` 仍拦，cmdlet 轨那条"递归单独即灾难级"不越轨到 `rm` 上。
  * @param flags 命令头**之后**的旗标词（目标与取值由 `partitionRmArgs` 分走，不在此列）
  * @param cmdDialect 命令词是否属 CMD_BUILTINS —— 决定 `/s` `/q` `/f` 算不算旗标
- * @param psParamTrack 命令词是否为 `remove-item`/`ri` 拼法 —— 决定 `-字母…` 词走参数名面还是走短簇面，
+ * @param psParamTrack 命令词是否为 `remove-item`/`ri` 拼法 —— 决定 `-字母…` 词走参数名还是走短簇，
  *        并决定递归是否单独即灾难级（见上）
  */
 function hasForceRecursive(
@@ -679,9 +679,9 @@ function hasForceRecursive(
   let recursive = false;
   let upperR = false;
   for (const word of flags) {
-    // 单词的三条旗标面（长旗标 / 短簇 / PowerShell 参数名）在 `flagsOfWord` 里裁定，
+    // 单词的三条命令行旗标（长旗标 / 短簇 / PowerShell 参数名）在 `flagsOfWord` 里裁定，
     // 这里只做累积：簇扫大小写敏感，`-Force -r`、`-Force --recursive` 这类 pwsh 长词
-    // 得靠参数名那一面补上 force，否则 POSIX 命令词上反而放出改动前拦着的整树删除
+    // 得靠按参数名的那一条补上 force，否则 POSIX 命令词上反而放出改动前拦着的整树删除
     // （`rm` 在 pwsh 里就是 Remove-Item 的别名）。叠加只往"多认旗标"的方向走，
     // 与簇同向，不会放出任何改动前拦着的写法。
     const contribution = flagsOfWord(word, cmdDialect, psParamTrack);
@@ -689,15 +689,15 @@ function hasForceRecursive(
     force ||= contribution.force;
     upperR ||= contribution.upperR;
   }
-  // 收尾门槛按命令词轨分派：三条 disjunct 的含义（含"cmdlet 轨上 Recurse 单独即灾难级"这条
-  // 后来补的口径）逐条写在 `isDisasterGradeFlagSet` 的 doc 上，那里就是裁定原文的那条返回值，
+  // 收尾判定按命令词轨分派：三条 disjunct 的含义（含"cmdlet 轨上 Recurse 单独即灾难级"这条
+  // 后来补的规则）逐条写在 `isDisasterGradeFlagSet` 的 doc 上，那里就是裁定原文的那条返回值，
   // 抽成函数只为把圈复杂度留在 lint 闸内，判据本身一字未动。
   return isDisasterGradeFlagSet(recursive, force, upperR, psParamTrack);
 }
 
 /** 执行端 shell 解释器（管道接收端；管道后 sudo/env sh 照拦）。
  *  允许 shell 名前的路径前缀（`curl x | /bin/bash`、`| /usr/bin/sh` 照拦）。
- *  包装词表除提权面外还含 **二次执行面** `xargs`/`parallel`：`curl x | xargs -I{} sh {}`
+ *  包装词表除提权外还含 **二次执行上下文** `xargs`/`parallel`：`curl x | xargs -I{} sh {}`
  *  里 shell 不是紧接管道符，但 xargs 把 stdin 逐条喂给它执行，与 `| sh` 同危
  *  （审查确认：旧实现只认 sudo/env 打头 → xargs 是一个现成的逃逸口）。
  *  包装词后只跳「旗标 / 数值 / `{}` 占位 / VAR=值」四类取值，不跳任意位置词——
@@ -706,10 +706,10 @@ function hasForceRecursive(
  *  以及会把 stdin 当代码执行的 Python / Node / Perl / Ruby / PHP / Lua / osascript：
  *  `curl x | iex`、`curl x | python3` 与 `curl x | sh` 同危。`.exe` 与大小写不构成豁免。
  *  包装词不在这张名单里：执行端前面的 sudo/timeout/nice/xargs… 一律由 `runPrefixEnd`
- *  按**同一张**前缀词表剥掉（旧实现在这里另写了一份 `EXEC_WRAPPERS`，与 runPrefixEnd 的
+ *  按**同一张**前缀词表去掉（旧实现在这里另写了一份 `EXEC_WRAPPERS`，与 runPrefixEnd 的
  *  词表不同步，`| timeout 5 sh`、`| sudo -u root sh`、`| command sh` 因此全套漏拦）。 */
 const PIPE_EXECUTOR_NAMES = String.raw`sh|bash|zsh|dash|ksh|pwsh|powershell|invoke-expression|iex|python(?:2|3)?|pypy(?:3)?|node(?:js)?|perl5?|ruby|php|lua(?:jit|[0-9.]*)?|osascript`;
-/** 执行端整词窗口（命令头已剥过包装词，这里只比裸名）。 */
+/** 执行端整词窗口（命令头已剥过包装词，这里只比去掉路径与 `.exe` 之后的命令名）。 */
 const PIPE_EXECUTOR_HEAD = new RegExp(`^(?:${PIPE_EXECUTOR_NAMES})$`, "iu");
 /** "取回即执行"的命令头：解释器与 `source`/`eval`/`.`（`sh <(curl x)`、`eval "$(curl x)"`）。 */
 const SUBST_EXECUTOR_HEAD = new RegExp(`^(?:${PIPE_EXECUTOR_NAMES}|source|eval|\\.)$`, "iu");
@@ -719,7 +719,7 @@ const PIPE_CUT_RE = /(?<cut>\|\||\||<\(|\$\()/gu;
 /** `.exe` 后缀（Windows 命令头；模块作用域常量，免得每次调用都重建正则）。 */
 const EXE_SUFFIX_RE = /\.exe$/iu;
 
-/** 命令头的裸名：去路径前缀、去 `.exe`、小写（`/bin/BASH.EXE` 与 `bash` 同判）。 */
+/** 命令头的纯名字：去路径前缀、去 `.exe`、小写（`/bin/BASH.EXE` 与 `bash` 同判）。 */
 const execHeadName = (word: string): string =>
   binNameOf(word).toLowerCase().replace(EXE_SUFFIX_RE, "");
 
@@ -837,7 +837,7 @@ function toolSubcommand(rest: readonly string[]): string | undefined {
 /** npx 的包名 → 命令名：`vite@5`、`vite@^7.1.1`、`vite@latest` 装的都是那个 bin，
  *  版本/标签只是选择器，不改变命令性质（实测 `npx vite@5 dev` 起 dev server，此前放行）。
  *  作用域包（`@vue/cli-service`）**不**剥尾段猜 bin 名——包名与 bin 名不同名是常态，
- *  猜了就是把误判面写进判据；这一形留作登记的洞。 */
+ *  猜了就是把误判写进判据；这一形留作登记的洞。 */
 const pkgBinName = (pkg: string): string => pkg.replace(DANGER_RE.packageVersionSuffix, "");
 
 /**
@@ -871,7 +871,7 @@ function isLongRunningPkg(
   return true;
 }
 
-/** shell 方言（BashDangerOptions.shellDialect 的取值面）。 */
+/** shell 方言（BashDangerOptions.shellDialect 的取值）。 */
 export type ShellDialect = "posix" | "windows";
 
 /** bashDanger 的可选配置（词表可配置化；缺省 = 内置词表）。 */
@@ -882,7 +882,7 @@ export interface BashDangerOptions {
   extraDevRunArgs?: readonly string[];
   /** **调用点上下文，不是用户配置**：这次工具调用的 shell 方言。宿主在 `tools.guard`
    *  里按**工具身份**给（`pwsh` → `"windows"`，`bash` → `"posix"`），因为"这段源是谁读的"
-   *  在调用点是已知量，而字形不是（`\\home\bob` 折叠后与 UNC 逐字节同形）。
+   *  在调用点是已知量，而字形不是（`\\home\bob` 经 `normalizeWindowsShape` 折叠后与 UNC 逐字节同形）。
    *  `"windows"` 让 Windows 字形轨道参与判定（见 isWindowsHost 登记的代价：POSIX 宿主上
    *  跑 PowerShell Core 时平台不是 win32，但 pwsh 读 `C:\Windows` 读的就是那个树）。
    *  缺省 = POSIX 读法：「非 Windows 宿主上轨道退出」的结论一字不动。 */
@@ -970,12 +970,12 @@ const HOOKS_PATH_KEY_RE = /^core\.hooksPath(?:$|=)/iu;
 const HOOKS_PATH_READ_FORMS = /^--(?:get(?:-all|-regexp)?|list|unset(?:-all)?|remove-section)$/iu;
 
 /** git 一次扫描的产出：子命令 + 两条独立结论（绕过旗标 / 钩子目录被改走）+ 越界词本身
- *  + **破坏性子命令判据要看的那几枚面**（旗标、位置参数、`--` 分界）。 */
+ *  + **破坏性子命令判据要看的那几项**（旗标、位置参数、`--` 分界）。 */
 interface GitFacts {
   sub: string | undefined;
   hooksSkipped: boolean;
   hooksPath: boolean;
-  /** 触发 `hooksSkipped` 的**词面本身**（按首次出现序、去重）：出路要靠它点名，
+  /** 触发 `hooksSkipped` 的**用词本身**（按首次出现序、去重）：出路要靠它点名，
    *  只回一个 `true` 的话模型得自己回去逐词比对是哪一枚。 */
   bypassWords: readonly string[];
   /** 子命令之后见到的**长旗标原词**（`--hard` / `--force` / `--staged`…），原样保留。 */
@@ -1000,10 +1000,10 @@ interface GitWalk {
   hooksSkipped: boolean;
   hooksPathKey: boolean;
   hooksReadForm: boolean;
-  /** 越界词面（见 GitFacts.bypassWords）。去重在这里做：同一枚旗标在一条命令里出现两次，
+  /** 越界用词（见 GitFacts.bypassWords）。去重在这里做：同一枚旗标在一条命令里出现两次，
    *  给模型列两遍只是噪音，而模型改的时候要删的是**全部**出现处。 */
   bypassWords: string[];
-  /** 破坏性判据看的三枚面（见 GitFacts 的对应字段）。与上面几枚**同一趟走查**里记，
+  /** 破坏性判据看的三项（见 GitFacts 的对应字段）。与上面几枚**同一趟走查**里记，
    *  理由与 `bypassWords` 同源：另起一台走查两台迟早会漂。 */
   longFlags: string[];
   shortLetters: string[];
@@ -1025,7 +1025,7 @@ const takeGitLong = (walk: GitWalk, word: string): void => {
     walk.bypassWords.push(word);
     walk.hooksSkipped = true;
   }
-  // 长旗标记**原词**（破坏性判据按等值比，`--force-with-lease` 不能被 `--force` 吃掉）。
+  // 长旗标记**原词**（破坏性判据按等值比，`--force-with-lease` 不能被 `--force` 抢走）。
   // `--flag=value` 的形状取等号前那一段：取值不是旗标的身份。
   // 用 `indexOf` + `slice` 而不是 `split("=")[0] ?? word` —— 后者那枚 `??` 是**死分支**
   //（`split` 必返回至少一个元素），只为过 `noUncheckedIndexedAccess` 而存在。
@@ -1173,7 +1173,8 @@ function gitBypass(tokens: readonly ShellToken[]): BashVerdict | undefined {
  *
  * 逐子命令的判据（每条都只认**已确认会丢东西**的形态，含糊的一律不判、按已知边界登记）：
  *  - `reset --hard`：长旗标等值。（`--soft`/`--mixed` 保留工作区，不判。）
- *  - `checkout -- …` / `checkout .`：只认这两形。**裸 `git checkout <path>` 不判** ——
+ *  - `checkout -- …` / `checkout .`：只认这两形。**不带 `--`、也不单写一个 `.` 的
+ *    `git checkout <path>` 不判** ——
  *    它与 `git checkout <branch>` 在词法上不可分（要知道那名字是分支还是文件得读仓库，
  *    而本包不碰 fs）。见 README 已知边界。
  *  - `restore <path>`：`--staged` 单用时只动索引（可重做 `git add`），不判。
@@ -1265,13 +1266,13 @@ const positionalsOf = (words: readonly string[]): string[] =>
   words.filter((word) => !word.startsWith("-"));
 
 /** `-auto-approve` 的**假**取值：Go 的 bool flag 认 `false/0/f`，shell 侧还有 `no/off` 写法。
- *  等号形态取到假值时这条命令并没有跳过确认，不能按 `tfAutoApprove` 收口。 */
+ *  等号形态取到假值时这条命令并没有跳过确认，不能按 `tfAutoApprove` 统一处理。 */
 const TF_AUTO_APPROVE_FALSE: ReadonlySet<string> = new Set(["false", "0", "f", "no", "off"]);
 
 /** `-auto-approve` / `--auto-approve` / 带取值的等号形态（terraform 用单横线，双横线一并认）。 */
 const TF_AUTO_APPROVE_RE = /^--?auto-approve(?:=(?<value>.*))?$/u;
 
-/** 这一枚词是不是"确实跳过了确认"的 auto-approve：裸形与非假取值算，`=false` 一类不算。 */
+/** 这一枚词是不是"确实跳过了确认"的 auto-approve：不带 `=` 的写法与非假取值算，`=false` 一类不算。 */
 function skipsApproval(word: string): boolean {
   const matched = TF_AUTO_APPROVE_RE.exec(word);
   /* v8 ignore next 1 —— 取不到分组只在正则改坏时发生，调用点保证形式已匹配。 */
@@ -1434,7 +1435,7 @@ function infraDestructiveOf(
   tokens: readonly ShellToken[],
 ): BashVerdict | undefined {
   const words = tokens.map((token) => token.value);
-  // 命令词按**去路径前缀**认（`/usr/local/bin/kubectl` 与 `kubectl` 同判，与 git 族同口径）。
+  // 命令词按**去路径前缀**认（`/usr/local/bin/kubectl` 与 `kubectl` 同判，与 git 族同规则）。
   const predicate = ownLookup(INFRA_DESTRUCTIVE, binNameOf(head.value));
   const key = predicate?.(words) ?? migrateDanger(words);
   return key === undefined || !isBashDenialKey(key) ? undefined : { key };
@@ -1481,7 +1482,7 @@ const WINDOWS_SHAPE_RE = /^(?:[A-Za-z]:[\\/]|\\\\)/u;
  *  比较；这几条曾叫 `uncRoot` 那个局部量，现已内联成直接比 `shaped`/`winTarget`）：
  *  把它接进 POSIX 判据的入参会挪动既有 disjunct 的判定域——`\\etc` 归一成 `//etc`
  *  再被 path.posix.normalize 压成 `/etc`，于是 shell 源里那个名为 `\etc` 的相对
- *  删除会被**既有**系统前缀表拦下（本包口径下 `\` 是转义，见测试
+ *  删除会被**既有**系统前缀表拦下（本包规则下 `\` 是转义，见测试
  *  「引号外反斜杠转义形态」）。 */
 function normalizeWindowsShape(raw: string): string {
   if (!WINDOWS_SHAPE_RE.test(raw)) {
@@ -1526,13 +1527,13 @@ const WINDOWS_SYSTEM_AND_USERS_RE =
 /** 盘符自身根（`c:/`）——整树删除不可逆。 */
 const WINDOWS_DRIVE_ROOT_RE = /^[a-z]:\/?$/iu;
 
-/** UNC 共享根 `//server/share`（不含其下子路径，避免扩大拦截面）。 */
+/** UNC 共享根 `//server/share`（不含其下子路径，避免扩大拦截）。 */
 const UNC_ROOT_RE = /^\/\/[^/]+\/[^/]+\/?$/u;
 
-/** Win32 **逐字路径前缀** `\?\`：它指向去掉前缀后那棵树（`\\?\C:\Windows` 删的就是
+/** Win32 **逐字路径前缀** `\?\`：它指向去掉前缀后的那棵目录树（`\\?\C:\Windows` 删的就是
  *  `C:\Windows`）。前导 `//` 是 `normalizeWindowsShape` 把 `\` 折成 `/` 之后的形态，
  *  所以这里匹配的是 `//?/` 而不是 `\\?\`。
- *  **`\.\` 那一支故意不吃**：`\\.\etc` 按现有口径是"两段共享根"（照拦），而设备命名空间下
+ *  **`\.\` 那一支故意不吃**：`\\.\etc` 按现有规则是"两段共享根"（照拦），而设备命名空间下
  *  整树删除要先拿到卷句柄，不是 `rd`/`Remove-Item` 做得到的事——吃它换来的漏拦比收益大。 */
 const VERBATIM_ROOT_PREFIX = "//?/";
 
@@ -1543,7 +1544,7 @@ const VERBATIM_UNC_PREFIX = "//?/UNC/";
 
 /** Windows 解析路径时吃掉组件尾部的 `.`（`\\srv\share\.` 就是共享根本身），而 `UNC_ROOT_RE`
  *  锚到词尾 ⇒ 不折这一枚点就绕过。只折**尾部**成串的 `/.`：中部的 `/.` 要折就得改写整串，
- *  而带中部点的位置串落在子路径上、按现口径本就放行。 */
+ *  而带中部点的位置串落在子路径上、按现规则本就放行。 */
 const TRAILING_DOT_RE = /(?:\/\.)+$/u;
 
 /** 吃掉逐字路径前缀（两支的差别只在要不要留前导 `//`），长度取自常量、不写死。 */
@@ -1566,7 +1567,7 @@ function stripVerbatimPrefix(shaped: string): string {
  * 与 `HOME_EXPANSION_RE` 的 `(?![A-Za-z0-9_])`、`ENV_USER_ROOT_RE` 的 `(?:[\\/]|$)` 同一条
  * 理由，少了它便是误拦。
  * `~` 与 `~/x` 两形走不到也不必走到这里：POSIX 轨那两条波浪号 disjunct 本来就拦，
- * 两种读法同判 ⇒ 本条只补反斜杠那一形，不重复既有面。
+ * 两种读法同判 ⇒ 本条只补反斜杠那一形，不重复既有。
  * **只参与 Windows 轨道**（调用点在 `windowsTrack` 早退之后）：bash 不展开 `~\x`，实测
  * `printf '%s\n' ~\notes.txt` 给出 `~notes.txt`（相对文件名，`\n` 被当转义），那条轨道
  * 放行是**正确语义**而非漏拦，故不许为"看起来一致"把它改成拦。
@@ -1592,7 +1593,7 @@ const WINDOWS_TILDE_HOME_PREFIX = "~\\";
  *
  * 平台**不是**唯一的入口：POSIX 宿主上跑 PowerShell Core（`pwsh`）时 `os.platform()`
  * 不是 win32，而同一条 `Remove-Item -Recurse -Force C:\Windows` 删的真的是那个树。
- * 补它的唯一 sound 口径是「这段源由谁读」——由调用点的**工具身份**说话
+ * 补它的唯一 sound 规则是「这段源由谁读」——由调用点的**工具身份**说话
  * （`BashDangerOptions.shellDialect`，host.ts 按 `name === "pwsh"` 给），不是猜字形；
  * 本函数只回答「宿主自己是不是 Windows」这半边。
  */
@@ -1606,7 +1607,7 @@ function isWindowsHost(): boolean {
  *  下一字符必须非词字符，否则 `${HOMEBACKUP}` 这类自定义变量会被误当家目录。 */
 const HOME_EXPANSION_RE = /^\$\{HOME\b/u;
 
-/** 裸变量形态的家目录 `$HOME`、`$HOME/…`。尾闸与上面那条 `${…}` 形**同一条纪律**：
+/** 不带花括号的那种变量写法里的家目录：`$HOME`、`$HOME/…`。尾闸与上面那条 `${…}` 形**同一条纪律**：
  *  少了它就是 `startsWith("$HOME")` 那个漏网的写法——实测 `rm -rf "$HOME_BACKUP"`、
  *  `"$HOMEBACKUP"` 全被当家目录拦下，而仓内测试早已裁定 `${HOMEBACKUP}` 这类
  *  "以 HOME 起头的别的变量"属纯误拦。两形现在同判。 */
@@ -1624,7 +1625,7 @@ const HOME_VAR_RE = /^\$HOME\b/u;
  * 尾闸是那个 `/`：`~bob\x` 在 bash 里**不**展开（波浪号前缀只取到 `/` 或词尾，带 `\`
  * 的用户名查不到，实测原样得 `~bobx`），拦它就是误拦——与 `HOME_EXPANSION_RE` 的
  * `(?![A-Za-z0-9_])`、`ENV_USER_ROOT_RE` 的 `(?:[\\/]|$)` 同一条尾闸纪律。
- * **裸 `~user`（词尾无 `/`）不收**，是已登记局限而不是漏网：本机实测 `~root` →
+ * **词尾没有 `/` 的 `~user` 不收**，是已登记局限而不是漏网：本机实测 `~root` →
  * `/var/root`（该用户存在即展开）、`~bob`/`~backup` → 原样（用户不存在则不展开，macOS 只有
  * `_backup`）。也就是说这一形的结论取决于"这台机器上有没有这个账号"，判据既不碰 fs 也不查
  * 口令表（查它 = 新依赖 + 新设计决定，与 MSYS 挂载表同族）⇒ 收它会误拦以 `~` 开头的相对
@@ -1641,10 +1642,10 @@ const escapeRegExp = (value: string): string =>
 
 /** 家目录下的**深层普通后代**（相对部分形如 `a/b/…` 且不含 `..`）：日常清理目标。 */
 function isDeepHomeDescendant(target: string, home: string): boolean {
-  // ⚠ 不能用 `path.relative`：这里的入参是**词面**（`~`、绝对家目录形）与宿主路径混着来，
+  // ⚠ 不能用 `path.relative`：这里的入参是**用词**（`~`、绝对家目录形）与宿主路径混着来，
   // 而 `~` 不是绝对路径，`relative` 对它给出的东西没有意义（实测会把 `rm -rf ~` 判成放行）。
   //
-  // 判据必须同时容忍两种分隔符：宿主家目录在 Windows 上是 `C:\Users\<user>`，而 shell 词面
+  // 判据必须同时容忍两种分隔符：宿主家目录在 Windows 上是 `C:\Users\<user>`，而 shell 用词
   // 总用 `/` 写。写死 `${home}/` 时 Windows 上永远匹配不上，于是"家目录的深层后代"被误判成
   // 灾难目标（实测在 Windows runner 上 `rm -rf <home>/.cache/x/y` 被拦）。
   const separator =
@@ -1684,7 +1685,7 @@ function isWindowsShapeTarget(raw: string, home: string): boolean {
   const driveless = DRIVELESS_SHAPE_RE.test(raw)
     ? path.posix.normalize(foldWindowsSeparators(raw))
     : undefined;
-  // 家目录在这一侧要过字形归一：Windows 上 os.homedir() 是 `C:\Users\<user>`，与折过斜杠的
+  // 家目录在这条 Windows 判断里要先过字形归一：os.homedir() 在 Windows 上给的是 `C:\Users\<user>`，与折过斜杠的
   // winTarget 不同形，原样比较则永不成立（POSIX 侧那条字面比较用的仍是原值）。
   const winHome = normalizeWindowsShape(home);
   // ── 家目录**深层普通后代**的豁免必须写成**守卫提前返回**，不能挂在 `||` 链上。
@@ -1695,9 +1696,9 @@ function isWindowsShapeTarget(raw: string, home: string): boolean {
   // 与顺序无关；把它挪到最前面也一样，因为它只是**新增一个条件**，抵消不了别的分支的命中）。
   // 所以豁免只能放在所有 `return true` 路径**之前**，作为守卫。
   //
-  // 门槛与 POSIX 侧严格同源（`isPosixDisasterTargetWord` 的双重检查）：`pointed` 保留 `..`
+  // 判定条件与 POSIX 侧严格同源（`isPosixDisasterTargetWord` 的双重门槛）：`pointed` 保留 `..`
   // 段、`winTarget` 已归一。**两形都必须是深层普通后代**才放行 —— 只看归一值会让
-  // `.../.cache/../project/output` 被误当成普通后代（`normalize` 吃掉了 `..`）。
+  // `.../.cache/../project/output` 被误当成普通后代（`normalize` 把 `..` 合并掉了）。
   // 守卫必须**先确认目标真的落在 winHome 之下**，不能只靠 `isDeepHomeDescendant` 自己判：
   // 它对"前缀不匹配"虽然返回 false，但对 `C:/` 这类目标会走 `slice(home.length)` 切出
   // 无意义的串（实测裸 `\` 被归一成 `/` 后，`segments.length >= 2` 竟然成立 ⇒ 把当前盘根
@@ -1725,7 +1726,7 @@ function isWindowsShapeTarget(raw: string, home: string): boolean {
     raw.startsWith(WINDOWS_TILDE_HOME_PREFIX) ||
     // 无盘符的当前盘绝对形态 `\Windows\System32`：盘符字母未知 ⇒ 只比树名，且树名集合与
     // WINDOWS_SYSTEM_AND_USERS_RE 严格同族（**不**扩到 SYSTEM_PATH_PREFIXES 那 24 条——
-    // `\etc`、`\usr` 这类相对删除在本包口径里是转义字面量，扩过来就是把 `\etc` 变成误拦）。
+    // `\etc`、`\usr` 这类相对删除在本包规则里是转义字面量，扩过来就是把 `\etc` 变成误拦）。
     (driveless !== undefined && DRIVELESS_SYSTEM_AND_USERS_RE.test(driveless)) ||
     // 混分隔符的家目录后代：家目录写成 POSIX 字形（`/data/bob`）再用 `\` 下钻。pwsh 两种
     // 分隔符都吃，折全量之后比家目录前缀；POSIX 侧不折（`\` 是转义），故这条只在轨道内。
@@ -2072,8 +2073,8 @@ function expandBraces(word: string, budget = BRACE_EXPANSION_BUDGET): string[] |
  * 当前目录，绝对路径的 glob 形态（`/*`、`/usr/**`）等价于其目录本身。
  * 家目录取 `os.homedir()`（只读 HOME 环境变量，无 fs 访问）——`rm -rf /Users/<user>`
  * 与 `rm -rf $HOME` 是同一场灾难，只认变量形态等于给字面路径开了逃逸口。
- * Windows 形态（盘符根 / 系统+用户树 / UNC 共享根 / 反斜杠家目录 / `~\…` 波浪号根）不住在这里，
- * 住在 `isWindowsShapeTarget`，由 `catastrophicRm` 按 `windowsTrack` 另加一条 disjunct——
+ * Windows 形态（盘符根 / 系统+用户树 / UNC 共享根 / 反斜杠家目录 / `~\…` 波浪号根）不定义在这里，
+ * 定义在 `isWindowsShapeTarget`，由 `catastrophicRm` 按 `windowsTrack` 另加一条 disjunct——
  * **两条轨道各读各的形**：本函数读词值（转义已落地），那条读源文本（反斜杠还在原位）。
  * 轨道不参与时（宿主非 Windows 且调用点不是 pwsh），`rm -rf C:\Windows` 删的是那个字面名的
  * 相对文件、`rm -rf ~\notes.txt` 删的是 `~notes.txt` 那样的相对文件（bash 实测把 `\n` 当转义、
@@ -2110,11 +2111,11 @@ function isPosixDisasterTargetWord(value: string): boolean {
     // `$HOME/.cache/x/y` 放行）——展开形状不可判时 isHomeVarDisaster 自己保守拦下。
     ((HOME_VAR_RE.test(value) || HOME_EXPANSION_RE.test(value)) &&
       isHomeVarDisaster(value, home)) ||
-    // `~user/…` 吃原词值（归一会吃掉 `..` 段，见 USER_HOME_RE 的注释）。
+    // `~user/…` 吃原词值（归一会合并掉 `..` 段，见 USER_HOME_RE 的注释）。
     USER_HOME_RE.test(value) ||
     // 绝对 glob 的**展开形态**同判：`rm -rf /e?c` 在真实 bash 里展开成 `/etc`（实测）、
     // `rm -rf /e*/` 展开成 `/etc/`。上面那支只剥尾部 `*`（把 `/e*/` 削成 `/e` 后不再成灾），
-    // 于是 `?`/`[...]`/中缀 `*` 三族整片漏面——而这三族与 `/*` 是同一件事：shell 先展开、
+    // 于是 `?`/`[...]`/中缀 `*` 三族整片漏——而这三族与 `/*` 是同一件事：shell 先展开、
     // rm 只看结果。读**归一值**而不是上面那支的转换结果：转换已经把命中形态削掉了。
     (GLOB_METACHAR_RE.test(posixNormalized) && globCouldHitProtected(posixNormalized, home)) ||
     posixTarget === "." ||
@@ -2127,7 +2128,7 @@ function isPosixDisasterTargetWord(value: string): boolean {
 }
 
 /**
- * 灾难目标判定：词值里含花括号时先按 shell 语义展开，任一展开结果命中受保护面即判灾难。
+ * 灾难目标判定：词值里含花括号时先按 shell 语义展开，任一展开结果命中受保护即判灾难。
  * 展开形状不可判（超预算 / 残缺 / 不认识的序列）时，绝对路径与家目录/变量形态按灾难处理
  * ——"看不懂"落在多拦的一侧。
  */
@@ -2141,7 +2142,7 @@ function isPosixDisasterTarget(value: string): boolean {
 
 /** 重定向词：`>out`、`2>err`、`>>log`、`<in`、`2>&1` 这类**操作符与操作数粘连**的整枚词。
  *  操作数从来不是命令的参数：`rm -rf ./build > /dev/null` 里 `/dev/null` 不是要删的东西，
- *  把它收进目标面会让这条最常见的平静命令被判成灾难删除（实测的确如此）。
+ *  把它收进目标会让这条最常见的平静命令被判成灾难删除（实测的确如此）。
  *  单独的 `>` / `<` 不在此列——它要等下一词才知道操作数是谁，而 `<( … )` 过程替换在词法层
  *  正好产出孤立的 `<`，那枚必须留给结构判据（`sh <(curl …)` 靠它认「取回即执行」）。 */
 const RM_REDIRECT_WORD_RE = /^(?:\d*|&)(?:>>?|<<?)(?!\()\S*$/u;
@@ -2197,8 +2198,8 @@ function rmValueArg(walk: RmWalk, pos: number, token: ShellToken): RmValueArg | 
 }
 
 /**
- * rm 参数分区走一步：按这一枚词的形状决定它归旗标面、目标面，还是根本不该进这两个面。
- *  重定向（含粘连操作数与独立操作符两种形态）两者都不进——它的操作数是文件描述符的落点，
+ * rm 参数分区走一步：按这一枚词的形状决定它归命令行旗标、目标，还是根本不该进这两边。
+ *  重定向（含粘连操作数与独立操作符两种形态）两者都不进——它的操作数是文件描述符的位置，
  *  从来不是命令实参；`rm -rf ./build > /dev/null` 里 `/dev/null` 不是要删的东西。
  */
 function advanceRmWalk(walk: RmWalk): void {
@@ -2231,8 +2232,8 @@ function advanceRmWalk(walk: RmWalk): void {
   }
 }
 
-/** rm 的参数分区（`hasForceRecursive` 与目标判定的输入）：旗标面与目标面各取其一。
- *  `--` 之后一律目标（POSIX/pwsh 同规则），不再按旗标形状过滤——两侧口径此前不一致，
+/** rm 的参数分区（`hasForceRecursive` 与目标判定的输入）：命令行旗标与目标各取其一。
+ *  `--` 之后一律目标（POSIX/pwsh 同规则），不再按旗标形状过滤——两侧规则此前不一致，
  *  `rm -rf ~ -- -weird` 里那枚 `-weird` 被当旗标丢了，而它其实是文件名。
  *  带取值的 pwsh 参数按 `PS_VALUE_PARAM_ROLES` 的角色处理：实测
  *  `Remove-Item -Exclude ~ -Recurse ./build` 把 `-Exclude` 的取值 `~` 当成了删除目标（误拦）。 */
@@ -2249,7 +2250,7 @@ function partitionRmArgs(
 
 /**
  * 单段（已按候选头切好）：灾难删除？目标含家/根/系统前缀/上跳即拦；项目内相对路径放行。
- *  命令词面（RM_BIN_WORDS）覆盖 rm + pwsh 原生命令/别名 + cmd 内建，比对一律小写；
+ *  命令用词（RM_BIN_WORDS）覆盖 rm + pwsh 原生命令/别名 + cmd 内建，比对一律小写；
  *  `/s` `/q` `/f` 旗标方言只在 CMD_BUILTINS 上启用（同形的 POSIX 绝对路径必须是目标）。
  *  @param tokens 已剥包装词、以命令头起手的**词**（值与源文本两形都在，目标按轨道选形）
  *  @param windowsDialect 调用点是 Windows shell 方言（工具身份），与宿主平台合并后
@@ -2265,7 +2266,7 @@ function catastrophicRm(
   const bin = rmBinOf(head);
   let result: BashVerdict | undefined;
   const cmdDialect = CMD_BUILTINS.has(bin);
-  // 旗标面按**命令词**分派（命令词在调用点是已知量，词形不是）：只有 `remove-item`/`ri`
+  // 命令行旗标按**命令词**分派（命令词在调用点是已知量，词形不是）：只有 `remove-item`/`ri`
   // 是"只有 PowerShell 才这么写"的拼法，它们的 `-字母…` 参数名交给 isPsParamAbbrev。
   // `rm`/`del`/`erase`/`rd`/`rmdir` 同时活在 POSIX/cmd 侧，那两侧宽松短簇的 fail-closed
   // 语义必须保住，不能为了 pwsh 的便利放开（代价：pwsh 里 `rm` 是 Remove-Item 的别名，
@@ -2307,12 +2308,12 @@ function catastrophicRm(
     // 点名**触发判据的那几枚目标**（去重、按首次出现序）：一条 `rm -rf ./build ~` 里
     // 真正成灾的是 `~`，而模型看到的拒绝理由若只说「目标是家目录」，它得回去自己
     // 逐个目标比对才知道该动哪一个——`./build` 删掉是安全的，误把它一起改掉反而更糟。
-    // 取词面 `raw`（Windows 轨的判据读的也是它），故两条轨道共用同一份点名。
+    // 取用词 `raw`（Windows 轨的判据读的也是它），故两条轨道共用同一份点名。
     //
     // ⚠ 这里**不需要**再兜一层空串：`disaster` 要求 `[value, raw]` 至少一形非空，
     // 而词法层保证 `rawContent` 是 `content` 的超集（转义只缩不增、`\`+换行两者都空），
     // 故 `raw === ""` 蕴含 `value === ""` —— disaster 为真时 raw 必非空。
-    // 反向那条 Windows 臂同样自足：`isWindowsShapeTarget` 命中盘符/UNC 形，raw 必非空。
+    // 反向那条 Windows 分支同样自足：`isWindowsShapeTarget` 命中盘符/UNC 形，raw 必非空。
     // 于是名单恒非空，`Fix` 那条「offending 非空」的不变式由这里结构性地兑现，
     // 不必留一条测不到的空串兜底（那正是覆盖率与可读性的双份负债）。
     const offending = [
@@ -2325,7 +2326,7 @@ function catastrophicRm(
 
 /** 取回内容的命令词：POSIX 三家之外还有 PowerShell 家族的 `Invoke-WebRequest`/
  *  `Invoke-RestMethod` 及其别名（`iwr`/`irm`）——Windows 上"下载即执行"的标准写法是
- *  `iwr -useb https://x | iex`，只认 curl/wget 就是现成的漏拦面。大小写不敏感：cmdlet 名
+ *  `iwr -useb https://x | iex`，只认 curl/wget 就是现成的漏拦。大小写不敏感：cmdlet 名
  *  在真实脚本里大小写混写（文档常写 `Invoke-WebRequest`）。 */
 const FETCH_VERBS = String.raw`\b(?:curl|wget|fetch|invoke-webrequest|invoke-restmethod|iwr|irm)\b`;
 const FETCH_HEAD_RE = new RegExp(FETCH_VERBS, "iu");
@@ -2338,7 +2339,7 @@ const FETCH_IN_CMDSUBST_RE = new RegExp(`\\$\\(\\s*${FETCH_VERBS}`, "iu");
  *  `echo "curl x | sh"` 放行而 `echo "$(curl x | sh)"` 照拦——后者实测真会执行。 */
 function pipeToShell(unprefixed: string): BashVerdict | undefined {
   let result: BashVerdict | undefined;
-  // 快速门槛：段里有取回内容的命令词
+  // 快速前置门槛：段里有取回内容的命令词
   if (FETCH_HEAD_RE.test(unprefixed)) {
     const fetchIdx = unprefixed.search(FETCH_HEAD_RE);
     // 两条模式同一条结论（`result = "pipeShell"`），故并成一个条件（sonarjs/no-duplicated-branches）：
@@ -2446,7 +2447,7 @@ function pkgManagerDanger(
   // 隐式 exec：yarn/pnpm/bun 对**非内建**子命令回落到本地 .bin 二进制——`yarn vite dev`
   // / `pnpm vite dev` / `bun vite dev` 真的会启动 dev server（实测与 npx 同危，此前放行）；
   // npm 对未知子命令报错，多查无害。⇒ 解析出的子命令/脚本名本身也按命令头过一遍长驻判据，
-  // 其后的词就是该二进制的参数（`yarn vite build` 的 build 照常给放行面用）。
+  // 其后的词就是该二进制的参数（`yarn vite build` 的 build 照常给放行用）。
   let result: BashVerdict | undefined;
   if (isTempPkg) {
     result = npxDanger(words, subPos, serverWords);
@@ -2463,8 +2464,8 @@ function pkgManagerDanger(
 }
 
 /**
- * 命令头 → 长驻判据的分派面（`devServer` 的下半，词表在这里已合并完毕）。
- * 四类命令头各走自己的口径，互斥：
+ * 命令头 → 长驻判据的分派（`devServer` 的下半，词表在这里已合并完毕）。
+ * 四类命令头各走自己的规则，互斥：
  * - 长驻词表内置项 + 用户配置词（`serverWords`）：按子命令/旗标区分长驻与一次性构建。
  * - `cargo`：`watch` 是长驻，`run` 是一次性执行。
  * - `npx`/`bunx`：旗标后取包名再判。
@@ -2533,7 +2534,7 @@ function devServer(
   tokens: readonly ShellToken[],
   ctx: DangerContext,
 ): BashVerdict | undefined {
-  // bin 名（去路径、已由 lexTokens 去引号）：`/usr/bin/vite`、`./.bin/next dev`、`"vite"` 与裸名同判。
+  // bin 名（去路径、已由 lexTokens 去引号）：`/usr/bin/vite`、`./.bin/next dev`、`"vite"` 与只写命令名同判。
   // 两形选形与 `matchesHead` 共用同一处 `devHeadOf`，所以"过滤说它可能命中"与"这里真按哪个词判"不会漂。
   return devServerDangerOfHead(
     devHeadOf(head, ctx),
@@ -2543,11 +2544,11 @@ function devServer(
   );
 }
 
-// ── 执行面归一：包装词之后的二次执行与嵌套 shell 的 `-c` 体 ────────────────────
-// 四类规则之外的兜底始终是"无"（未知即放行，保守），但**执行面**必须归一：
+// ── 执行上下文归一：包装词之后的二次执行与嵌套 shell 的 `-c` 体 ────────────────────
+// 四类规则之外的兜底始终是"无"（未知即放行，保守），但**执行上下文**必须归一：
 // 换一层 shell、一层 eval 就绕开全部四类，等于没有闸门。
 
-/** 可嵌套的执行面 shell 名（路径前缀形式 `/bin/bash` 同判）。与 SHELL_HEAD_RE 同族，
+/** 可嵌套的执行上下文 shell 名（路径前缀形式 `/bin/bash` 同判）。与 SHELL_HEAD_RE 同族，
  *  但**不含** source/`.`——它们的参数是文件，不是待解析的命令串。
  *  `fish`/`csh`/`tcsh` 也在这张表上：它们的 `-c` 体同样是要执行的命令串，
  *  不进名单就等于给"换一层冷门 shell"留了旁路（体内命令按 POSIX 形状判，
@@ -2562,7 +2563,7 @@ const BODY_CARRYING_WRAPPERS = new Set(["su", "runuser"]);
 /** shell 的 `-c`，含与短选项的合写（`-lc` / `-ic` / `-xc`）：其后第一词是命令串。 */
 const SHELL_C_FLAG = /^-[A-Zabd-z]*c[A-Za-z]*$/u;
 
-/** **PowerShell 家族**段头。`.exe` 形同判是本轮定的口径：`powershell.exe` 才是 Windows 上
+/** **PowerShell 家族**段头。`.exe` 形同判是本轮定的规则：`powershell.exe` 才是 Windows 上
  *  模型最常照抄的名字，而"`.exe` 算不算命令词"这条只在这一个家族上放宽——`cmd.exe` 仍
  *  按已登记边界处理（见 README 已知边界①）。名字比较一律先转小写：Windows 的命令名
  *  与旗标都大小写不敏感（`PowerShell`、`-COMMAND` 都合法），而 POSIX 那几张表按原形比。 */
@@ -2618,16 +2619,16 @@ const CODE_EVAL_FLAGS: Readonly<Record<string, readonly string[]>> = {
  *  （见文件头例外条款）。判定本身仍是每层 O(输入长度)、共 16 层，线性。 */
 const NESTED_SHELL_MAX_DEPTH = 16;
 
-/** 一次执行面读取的三种结论（判别联合：不把"本就没有体"和"取不出体"塌成同一个
+/** 一次执行上下文读取的三种结论（判别联合：不把"本就没有体"和"取不出体"塌成同一个
  *  undefined——前者是良性，后者要升格为需确认）。 */
 type NestedShellVerdict =
   // 可靠取到命令体：交回 commandDanger 递归判定。`windowsFace` = 这体该按 Windows 读法判
   // （段头是 PowerShell 家族 ⇒ 不管外层调用点是 `bash` 还是 `pwsh`，那一层读源的就是 pwsh）
   | { kind: "body"; body: string; windowsFace: boolean }
-  // 段头不是执行面 / 没有取体旗标 / 旗标后没有参数：本段没有下钻面（不是"取不出"）
+  // 段头不是执行上下文 / 没有取体旗标 / 旗标后没有参数：本段没有下钻（不是"取不出"）
   | { kind: "none" }
   // 看不见要做什么：体取不出可靠文本（引号未闭合、体内残留落单引号）、体在磁盘或 base64 里
-  // （`-File`、`-EncodedCommand`），或段头是**非 shell 的代码串解释器**（语言层的动作不在词法面上）
+  // （`-File`、`-EncodedCommand`），或段头是**非 shell 的代码串解释器**（语言层的动作不在词法上）
   // ⇒ 由调用方升格为需确认
   | { kind: "opaque" };
 
@@ -2638,7 +2639,7 @@ type NestedShellVerdict =
  * 切词吞掉的是配对引号，落单那枚只可能来自引号内的字面量，重接出的串与 shell 看到的
  * 词边界已不等价（`bash -c 'echo " ; vite'` 即此）。两种都由调用方升格为需确认。
  */
-/** 执行面旗标的位置：段头不参与匹配（真实形态里 `-c`/`-e` 必在命令名之后），
+/** 执行上下文旗标的位置：段头不参与匹配（真实形态里 `-c`/`-e` 必在命令名之后），
  *  合写形态（`-lc`/`-ic`）同义。 */
 function codeFlagIndex(words: readonly string[], isCodeFlag: (word: string) => boolean): number {
   return words.findIndex((word, index) => index > 0 && isCodeFlag(word));
@@ -2784,7 +2785,7 @@ function powershellBodyHidden(words: readonly string[]): boolean {
   return pshellFlagIndex(words, PSHELL_OPAQUE_FLAGS) !== -1;
 }
 
-/** 三种执行面段头各自的取体法：PowerShell 与 `eval` 都把剩余参数空格相接，POSIX shell
+/** 三种执行上下文段头各自的取体法：PowerShell 与 `eval` 都把剩余参数空格相接，POSIX shell
  *  的 `-c` 只取紧跟的那一枚（其余是 `$0`/`$1`）。 */
 function faceBodyOf(words: readonly string[], bin: string, pshell: boolean): string | undefined {
   if (pshell) {
@@ -2820,7 +2821,7 @@ function shellBodyVerdict(segText: string, words: readonly string[]): NestedShel
 }
 
 /**
- * 段头是执行面时取出**要执行的那条命令串**。四条路分别是各自的 shell 语义：
+ * 段头是执行上下文时取出**要执行的那条命令串**。四条路分别是各自的 shell 语义：
  * - POSIX shell 的 `-c`：紧跟的那一枚参数才是命令串，其后是 `$0`/`$1`（实测 `bash -c "true"
  *   "echo NOT-EXECUTED"` 只跑 `true`）——把它们一并接进命令体会把无害命令判成危险
  *   （`bash -c 'true' 'x; npm run dev'` 即此）；
@@ -2828,7 +2829,7 @@ function shellBodyVerdict(segText: string, words: readonly string[]): NestedShel
  * - PowerShell 家族：`-c`/`-Command`（含 `/c`、`/command`）之后**全部**参数空格相接后执行
  *   ⇒ join，且体按 Windows 读法判（`windowsFace`）；点了 `-File`/`-EncodedCommand` 而没有
  *   取体旗标 ⇒ 要执行的东西不在输入里，按"看不见"升格；
- * - 非 shell 解释器的 `-c`/`-e`：语言层动作不在词法面上 ⇒ kind "opaque"（需确认）。
+ * - 非 shell 解释器的 `-c`/`-e`：语言层动作不在词法上 ⇒ kind "opaque"（需确认）。
  * 体为空串（`bash -c "" rm -rf /`）给 "none"：实测 bash 什么都不执行，后面的词是 `$0`。
  */
 function nestedShellVerdictOf(segText: string, words: readonly string[]): NestedShellVerdict {
@@ -2971,7 +2972,7 @@ function ruleAtCandidates(
   return denial;
 }
 
-/** 一枚候选头的执行面结论：取不出体 / 体在磁盘或 base64 里 / 取代码串的非 shell 解释器 ⇒ 需确认；取到体 ⇒ 交回调下钻（并说明该按谁的方言读）。 */
+/** 一枚候选头的执行上下文结论：取不出体 / 体在磁盘或 base64 里 / 取代码串的非 shell 解释器 ⇒ 需确认；取到体 ⇒ 交回调下钻（并说明该按谁的方言读）。 */
 function faceDenialOf(
   segText: string,
   words: readonly string[],
@@ -2982,14 +2983,14 @@ function faceDenialOf(
   if (verdict.kind === "opaque") {
     denial = { key: "nestedShellUnconfirmed" };
   } else if (verdict.kind === "body") {
-    // 下钻与否（含"到界就不再取体、按需确认收口"）由调用方给的 drill 决定
+    // 下钻与否（含"到界就不再取体、按需确认统一处理"）由调用方给的 drill 决定
     denial = drill(verdict.body, verdict.windowsFace);
   }
   return denial;
 }
 
 /**
- * 一段命令的判定：三类规则逐候选命令头点位 + 执行面（shell 的 `-c`、`eval`、非 shell
+ * 一段命令的判定：三类规则逐候选命令头点位 + 执行上下文（shell 的 `-c`、`eval`、非 shell
  * 解释器的代码串）下钻。
  *
  * 下钻不在本函数里直接调 `commandDanger`，而是由调用方把递归**作为回调传进来**：
@@ -3007,12 +3008,12 @@ function segmentDenial(
   if (settled(ctx, rules)) {
     return rules;
   }
-  // 规则面只命中了 `ask` 档 ⇒ **仍要下钻**：`-c` 体里可能藏着一条 `deny` 档
+  // 规则表这里只命中了 `ask` 档 ⇒ **仍要下钻**：`-c` 体里可能藏着一条 `deny` 档
   //（`git push -f && bash -c "rm -rf ~"` 那种形状在段内也一样成立）。原实现在这里
   // 直接 return，`ask` 档一进来就会把体内那条更严重的判据整个跳过。
   let best = rules;
   const words = tokens.map((token) => token.value);
-  // 执行面按**整段**判一次：`su -c "<命令串>"` 的段头是 `su`，体是一枚带空格的参数。
+  // 执行上下文按**整段**判一次：`su -c "<命令串>"` 的段头是 `su`，体是一枚带空格的参数。
   // 若只按候选起点取 `words.slice(start)`，起点落到 `-c` 或体上时段头就不再是包装词，
   // 取体那一步整个失效 —— 这正是 `su -c "rm -rf ~"` 此前放行的原因。
   best = preferSevere(ctx, best, faceDenialOf(segText, words, drill));
@@ -3033,7 +3034,7 @@ function segmentDenial(
 /**
  * 体的读法收窄：段头是 PowerShell 家族时，那一层读源文本的是 pwsh/cmd 而不是外层 shell，
  * 所以 Windows 字形轨道必须在体内开着（`bash -c "pwsh -Command 'Remove-Item -Recurse C:\\Windows'"`
- * 里那串反斜杠路径是真分隔符）。这是**放宽到该读的那一侧**，不是从字形猜方言：段头本身就是
+ * 里那串反斜杠路径是真分隔符）。这是**依据段头身份把读法放宽**，不是从字形猜方言：段头本身就是
  * 执行器身份的证据，与「调用点方言由工具身份给」同一条纪律，只是把身份判据从工具名换成了段头名。
  */
 const withWindowsFace = (ctx: DangerContext): DangerContext =>
@@ -3044,7 +3045,7 @@ const withWindowsFace = (ctx: DangerContext): DangerContext =>
  * 两条界各自钉住一种成本，界外都不放行而是升格需确认：
  * - 嵌套 `-c` 的层数（`NESTED_SHELL_MAX_DEPTH`）：depth 只随层数增长（每层至少吃掉
  *   `bash -c ` 两词），与输入长度无关，所以"10 万字自嵌套"不会白烧 CPU 去无限下钻；
- * - 执行面区 `$( )`/反引号的层数（`REGION_MAX_DEPTH`，在词法层界住）：每多一层就要重扫
+ * - 执行上下文区 `$( )`/反引号的层数（`REGION_MAX_DEPTH`，在词法层界住）：每多一层就要重扫
  *   一遍所在串的文本，长度上限只界得住单次扫描，界不住"层数 × 长度"。
  */
 function commandDanger(
@@ -3055,7 +3056,7 @@ function commandDanger(
   // 管道语义是跨段结构（下载→执行）：先在整命令视野里判 pipeToShell，再逐段判其余三类。
   // 结构视图清空引号内的**字面**文本（`echo "curl x | sh"` 不该误拦），但保留 `$( )`/反引号
   // 体内内容——那一枚在真实 shell 里会执行（实测 `echo "$(seq 3 | tail -1)"` 输出 `3`），
-  // 按字面丢弃就是 `echo "$(curl -s https://x | sh)"` 这类写法的静默放行面。
+  // 按字面丢弃就是 `echo "$(curl -s https://x | sh)"` 这类写法的不做静默放行。
   // `${IFS}` 归一要在结构视图**之前**做：`curl x |${IFS}sh` 展开后才看得见那枚管道，
   // 按字面读时结构视图把 `|${IFS}sh` 读成一枚普通词，执行端就不存在了（下方 IFS 段同一条归一）。
   const normalized = normalizeIfs(command);
@@ -3096,7 +3097,7 @@ function commandDanger(
     result = preferSevere(ctx, result, { key: "nestedShellUnconfirmed" });
   }
   if (segmentation.truncated) {
-    // 执行面区（`$( )`/反引号）套得比界内更深 ⇒ 还有一批体没扫到。与 `-c` 超界同一条纪律：
+    // 执行上下文区（`$( )`/反引号）套得比界内更深 ⇒ 还有一批体没扫到。与 `-c` 超界同一条纪律：
     // 看不见的那部分要升格为需确认，不能拿"扫到的这些没危险"当放行依据。
     // 它**不压**已拿到的 `deny`（同级取先到，且 deny 更严重）——`preferSevere` 已经管住这点。
     result = preferSevere(ctx, result, { key: "nestedShellUnconfirmed" });
@@ -3105,7 +3106,7 @@ function commandDanger(
 }
 
 /**
- * **事实门专用**的写类目标（严格工具名口径，与 `lib/edit-targets.ts` 的键形口径刻意不同源）：
+ * **事实门专用**的写类目标（严格工具名规则，与 `lib/edit-targets.ts` 的键形规则刻意不同源）：
  * - edit / write（dsh-tool-fs）→ args.file_path（兼容 args.path）；
  * - str_replace_editor（dsh-tool-str-replace-editor 并存编辑器）→ args.path，
  *   但 command=view 是只读，返回 null（不拦、不过事实门）；
@@ -3137,17 +3138,17 @@ export function editTargetPath(
  * 合法源码（扩展名后还有 `.ts`）被当密钥误拦；新写法要求扩展名处于词尾（后不接词字符/点）。
  *
  * 内置词表补高频凭据位置。旧版只认 `.ssh/.gnupg/.aws/.kube`
- * + `id_*` + 扩展名白名单，导致 `.env` 全族（现代项目最高频凭据存放处：API key /
+ * + `id_*` + 扩展名白名单，导致 `.env` 一系文件（现代项目最高频凭据存放处：API key /
  * DB 连接串 / 第三方 token）、`.npmrc`/`.pypirc`/`.netrc`、`credentials.json`/
  * `service-account*.json`（GCP 服务账号密钥）、`.docker/config.json`、`secrets.yaml`
- * 等全部放行——正是"硬编码固定值"漏面的典型后果。
+ * 等全部放行——正是"硬编码固定值"漏的典型后果。
  *
  * 写成「分支数组 + String.raw + join('|')」而非单条正则字面量：
  *   - 每段可独立审计与单测（旧单行 200 字符正则无法逐段核对）；
  *   - `String.raw` 免掉一层转义陷阱——`new RegExp(string)` 里 `\\` 表示单反斜杠，
  *     字面量里的 `[\\/]`（反斜杠+斜杠类）在字符串里必须写成 `[\\\\/]` 才对，
  *     少一层就是只含 `/` 的类，Windows 路径全部漏拦（本分支已踩过）。
- * 误拦可通过卡片「额外密钥路径模式」自服务扩展（只能追加不能白名单，
+ * 误拦可通过卡片「额外密钥路径模式」自服务扩展（只能追加、不能配成白名单，
  * 故示例/模板类 `.env.example` 等已用负向前瞻显式排除）。
  */
 const SECRET_PATH_BRANCHES = [
@@ -3157,14 +3158,14 @@ const SECRET_PATH_BRANCHES = [
   //    （实测这四形逐条放行，而同表的 `.git/config` 相对形却拦得住——分支之间自相矛盾）。
   String.raw`(?:^|[\\/])(?:\.ssh|\.gnupg|\.aws|\.kube|\.docker)(?=[\\/])`,
   // 2) 私钥主名（路径分隔或词尾；`id_rsa.pub` 公钥、`id_rsa_backup`/`id_rsa-old`
-  //    等拷贝一并拦——后缀允许 `.`/`_`/`-`，与索引面 SECRET_EXCLUDE_GLOBS 的
+  //    等拷贝一并拦——后缀允许 `.`/`_`/`-`，与索引 SECRET_EXCLUDE_GLOBS 的
   //    `id_rsa*` 对齐；`id_rsaX` 这类连续字母名不算（非拷贝命名））
   String.raw`(?:^|[\\/])(?:id_rsa|id_ed25519|id_ecdsa)(?:$|[\\/._-])`,
   // 3) 密钥/证书扩展名：要求处词尾（后不接词字符或点），防 `api.key.ts` 误拦
   String.raw`\.(?:pem|key|p12|pfx|keystore|jks)(?![\w.])`,
-  // 4) `.env` 全族（`.env` / `.env.local` / `.env.production` / `.env-x` …）；
+  // 4) `.env` 及其变体（`.env` / `.env.local` / `.env.production` / `.env-x` …）；
   //    负向前瞻排除示例模板（`.env.example/.sample/.template/.dist/.defaults`）——
-  //    这类文件常提交进仓库、可安全编辑，且 extraSecretPatterns 只能追加不能白名单，
+  //    这类文件常提交进仓库、可安全编辑，且 extraSecretPatterns 只能追加、没有白名单，
   //    误拦将无 UI 出路。后缀段可重复（`.env.production.backup`）。
   String.raw`(?:^|[\\/])\.env(?![.-](?:example|sample|template|dist|defaults)(?:$|[\\/]))(?:[.-][A-Za-z0-9_]+)*(?:$|[\\/])`,
   // 5) 凭据类 dotfile：包管理器/语言/协议级凭据文件
@@ -3182,7 +3183,7 @@ const SECRET_PATH_BRANCHES = [
 const SECRET_PATH_RE = new RegExp(SECRET_PATH_BRANCHES.join("|"), "iu");
 
 /** 判定输入的规模上限。成本本身是线性的（实测 20 万字符命令 22.6ms），设上限是为了
- *  给"用户可扩展的正则"这一面一个硬界：模式由设置面注入，一条 `(a+)+$` 配 46 字符
+ *  给设置界面里用户能自己加的那批正则一条硬界限：模式由设置界面注入，一条 `(a+)+$` 配 46 字符
  *  路径就能把 guard 挂死两分钟以上（实测），而 guard 跑在工具调用主路径上。
  *  超限的结论是**需确认**，不是放行——判不完就是没判完。 */
 const MAX_JUDGED_COMMAND_LENGTH = 1_000_000;
@@ -3196,21 +3197,21 @@ export interface EditDangerOptions {
   extraSecretPatterns?: readonly string[];
   /** 会话工作目录：相对目标先按它解析成绝对路径再判。
    *  **调用点上下文，不是用户配置**——宿主从 `session.header.cwd` 拿（host 侧已有
-   *  `resolveTarget` 同一来源），lib 侧不碰 `process.cwd()`，纯函数口径不变。 */
+   *  `resolveTarget` 同一来源），lib 侧不碰 `process.cwd()`，纯函数规则不变。 */
   cwd?: string;
   /** 宿主给的**解析形清单**（`目标 → 真实路径们`；解析留在 host.ts 那一层，lib 侧不 import
-   *  `node:fs`，纯函数口径守住）。一枚目标可能同时有两形：本机 `realpathSync` 解出的那一形，
+   *  `node:fs`，纯函数规则守住）。一枚目标可能同时有两形：本机 `realpathSync` 解出的那一形，
    *  以及官方后端交出的那一形（`ctx.fs.resolve` + `processPath`，或 `fs/observed` 里后端自己
    *  报的 target）——非本地执行世界（sandbox / ssh / e2b）下只有后者说的是同一份盘。
    *  判定取**并集**：声明形与每一枚解析形各自过一遍词法形态，任一命中即拒。多一形只可能多拦，
-   *  方向与本包口径一致；少一形才是漏（所以两形从不互相替换）。
+   *  方向与本包规则一致；少一形才是漏（所以两形从不互相替换）。
    *  有这一位，"目录本身是软链"与"`~/.ssh/authorized_keys` 是指向别处的符号链接"就不再是
-   *  覆盖外。缺席时判定退回词法侧（少的是软链面，不是全部）。
+   *  覆盖外。缺席时判定退回词法侧（少的是软链状态，不是全部）。
    *  注意 TOCTOU 只是**收窄**而不是消除：解析与真实写入之间仍可能被换目标。 */
   resolvedPaths?: Readonly<Record<string, readonly string[]>>;
 }
 
-/** 内置 + 用户配置的密钥路径正则；用户那一部分的校验与编译住在 `lib/secret-patterns.ts`，
+/** 内置 + 用户配置的密钥路径正则；用户那一部分的校验与编译定义在 `lib/secret-patterns.ts`，
  *  按清单内容复用编译结果。 */
 function secretRegexes(opts: EditDangerOptions = {}): readonly RegExp[] {
   return [SECRET_PATH_RE, ...userSecretRegexes(opts.extraSecretPatterns ?? [])];
@@ -3220,13 +3221,13 @@ function secretRegexes(opts: EditDangerOptions = {}): readonly RegExp[] {
  * 目标的待判形态：原串 + 两种分隔符方言的词法归一（`.git/x/../config` 归一后就是
  * `.git/config`，实测此前撞不到分支 9），外加"宿主给了 cwd 时的绝对解析形态"。
  * 两个方言都算而不是"猜哪一个对"：判据不看 fs，无从知道 `a\b` 是 Windows 路径还是
- * POSIX 上带反斜杠的文件名——多算一种形态只可能**多拦**，方向与本包口径一致。
+ * POSIX 上带反斜杠的文件名——多算一种形态只可能**多拦**，方向与本包规则一致。
  */
 function targetForms(target: string, cwd: string | undefined): string[] {
   // 再加一份"把反斜杠折成正斜杠"的形态：用户配置的 `extraSecretPatterns` 是**正则**，
   // 而人写这类模式时几乎总用 `/`（`secrets/`、`internal/keys/`）。Windows 形目标
   //（`...\secrets\prod.env`）在只保留原形时永远匹配不上 —— 实测那个设置项在 Windows
-  // 上等于没配。多给一种形态只可能**多拦**，方向与本包口径一致（与"两种方言都算"同一条）。
+  // 上等于没配。多给一种形态只可能**多拦**，方向与本包规则一致（与"两种方言都算"同一条）。
   const forms = new Set([
     target,
     path.posix.normalize(target),
@@ -3272,7 +3273,7 @@ function formsToJudge(targetPath: string, opts: EditDangerOptions | undefined): 
 }
 
 /**
- * 对**已归一化的目标路径**做密钥面判定——`editDanger` 的内部一步：判定与上报共用同一个键，
+ * 对**已归一化的目标路径**做密钥检查判定——`editDanger` 的内部一步：判定与上报共用同一个键，
  * 不必在调用处再写一个永不生效的 null 兜底。
  * 待判的是**声明形 + 宿主给的解析形**（`resolvedPaths`）各自的全部词法形态：软链指向凭据
  * 时声明形看不出来，解析形看得出来；反过来解析失败（目标尚不存在）时声明形仍然要判。
@@ -3304,21 +3305,21 @@ export interface EditDenial {
 }
 
 /**
- * 单枚路径的密钥面判定（`editDanger` 的同一把词表，只是不收整份调用参数）。
+ * 单枚路径的密钥检查判定（`editDanger` 的同一把词表，只是不收整份调用参数）。
  * 为什么单独出口：预检的**引用扫描**要按路径决定"这份文件的正文能不能抄给模型"，
  * 而它手上只有一枚磁盘路径，没有 `file_path`/`path` 那层参数形状。两处必须同源——
  * 否则"编辑时算凭据、扫描时把它的正文当引用证据抄出去"就是同一把词表的两个读数，
  * 而那正是本包最不该有的那种漂。
  * @param target - 待判路径（绝对或相对；相对形按 `opts.cwd` 补一种绝对形态）。
  * @param opts - 与密钥闸同一份配置（用户追加的模式 + 会话目录）。
- * @returns 命中密钥面（含"长到判不了"那一档保守结论）时为 true。
+ * @returns 命中密钥检查（含"长到判不了"那一档保守结论）时为 true。
  */
 export function isSecretPath(target: string, opts?: EditDangerOptions): boolean {
   return secretPathDeny(target, opts) !== undefined;
 }
 
 /**
- * 编辑/写类调用的密钥面判定：对 `declaredTargets` 给的每一枚目标判，第一个命中即返回。
+ * 编辑/写类调用的密钥检查判定：对 `declaredTargets` 给的每一枚目标判，第一个命中即返回。
  * 入参不再有工具名——目标由**键形**认（见 `declaredTargets` 那条取舍）。
  */
 export function editDanger(
@@ -3342,7 +3343,7 @@ export function editDanger(
  *
  * 这是 host 侧 `tools.guard` 的 bash 部分谓词用的出口（它拿 `key` 去
  * `messagesFor(MESSAGES, locale)` 的结果里取拒绝理由，再按当次语言渲染 `fix`）。
- * 只关心"判不判"的那一侧走 `bashDanger`（同一份判定，本函数是它唯一的实现）。
+ * 只想知道"判不判"的调用方走 `bashDanger`（同一份判定，本函数是它唯一的实现）。
  *
  * @param opts 词表配置（extraDevServerWords / extraDevRunArgs）+ 调用点的 shell 方言
  * （`shellDialect`，由宿主按工具身份给，缺省 = POSIX 读法）。
@@ -3367,7 +3368,7 @@ export function bashVerdict(
 
 /**
  * bash 命令危险判定（**只回规则键**的老出口，签名与判定逐字未变）。
- * 为什么留着它而不是把 `bashVerdict` 顶上：它是本包随包发布的声明面的一部分
+ * 为什么留着它而不是把 `bashVerdict` 顶上：它是本包随包发布的声明的一部分
  * （`types/lib/danger-rules.d.ts`），改返回形状是一次破坏性变更，而消费侧要的往往
  * 只是"判不判"。本函数是 `bashVerdict` 的一行投影，两条路共用同一份判定 ——
  * 判定只有一份实现，所以"两出口给出不同结论"这件事结构上不成立。
@@ -3384,7 +3385,7 @@ export function bashDanger(
  * 逐字节同形，字形本身说明不了谁在读它）：`bash` 名下按 POSIX 读法、`pwsh` 名下按
  * Windows 字形轨道。其余工具名返回 `undefined`（本闸不判它们）。
  *
- * 为什么必须单源：guard 的 bash 闸与需确认档都要这个映射，两处各写一遍 `name === "pwsh" ? …`
+ * 为什么必须唯一来源：guard 的 bash 闸与需确认档都要这个映射，两处各写一遍 `name === "pwsh" ? …`
  * 时，任何一侧改了而另一侧没改，表现是"guard 拦得住、审批看不见"或反过来 ——
  * 那种不一致没有任何运行期信号，正是本包最不该有的那种漂。
  */
@@ -3436,7 +3437,7 @@ export interface BashHit {
  *  1. **方言**由工具身份给（`dialectOfTool`，不从字形猜）；
  *  2. 命令原文从参数里读一次并**随结论交回**（见 `BashHit`）；
  *  3. **后台执行的让路**：`devServer` 在 `run_in_background === true` 时不拦 ——
- *     宿主的作业面自己管生命周期，长驻不再挂死会话（理由见 `RUN_IN_BACKGROUND_KEY`）。
+ *     宿主的作业自己管生命周期，长驻不再挂死会话（理由见 `RUN_IN_BACKGROUND_KEY`）。
  *
  * 判据本体仍在 `bashVerdict`（与 `bashDanger` 同一份实现），所以三个出口不可能给出
  * 互相打架的结论。

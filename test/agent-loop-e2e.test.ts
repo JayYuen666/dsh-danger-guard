@@ -1,14 +1,14 @@
 // test/agent-loop-e2e.test.ts —— **点对点层**：真 AgentLoop 跑完整回合，断言"模型到底看见了什么"。
 //
 // 这一层是 A/B 混合改造的**唯一实证**。原因很具体：预检的全部论点是一句话——
-// "证据在模型**下一次动手之前**就出现在它的上下文里"。这在单元层只能测到"我们往结果面上挂了
+// "证据在模型**下一次动手之前**就出现在它的上下文里"。这在单元层只能测到"我们往结果的类型上挂了
 // 一块 additionalContexts"，而挂上去 ≠ 看得见：官方的链是
 //   post-execute 收下 additionalContexts → agent-loop 排到 **next-step** 边界 → 下一次
 //   pre-step 才 claim 进请求（packages/core/agent-loop/src/tool-calls.ts:157）。
-// 这三级里任何一级把我们的上下文吃掉，整套设计就是空的，而单元层全绿。
+// 这三级里任何一级把我们的上下文顶掉，整套设计就是空的，而单元层全绿。
 // 于是这里跑真 AgentLoop + 真 SessionStore + 真 ToolRuntime，只把**模型**换成脚本
 // （ScriptedModel，按官方 LlmAdapter 面实现），断言取在两个地方：
-//  - `model.requests[i]`：第 i 次请求里模型能看见的消息面（决定看得见，才叫前置）；
+//  - `model.requests[i]`：第 i 次请求里模型能看能看见的消息（决定看得见，才叫前置）；
 //  - 真磁盘：编辑放行后文件内容真的变了（结果不是我们自说自话）。
 import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
@@ -50,7 +50,7 @@ import type { Spine } from "./host-spine.ts";
 import { loggedText } from "./setup-logs.ts";
 
 const { zh } = MESSAGES;
-// 判别段的取法见 host-spine.ts：`[fact-gate]` 是三种口径共用的前缀，拿它当标记等于没断言。
+// 判别段的取法见 host-spine.ts：`[fact-gate]` 是三种规则共用的前缀，拿它当标记等于没断言。
 const HANDOFF_MARK = gateMarkOf(zh.preflightHandoff);
 const ATTACH_MARK = gateMarkOf(zh.preflightAttach);
 const LIST_MARK = gateMarkOf(zh.headFirst);
@@ -87,7 +87,7 @@ describe("agent-loop 点对点：真回合里的实证", () => {
   });
 
   describe("前置的实证：模型在下一次编辑之前就看到引用面", () => {
-    it("read 然后 edit(mid)：决定这次编辑的那一条请求里已经带着引用面，编辑当场放行并真落盘", async () => {
+    it("read 然后 edit(mid)：决定这次编辑的那一条请求里已经带着被引用，编辑当场放行并真写到磁盘", async () => {
       const { spine, agent } = await staged();
       const file = await addSource(spine, "front.ts");
       // 造一个真实引用者：引用面要点名得出它，才算"扫过这棵树"而不是背了一句模板
@@ -176,7 +176,7 @@ describe("agent-loop 点对点：真回合里的实证", () => {
       );
     });
 
-    it("清单点名的检索口径可以照做：read 加 grep(pattern,path) 之后重试放行", async () => {
+    it("清单点名的检索规则可以照做：read 加 grep(pattern,path) 之后重试放行", async () => {
       const { spine, agent } = await staged();
       // 要读到"清单"就得让 B 面答不出证据（它答得出就当场递证据、不给清单）：吃光扫描预算。
       // 于是这一枚用例证的正是集成层证不到的那一半——凭证来自**会话日志里模型自己的**读与搜。
@@ -239,7 +239,7 @@ describe("agent-loop 点对点：真回合里的实证", () => {
 
     it("配额用尽：第二次放行并留下一条警告（真轮次、真事件序）", async () => {
       const { spine, agent } = await staged({ maxDenies: 1 });
-      // 配额是 guard 的记账，只有走**行动清单**的那条路才推进轮次；B 面递证据拦的那一趟不计。
+      // 配额是 guard 的记录下来，只有走**行动清单**的那条路才推进轮次；B 面递证据拦的那一趟不计。
       // 所以先把扫描预算吃光，让 high 档的层证据答不出来（正向的递证据路径见上面几枚用例）。
       await capTree(spine);
       const file = await addSource(spine, "quota.ts");
@@ -265,7 +265,7 @@ describe("agent-loop 点对点：真回合里的实证", () => {
     });
   });
 
-  describe("密钥面与危险命令在真回合里的表现", () => {
+  describe("密钥检查与危险命令在真回合里的表现", () => {
     it("编辑 .env：哨兵字符串不出现在任何一条模型可见消息里（任何一次请求、任何一个来源）", async () => {
       const { spine, agent } = await staged();
       const env = spine.project.envFile;

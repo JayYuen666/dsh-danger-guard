@@ -28,7 +28,7 @@ const READ_ONLY: PolicyFacts = { ...WORKSPACE, mode: "read-only" };
 
 describe("容器族：取值旗标后面的词不能被当成子命令（#69 / #71）", () => {
   it("kubectl 的 --as-group 取走 --dry-run=client 之后，delete 不是预演", () => {
-    // 修前：kubectlDryRun 只看词面，把 --as-group 的取值当成了 kubectl 自己的预演旗标。
+    // 修前：kubectlDryRun 只看词形，把 --as-group 的取值当成了 kubectl 自己的预演旗标。
     assert.equal(
       kubectlDanger(["kubectl", "delete", "pod", "x", "--as-group", "--dry-run=client"]),
       "kubectlDelete",
@@ -47,7 +47,7 @@ describe("容器族：取值旗标后面的词不能被当成子命令（#69 / #
     );
   });
 
-  it("kubectl 的裸 --dry-run 取独立值：client/server 是预演，未知值仍算删除", () => {
+  it("kubectl 里不带取值的 --dry-run 取独立值：client/server 是预演，未知值仍算删除", () => {
     assert.equal(
       kubectlDanger(["kubectl", "delete", "pod", "x", "--dry-run", "client"]),
       undefined,
@@ -128,7 +128,7 @@ describe("git clean 的预演清单会偏小时不量（#75）", () => {
   });
 });
 
-describe("装饰器预转换的门槛只看程序正文（#50）", () => {
+describe("装饰器预转换的形状门槛只看程序正文（#50）", () => {
   it("注释里的 JSDoc @param 不触发预转换", () => {
     // 修前注释里的 @param 满足「@ 前是空白」，纯文档文件也白跑一次 tsc。
     assert.equal(
@@ -144,7 +144,7 @@ describe("装饰器预转换的门槛只看程序正文（#50）", () => {
     );
   });
 
-  it("真实装饰器仍触发（收紧门槛不能把该转换的漏掉）", () => {
+  it("真实装饰器仍触发（收紧形状门槛不能把该转换的漏掉）", () => {
     assert.equal(needsDecoratorLowering("lib/a.ts", "class X { @dec m() {} }\n"), true);
   });
 });
@@ -184,7 +184,7 @@ const DETAIL_ZH = "docs/DETAIL.zh.md";
 
 describe("两份 DETAIL 里 `enabled` 的正反语义不许写反（#20）", () => {
   it("英文版：开启侧只说守卫生效，放行挂在关掉之后", async () => {
-    // 实现面：host.ts 的 `if (rt.cfg.enabled)` 为真才进拦截链，`preflightSkipped` 里
+    // 实现：host.ts 的 `if (rt.cfg.enabled)` 为真才进拦截链，`preflightSkipped` 里
     // `!cfg.enabled` 让整趟首次编辑探查也不参与。修前这句写的是 "(on) turns the whole
     // guard off, so every command passes"，读者照字面配置会把守卫关掉。
     const bullet = await bulletOf(DETAIL_EN, "enabled");
@@ -208,9 +208,9 @@ const maxDeniesTexts = async (): Promise<string[]> => {
   return [en, zh, UI_MESSAGES.zh.maxDeniesHint, UI_MESSAGES.en.maxDeniesHint];
 };
 
-describe("`maxDenies` 的口径：未收敛、超过上限、缺 read 不放行（#21）", () => {
+describe("`maxDenies` 的规则：未收敛、超过上限、缺 read 不放行（#21）", () => {
   it("四处文字面都按 lib/fact-gate.ts 的决策写", async () => {
-    // 实现面（decideAfterFirstDeny）：计数在缺项集合缩为真子集时重置为 1，其余情况 +1；
+    // 实现（decideAfterFirstDeny）：计数在缺项集合缩为真子集时重置为 1，其余情况 +1；
     // `denials > maxDenies` 才兑现配额，所以放行发生在第 maxDenies+1 次；而
     // `gaps.some(gap => gap.need === "read")` 时扣下配额照常拒绝。修前四处都写成
     // 「连续无证据拒绝 maxDenies 次后放行」，既错在触发次数，也错在把「未收敛」说成「零证据」。

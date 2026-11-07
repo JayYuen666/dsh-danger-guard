@@ -217,7 +217,7 @@ describe("完全权限档的两个分支：零兵底只属于「问不了」的�
     assert.equal(decideRule(FULL_ACCESS, "noVerify"), "deny");
   });
 
-  it("还能问 ⇒ 不能按零兵底放行：沿用工作区档的处置（沙箱不兜底，写类要我们拦）", () => {
+  it("还能问 ⇒ 不能按零兵底放行：沿用工作区档的处置（沙箱不后备，写类要我们拦）", () => {
     for (const key of ALL_RULE_KEYS) {
       assert.equal(decideRule(FULL_ACCESS_ASKABLE, key), EXPECTED["workspace-write"][key], key);
     }
@@ -267,7 +267,7 @@ describe("rmrf 的沙箱让路只发生在「沙箱确实盖住这次目标」�
   });
 });
 
-describe("「问不了」的档位把 ask 收口成 deny，并标出这是策略降级", () => {
+describe("「问不了」的档位把 ask 统一处理成 deny，并标出这是策略降级", () => {
   it("能问 ⇒ ask 就是 ask", () => {
     assert.equal(decideRule(WORKSPACE_WRITE, "gitForcePush"), "ask");
     assert.equal(deniedByPolicy(WORKSPACE_WRITE, "gitForcePush"), false);
@@ -327,7 +327,7 @@ describe("severityResolverOf：扫描层按真实档位排序（串行命令的�
     }
     // 这条遍历同时就是「重复求值稳定」的判据：memo 是每次 `severityResolverOf` 自己带一枚
     // `Map`（lib/mode-policy.ts），闭包各判各的，跨 facts 复用那一条在结构上不可能发生。
-    // 再写一条 `severity(k) === severity(k)` 只是恒真断言——纯函数对它必然成立，钉不住任何回归。
+    // 再写一条 `severity(k) === severity(k)` 只是永远成立断言——纯函数对它必然成立，钉不住任何回归。
   });
 
   it("串行命令按真实档位择优：前段放行不会吞掉后段该问的那一条", () => {

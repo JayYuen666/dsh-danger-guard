@@ -4,7 +4,7 @@
 // 注册与取值走官方 @deepseek-ai/dsh-client-locale 的**类型化**那两条重载：
 // `ctx.locale.register(ns, dicts)`（两语一次交齐）+ `ctx.locale.bind(ns)`，语言切换由宿主
 // 驱动、无需重载页面（见 client-entry.ts 的 apply）。本包命名空间已 merge 进官方
-// `LocaleNamespaceMap`（下面那条 `declare module`），故键集与函数面都由官方表达式交出。
+// `LocaleNamespaceMap`（下面那条 `declare module`），故键集与函数类型都由官方表达式交出。
 // 插值不放进字典正文之外的部分（官方字典是扁平字符串表）：带变量的整行由调用点用本表的
 // `{tools}`/`{chars}` 占位 + 官方 Translate 的 params 填（占位符集合两语一致由测试比对）。
 // host 半回给模型的拒绝理由是另一份字典（lib/messages.ts）——那边没有官方 i18n 面。
@@ -83,7 +83,7 @@ export interface UiMessages {
   readonly statsRefresh: string;
   /** 读取中。 */
   readonly statsLoading: string;
-  /** 宿主侧统计读面不在时的那句（不装 Remote 的部署会看到它）。 */
+  /** 宿主侧统计读取接口不在时的那句（不装 Remote 的部署会看到它）。 */
   readonly statsUnavailable: string;
   /** 还没有判定发生过。 */
   readonly statsEmpty: string;
@@ -93,7 +93,7 @@ export interface UiMessages {
   readonly statsHits: string;
   /** 需确认的命中分布（槽位 summary）。 */
   readonly statsAsks: string;
-  /** 本档看见了但没拦的命中（按规则键）：零兜底与"交给 reviewer"两类的合计口径。 */
+  /** 本档看见了但没拦的命中（按规则键）：零兜底与"交给 reviewer"两类的合计规则。 */
   readonly statsAllowed: string;
   /** 重复命中未再上报的次数（同一会话同一命令）。 */
   readonly statsSkipped: string;
@@ -110,7 +110,7 @@ export interface UiMessages {
  * `ctx.locale.bind(NS)` 只能落到官方那条**未类型化**重载（installed
  * `dsh-client-locale/lib/types/client/index.d.ts:226`），返回 `Translate<string>`，而卡片
  * 要的是键集收窄的 `t`，于是本地只好自己声明一个官方给不出的函数形状。
- * 本包程序里实测到的红字（把键收窄的 `t` 投影回官方服务面 `LocaleRuntime['bind']`，
+ * 本包程序里实测到的红字（把键收窄的 `t` 投影回官方宿主服务 `LocaleRuntime['bind']`，
  * 也就是那条未类型化重载跟着进目标类型时）：
  *   TS2322 Type '(ns: string) => Translate' is not assignable to type
  *     '{ <N extends Extract<keyof LocaleNamespaceMap, string>>(ns: N): TranslateNS<N>;
@@ -141,7 +141,7 @@ const LOCALE_NS_KEY = "danger-guard" as const;
 
 /**
  * 本源只以**类型**形态对外流通：`client-entry.ts` 的 `const NS: LocaleNs = "danger-guard"` 把条目
- * id 钉在本源上（分叉即编译期红），而产物漂移针仍要按字面量形状从 bundle 里抓 `NS`，所以那里
+ * id 钉在本源上（分叉即编译期红），而产物漂移检查仍要按字面量形状从 bundle 里抓 `NS`，所以那里
  * 保留字面量、只加类型标注——值导出不必存在（用例侧同理：要断言运行时那串就写字面量）。
  */
 export type LocaleNs = typeof LOCALE_NS_KEY;
@@ -150,7 +150,7 @@ export type LocaleNs = typeof LOCALE_NS_KEY;
  * 卡片取文案的函数形状：官方 `TranslateNS<N>`（installed `dsh-client-ui-slots/lib/types/
  * index.d.ts:67` `= Translate<LocaleKeysOf<N>>`，而 `Translate<K> = (key: K, params?) =>
  * string`，同文件 :45）——键集就是上面 merge 的 `keyof UiMessages`（外加官方 `common`
- * 命名空间的共享词表，`LocaleKeysOf` 的查找链在 miss 之后会 consult 它），函数面完全归
+ * 命名空间的共享词表，`LocaleKeysOf` 的查找链在 miss 之后会 consult 它），函数类型完全归
  * 官方，本地不再声明。
  */
 export type Translate = OfficialTranslateNS<typeof LOCALE_NS_KEY>;

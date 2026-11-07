@@ -4,13 +4,13 @@
 // "那几项分别该做什么"，两半的读者并不相同——host 只喂结构、渲染在 guard 调用点现做，而
 // `renderDenyMessage` 与 `needsKey` 各自要用的是这里的一个出口。此前两半同住一个文件，
 // 只有状态机内部用到的那两枚符号就只剩测试在取用，`fallow --production` 把它们判成
-// 「只被测试养着的导出面」。
+// 「只被测试养着的导出」。
 //
-// NEED_ORDER 与指令表是同一枚枚举的两个面：表由 `Record<FactNeed, …>` 在编译期要求补齐，
+// NEED_ORDER 与指令表是同一枚枚举的两边：表由 `Record<FactNeed, …>` 在编译期要求补齐，
 // 顺序表另有 `NEED_ORDER_COMPLETE` 的编译期闸门与运行时自检用例双保险（漏一项 =
 // `needsKey` 的收敛比对静默丢项，模型补了也不收敛）。放在一起，新增 need 时才看得见彼此。
 //
-// 文案不在本文件：中英两份单源在 lib/messages.ts，渲染函数把消息表当**参数**收——宿主在
+// 文案不在本文件：中英两份唯一来源在 lib/messages.ts，渲染函数把消息表当**参数**收——宿主在
 // guard 调用点传 `messagesFor(MESSAGES, locale)` 的结果。于是这一层既不读设置、也不自带某
 // 一种语言，测试只需喂一份字典；键齐全由 tsc 保证（`Messages[key]` 取值类型），覆盖率不添
 // 不可达分支。
@@ -38,12 +38,12 @@ export type NeedOrderCoversFactNeed = [
 ] extends [never]
   ? true
   : never;
-/** 编译期闸门的落点：新增 `FactNeed` 字面量而不补进 `NEED_ORDER_TUPLE` 时，上面的条件
+/** 编译期闸门的位置：新增 `FactNeed` 字面量而不补进 `NEED_ORDER_TUPLE` 时，上面的条件
  *  类型不再是 `true`、这一行赋值当场红。导出是为了不留"未使用声明"的 lint 债。 */
 export const NEED_ORDER_COMPLETE: NeedOrderCoversFactNeed = true;
 export const NEED_ORDER: readonly FactNeed[] = Object.freeze([...NEED_ORDER_TUPLE]);
 
-/** 按判据口径分区的工具名（从 `criteria` 单源派生，不用 `patternTools`/`strictTools` 两份
+/** 按判据规则分区的工具名（从 `criteria` 唯一来源派生，不用 `patternTools`/`strictTools` 两份
  *  数组——`RefSearchPolicy` 是可手写的导出接口，两份数据一旦不一致，never 指令说
  *  "没有任何计入取证的检索工具"、narrow 指令却点名具体工具。Map 的键序 = 插入序
  *  （`refSearchPolicyOf` 按配置序插入），派生顺序与那两份数组一致）。 */
@@ -55,7 +55,7 @@ const toolsByCriterion = (policy: RefSearchPolicy): Record<RefSearchCriterion, s
   return out;
 };
 
-/** 每种口径一句"用什么工具、起点参数叫什么、签名放什么"——与实际记账判据同形。 */
+/** 每种规则一句"用什么工具、起点参数叫什么、签名放什么"——与实际记录判据同形。 */
 const probeClauses = (
   policy: RefSearchPolicy,
   name: string,
@@ -92,7 +92,7 @@ const countedToolNames = (policy: RefSearchPolicy, messages: DangerGuardMessages
     ? messages.countedToolsEmpty
     : [...policy.criteria.keys()].join(messages.listSeparator);
 
-/** 引用探查行动指令：满足任一口径即计入（与 host 的引用取证判据一一对应）。 */
+/** 引用探查行动指令：满足任一规则即计入（与 host 的引用取证判据一一对应）。 */
 const refsNeverLine = (
   policy: RefSearchPolicy,
   name: string,
@@ -143,7 +143,7 @@ const gapLines = (
       never: () => fillTemplate(messages.gapTestBase, slots),
       external: () => fillTemplate(messages.gapTestBase, slots),
       failed: () => fillTemplate(messages.gapTestBase, slots),
-      // test 的 narrow 要指出"落点不对"（层探查类里唯一的例外），且不带 hint。
+      // test 的 narrow 要指出"位置不对"（层探查类里唯一的例外），且不带 hint。
       narrow: () => fillTemplate(messages.gapTestNarrow, noHint),
     },
     // e2e / docs 的指令与成因基本无关（都是"去那层目录搜本文件"）。

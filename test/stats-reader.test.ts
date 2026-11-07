@@ -1,9 +1,9 @@
-// test/stats-reader.test.ts —— 客户端**读面**（`src/stats-reader.ts`）的接线契约。
+// test/stats-reader.test.ts —— 客户端**读取接口**（`src/stats-reader.ts`）的接线契约。
 //
-// 为什么单列一份：0.1.3 把这条读面接成 `ctx.remote`（未 inject）⇒ cordis 读即抛 ⇒ 整条 client
+// 为什么单列一份：0.1.3 把这条读取接口接成 `ctx.remote`（未 inject）⇒ cordis 读即抛 ⇒ 整条 client
 // 入口不激活、web boot 失败（页面卡在错误页）。修法走 `ctx.get`（显式读取，不受 inject 门禁），
-// 而 `test/client-card.test.ts` 的 inject 门禁桩件只覆盖"入口不碰未声明服务"这一面；这一份补的是
-// 读面自己的行为：**挂载一次**（幂等）、**命名空间按 `remote.<ns>` 键读**、失败如实抛出。
+// 而 `test/client-card.test.ts` 的 inject门禁测试替身只覆盖"入口不碰未声明服务"这一条；这一份补的是
+// 读取接口自己的行为：**挂载一次**（幂等）、**命名空间按 `remote.<ns>` 键读**、失败如实抛出。
 import { describe, it } from "vitest";
 import { strict as assert } from "node:assert";
 
@@ -23,7 +23,7 @@ const SNAPSHOT: StatsSnapshot = {
   window: 200,
 };
 
-/** 造一枚假远程面：记录 `$mount` 次数与命名空间读取用的键。 */
+/** 造一枚假远程通道：记录 `$mount` 次数与命名空间读取用的键。 */
 function fakeHost(options: { namespace?: unknown; mountRejects?: boolean } = {}): {
   ctx: { get?: (name: string, strict?: boolean) => unknown };
   mounts: () => number;
@@ -53,15 +53,15 @@ function fakeHost(options: { namespace?: unknown; mountRejects?: boolean } = {})
 /** 一枚只实现 `stats()` 的命名空间服务。 */
 const namespaceOf = (result: unknown): unknown => ({ stats: async (): Promise<unknown> => result });
 
-/** 造一台"命名空间交回给定值"的读取器（模块级：存在性断言在 helper 里收口，用例免写）。 */
+/** 造一台"命名空间交回给定值"的读取器（模块级：存在性断言在 helper 里统一处理，用例免写）。 */
 const readerFor = (value: unknown): (() => Promise<StatsSnapshot>) => {
   const reader = createStatsReader(fakeHost({ namespace: namespaceOf({ ok: true, value }) }).ctx);
   assert.ok(reader !== undefined, "远程面在位：读取器必须成形");
   return reader;
 };
 
-describe("客户端读面：ctx.get 取远程面、挂载一次、按 remote.<ns> 读命名空间", () => {
-  it("没有远程面（或 ctx 没有 get）→ 返回 undefined（卡片显示「读不到」，入口照常）", () => {
+describe("客户端读取接口：ctx.get 取远程通道、挂载一次、按 remote.<ns> 读命名空间", () => {
+  it("没有远程通道（或 ctx 没有 get）→ 返回 undefined（卡片显示「读不到」，入口照常）", () => {
     assert.equal(createStatsReader({}), undefined);
     assert.equal(
       createStatsReader({
@@ -99,8 +99,8 @@ describe("客户端读面：ctx.get 取远程面、挂载一次、按 remote.<ns
     assert.equal(host.mounts(), 1, "$mount 幂等：刷新不该反复挂载");
     // 命名空间服务的键就是 `remote.<namespace>`（gateway 的 remoteServiceKey），且用**非严格**读
     // ——它是挂载后才出现的服务，严格读会在"还没挂上"的窗口里抛。可选读显式传 false
-    // （与 createStatsReader 取远程面那一处同形），"没装远程面要降级、不要抛"在代码上自证。
-    // 语义断言而不是整组快照：远程面取一次（可选读）；每次刷新都要重读命名空间服务。
+    // （与 createStatsReader 取远程通道那一处同形），"没装远程通道要降级、不要抛"在代码上自证。
+    // 语义断言而不是整组快照：远程通道取一次（可选读）；每次刷新都要重读命名空间服务。
     assert.equal(host.reads[0], "remote:false", "远程面按可选读取一次");
     const namespaceReads = host.reads.slice(1);
     assert.ok(namespaceReads.length >= 2, "两次刷新至少重读命名空间两次");
@@ -111,7 +111,7 @@ describe("客户端读面：ctx.get 取远程面、挂载一次、按 remote.<ns
     );
   });
 
-  it("远程面晚到：读取器在创建时就取定，不做二次解析（已知限制，卡片刷新才恢复）", () => {
+  it("远程通道晚到：读取器在创建时就取定，不做二次解析（已知限制，卡片刷新才恢复）", () => {
     // 与 src/client-entry.ts 的 apply 期创建一致：remote 不 inject，晚于本插件激活时
     // 当时读到 undefined，读取器就是 undefined。这里把限制显式钉住；若将来改成延迟解析，
     // 这条用例会红，提醒同时更新卡片侧的降级语义。
@@ -226,7 +226,7 @@ describe("topLines：排序与裁剪", () => {
       [],
       "超过安全整数的值不是合法条数（它已经不是自己那枚常量的精确表示了）",
     );
-    // 类型面收不住"调用方漏传"：`limit: number` 在运行期仍可能收到 undefined（JS 调用方或
+    // 类型上收不住"调用方漏传"：`limit: number` 在运行期仍可能收到 undefined（JS 调用方或
     // 上游可选字段忘了判），那一支必须与 0 同形，而不是让 slice 自己解释 undefined。
     const missing = undefined as unknown as number;
     assert.deepEqual(topLines(counts, missing), [], "漏传按空表处理");

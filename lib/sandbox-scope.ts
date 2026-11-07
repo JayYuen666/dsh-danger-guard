@@ -1,17 +1,17 @@
-// lib/sandbox-scope.ts —— **宿主沙箱管辖面**：哪些灾难目标该让给宿主去拦。
+// lib/sandbox-scope.ts —— **宿主沙箱管辖范围**：哪些灾难目标该让给宿主去拦。
 //
 // 为什么单列（而不是留在 host.ts 的判定链里）：host.ts 顶到 `eslint/max-lines` 的 2000 行
-// 预算（本仓既有的搬迁理由），而这一段是**自成一体的一个判断**：读宿主的两个能力面
+// 预算（本仓既有的搬迁理由），而这一段是**自成一体的一个判断**：读宿主的两个能力清单
 // （`ctx.shell` 自报的沙箱模式 + `ctx.sandboxPolicy` 解析出的逐调用策略），
 // 再决定这次的目标包不包得住可写的东西。
 //
 // ⚠ 本模块不 import `node:fs`（本仓纪律）：把"路径折成规范形"这一步由**宿主注入**
 //（`Canonicalize`），因为本机 `realpathSync` 是同步判定链唯一付得起的那种解析，
-// 而它住在 host.ts。`node:os` 可以用（`lib/danger-rules.ts` 已在用，它不触盘）。
+// 而它实现在 host.ts。`node:os` 可以用（`lib/danger-rules.ts` 已在用，它不触盘）。
 //
 // ⚠ 本模块**不是执行侧的清单**：可写根只用来做包含性测试。真正的允许清单归官方
 // `writableRoots`，而那是值导入（会被 rolldown 内联、在本包里多出一份官方函数体，
-// 本仓明令禁止）—— 这里按它的**语义**复现，并复用它的失败口径。
+// 本仓明令禁止）—— 这里按它的**语义**复现，并复用它的失败规则。
 
 import path from "node:path";
 import { asOsPath } from "./path-format.ts";
@@ -25,13 +25,13 @@ import type { PolicyFacts } from "./mode-policy.ts";
 /** 规范形折法：宿主用自己的同步解析实现注入。解析不出来交回 `undefined`。 */
 export type Canonicalize = (absolutePath: string) => string | undefined;
 
-/** `ctx.shell` 的读取面：本包只探**执行器自报的沙箱模式**这一位。
+/** `ctx.shell` 的读取：本包只探**执行器自报的沙箱模式**这一位。
  *  取不到即当"这个执行器不沙箱"——方向保守（见 `sandboxDropsOf`）。 */
 interface ShellFace {
   readonly sandboxMode?: unknown;
 }
 
-/** `ctx.sandboxPolicy` 的读取面：本包只调 `resolve` 一位。 */
+/** `ctx.sandboxPolicy` 的读取：本包只调 `resolve` 一位。 */
 interface SandboxPolicyFace {
   resolve: (request?: { session?: unknown }) => unknown;
 }
@@ -53,7 +53,7 @@ const isSandboxPolicyFace = (value: unknown): value is SandboxPolicyFace =>
  *  只认这两枚字面量：宿主将来加 mode 时这里取不到 ⇒ 不让路 ⇒ 保守。 */
 const CONFINING_MODES: ReadonlySet<string> = new Set(["read-only", "workspace-write"]);
 
-/** 判据用得着的全部部署事实。`undefined` = 这次不让路（我们兜底）。 */
+/** 判据用得着的全部部署事实。`undefined` = 这次不让路（我们后备）。 */
 export interface SandboxScope {
   readonly mode: string;
   /** 可写根（**规范形**，已去重）。标成 `OsPath`：它们与目标必须是同一个路径世界。 */
@@ -64,7 +64,7 @@ export interface SandboxScope {
  * `path` 是否就是 `root` 或落在它之下（照官方 `workspace-changes/src/paths.ts` 的 `isInside`）。
  *
  * 为什么不拼前缀再 `startsWith`：那要自己判"末尾有没有分隔符"，而分隔符在 Windows 上是
- * `\\`、混形还合法——每漏一种写法就多一条恒假的判据。`path.relative` 由平台实现同时解决
+ * `\\`、混形还合法——每漏一种写法就多一条永远不成立的判据。`path.relative` 由平台实现同时解决
  * 分隔符与 `..` 归一，这也是官方那边的做法。
  *
  * @param root      绝对目录。
@@ -74,7 +74,7 @@ export interface SandboxScope {
 
 function isInside(pathApi: PathApi, root: string, candidate: string): boolean {
   // 包含性判据**吃注入的路径实现**，不读宿主平台：这条判据的失效方向是不安全的
-  //（恒假 ⇒ "沙箱盖不住"恒假 ⇒ 把本该硬拒的灾难删除让给沙箱），所以它必须在两种
+  //（永远不成立 ⇒ "沙箱盖不住"永远不成立 ⇒ 把本该硬拒的灾难删除让给沙箱），所以它必须在两种
   // 路径规则下都成立。注入之后可以在 macOS 上用 `path.win32` 直接验。
   const rel = pathApi.relative(root, candidate);
   // ⚠ 判"是否上跳出根"必须比**路径组件边界**，不能只看 `rel.startsWith("..")`：
@@ -91,7 +91,7 @@ const isAncestorDirOf = (pathApi: PathApi, candidate: string, target: string): b
   candidate !== target && isInside(pathApi, candidate, target);
 
 /**
- * 读宿主的沙箱管辖面。**任何一处读不到就交回 `undefined`**，调用方据此不让路。
+ * 读宿主的沙箱管辖范围。**任何一处读不到就交回 `undefined`**，调用方据此不让路。
  *
  * 入参形状照官方 `tool-bash` 自己的读法（`sandboxPolicy.resolve(exec.agent === undefined
  * ? {} : { session })`）：`ctx.shell.sandboxMode` 是**执行器的自报**（`undefined` 表示这个
@@ -109,7 +109,7 @@ const isAncestorDirOf = (pathApi: PathApi, candidate: string, target: string): b
 /**
  * 执行器**自报**的、确实在拦的模式；自报不沙箱、读不到、或不是三种模式之一 ⇒ `undefined`。
  *
- * 只看策略那一侧时，一个自报"不沙箱"的执行器配上一条说自己在拦的策略就能骗到让路——
+ * 只凭策略那条返回值判断时，一个自报"不沙箱"的执行器配上一条说自己在拦的策略就能骗到让路——
  * 而让路之后没人再兜底。
  */
 function confiningShellModeOf(shellRaw: unknown): string | undefined {
@@ -156,9 +156,9 @@ function additionalRootsOf(value: unknown): readonly string[] | undefined {
  * `workspaceRoot` 读不出（非字符串 / 空串）时交回 `undefined`：根表缺了工作区根，
  * 工作区里的目标会显得"谁都没包住"，于是被判成沙箱完全覆盖而让路——而那正是
  * `workspace-write` 允许真实删完的地方。`/tmp` 与平台临时区照常可算，但它们**不能**
- * 代替工作区根，所以这里不按"其余照常"处理（见 `additionalRootsOf` 的同一条口径）。
+ * 代替工作区根，所以这里不按"其余照常"处理（见 `additionalRootsOf` 的同一条规则）。
  *
- * 规范化失败的口径与官方一致：**解析不出来就不算可写**
+ * 规范化失败的规则与官方一致：**解析不出来就不算可写**
  *（官方原话 "a missing root matches nothing until it exists — the conservative outcome"）。
  */
 function writableRootsOf(
@@ -172,13 +172,13 @@ function writableRootsOf(
     roots = [];
     for (const candidate of [workspaceRoot, ...additionalWritableRoots, "/tmp", tempDir]) {
       // 解析不出来时按 `path.resolve` 形保留，**不丢这一枚**：宿主的 `realpathOf` 在整条
-      // 前缀都不存在时才回 `undefined`，而灾难目标那一侧同样出自 `path.resolve` 的世界，
-      // 保留 resolve 形才让两侧同世界。丢掉这一枚的后果是**反方向**的：它底下的目标
+      // 前缀都不存在时才回 `undefined`，而灾难目标算出来的路径同样出自 `path.resolve` 的世界，
+      // 保留 resolve 形才让两边同世界。丢掉这一枚的后果是**反方向**的：它底下的目标
       // 看起来"谁都没包住"，于是被判成沙箱覆盖而让路——实测 `rm -rf .` 会因此变成放行。
       const branded = asOsPath(canonicalize(candidate) ?? path.resolve(candidate));
       // 这里的每一枚都是宿主真实路径（工作区根、临时区、规范化后的形），
-      // 标成 `OsPath` 让下游的包含性判据只能收同一个世界的东西。灾难目标那一侧必须
-      // 同样折成规范形再比（见 `effective-disposition` 的 `canonicalFixOf`）：只在这一侧
+      // 标成 `OsPath` 让下游的包含性判据只能收同一个世界的东西。灾难目标算出来的路径必须
+      // 同样折成规范形再比（见 `effective-disposition` 的 `canonicalFixOf`）：只在根这份名单上
       // 登记词法形会同时改变「目标落在根之内」的判定，工作区里的删除会被误判成可让路。
       if (!roots.includes(branded)) {
         roots.push(branded);
@@ -189,7 +189,7 @@ function writableRootsOf(
 }
 
 /**
- * 策略解析出来的管辖面；mode 不在拦、解析不全、根表不可信、或一枚可写根都拿不到时
+ * 策略解析出来的管辖范围；mode 不在拦、解析不全、根表不可信、或一枚可写根都拿不到时
  * `undefined`。
  *
  * 入参形状照官方 `tool-bash` 自己的读法（`sandboxPolicy.resolve(exec.agent === undefined
@@ -296,7 +296,7 @@ export function sandboxDropsOf(
  *
  * 与 `sandboxScopeOf` 的分工：那个只回"沙箱**确实在拦**"的两档（`danger-full-access` 不在
  * 列，因为它绕开限制），用途是"该不该让路"；本函数回**原始模式**，用途是"该按哪一列处置"。
- * 两者读同一对服务面，前提也一致：执行器自报 `danger-full-access` 时它不拦文件效应，
+ * 两者读同一对宿主服务，前提也一致：执行器自报 `danger-full-access` 时它不拦文件效应，
  * 策略侧再解析出什么模式都不改变这一点——本函数据自报返回 `danger-full-access`，
  * 而不是返回一个与实际环境不符的受限档位。
  *
@@ -336,13 +336,13 @@ export function sandboxModeOf(
  * 把"沙箱是否完全覆盖这次目标"补齐进档位事实（只有 `rmrf` 用到这一位）。
  *
  * 判据本体仍是本模块的 `sandboxDropsOf`（"目标包不住任何可写根"）；这里只做两件事：
- * 把灾难目标词面折成绝对路径、按 `SANDBOX_COVERED` 收窄规则键。空目标集合**明确不让路**——
- * 空数组会让 `every` 恒真，那是误放行。
+ * 把灾难目标词折成绝对路径、按 `SANDBOX_COVERED` 收窄规则键。空目标集合**明确不让路**——
+ * 空数组会让 `every` 永远成立，那是误放行。
  *
  * @param facts   已折好的档位事实。
  * @param key     命中的规则键。
  * @param fix     这次命中的结构化出路（灾难目标挂在 `offending` 上）。
- * @param scope   已折好的沙箱管辖面（`sandboxScopeOf` 的产出；`undefined` = 不让路）。
+ * @param scope   已折好的沙箱管辖范围（`sandboxScopeOf` 的产出；`undefined` = 不让路）。
  * @param cwd     会话当前工作目录（相对目标按它归一）。
  * @returns 补齐 `sandboxCovers` 之后的事实（不让路时原样返回）。
  */

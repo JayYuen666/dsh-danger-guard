@@ -7,13 +7,13 @@
 // 真后端下要造"读的时候正好故障"没有稳定办法，而这几支的语义（哪些算没扫完）恰恰是
 // "零命中"那句结论能不能说出口的唯一依据。
 //
-// 共同口径（下面每条都有用例；条数不在此复述，以免与列表各说一套）：
+// 共同一种做法（下面每条都有用例；条数不在此复述，以免与列表各说一套）：
 //  - **整趟作废**：取消 ⇒ 回 undefined ⇒ 不注入、不记凭证（半份"已探过引用面"最糟）；
 //  - **降级但不作废**：目录列不出 / 子项探不到 / 文件读不动 ⇒ `complete: false`
 //    ⇒ 文案换成"已扫范围内"，refs 凭证不给（保守），但已取到的正文照给；
-//  - **不展开**：软链、点开头目录、依赖/产物目录 ⇒ 跳过而**不**降级（按口径就不看）；
+//  - **不展开**：软链、点开头目录、依赖/产物目录 ⇒ 跳过而**不**降级（按规则就不看）；
 //  - **走到了但没读**：超大文件、二进制 ⇒ 进 `unread` / `unreadNotQuarantined`，
-//    零命中结论要降级成「已扫范围内」（它们不是"按口径不看"，是"这份正文没看"）。
+//    零命中结论要降级成「已扫范围内」（它们不是"按规则不看"，是"这份正文没看"）。
 import { describe, it, beforeEach, afterEach } from "vitest";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
@@ -109,7 +109,7 @@ describe("引用扫描的降级与跳过", () => {
     const scan = await scanned({ readThrows: "read boom" });
     assert.equal(scan.complete, false);
     // `scanned` 的契约是「真实读到正文的文件数」：读不动只证明走到了这一枚，
-    // 不能据此声称探过它的内容；它由 `unreadNotQuarantined` 记账。
+    // 不能据此声称探过它的内容；它由 `unreadNotQuarantined` 记录下来。
     assert.equal(scan.scanned, 0, "没读到正文就不能算进读过");
     assert.equal(scan.unreadNotQuarantined.length, 1);
   });
@@ -130,18 +130,18 @@ describe("引用扫描的降级与跳过", () => {
     await assert.rejects(
       () => scanned({ resolveThrows: "resolve boom" }),
       /resolve boom/u,
-      "根解析失败不静默降级，交给监听器留一条告警",
+      "根解析失败不会静默降级，交给监听器留一条告警",
     );
   });
 
-  it("超大文件与二进制按口径跳过，且不算未扫完", async () => {
+  it("超大文件与二进制按规则跳过，且不算未扫完", async () => {
     const bigFile = path.join(root, "huge.ts");
     const binFile = path.join(root, "blob.ts");
     const bigBody = `${"widget".padEnd(PREFLIGHT_MAX_BYTES + 400, "z")}\n`;
     const binBody = Buffer.concat([Buffer.from("widget\n"), Buffer.alloc(64, 0)]);
     await Promise.all([writeFile(bigFile, bigBody), writeFile(binFile, binBody)]);
     const scan = await scanned();
-    assert.equal(scan.complete, true, "跳过 ≠ 没扫完：这两类按口径本来就不读");
+    assert.equal(scan.complete, true, "跳过 ≠ 没扫完：这两类按规则本来就不读");
     assert.deepEqual(hitFiles(scan), ["caller.ts"], "超大与二进制都不进命中");
     // 但它们是「走到了没读」：必须进 unreadNotQuarantined，零命中结论才会降级。
     assert.ok(
@@ -155,7 +155,7 @@ describe("引用扫描的降级与跳过", () => {
     await Promise.all([rm(bigFile), rm(binFile)]);
   });
 
-  it("软链子项不进队列（指向树外的链会把扫描面弹到整机）", async () => {
+  it("软链子项不进队列（指向树外的链会把扫描范围弹到整机）", async () => {
     const outside = path.join(tmpdir(), `dg-outside-${String(process.pid)}.ts`);
     const link = path.join(root, "via-link.ts");
     await writeFile(outside, 'import { widget } from "./src/target";\n');
@@ -167,7 +167,7 @@ describe("引用扫描的降级与跳过", () => {
       "跟随软链等于让「项目级引用探查」去读目录树之外",
     );
     assert.deepEqual(hitFiles(scan), ["caller.ts"], "同层普通文件照常命中：排除的只是软链");
-    assert.equal(scan.complete, true, "按口径不看，就不算没扫完");
+    assert.equal(scan.complete, true, "按规则不看的那一类，就不算没扫完");
     await Promise.all([rm(link), rm(outside)]);
   });
 
@@ -224,7 +224,7 @@ describe("引用扫描的降级与跳过", () => {
 
   it("走到了但没读到的那几份也让零命中降级（隔离与超限是两件事）", async () => {
     // `complete` 只说明遍历没被预算截断，说明不了「这一层的正文都看过了」。
-    // 超大文件按口径跳过、不进 `quarantined`，但它完全可能写着引用——那一句
+    // 超大文件按规则跳过、不进 `quarantined`，但它完全可能写着引用——那一句
     // 「即目标没有任何引用者」在这一态下是假话，模型会据此删掉仍有引用者的文件。
     const huge = path.join(root, "huge-only.ts");
     await writeFile(huge, "x".repeat(PREFLIGHT_MAX_BYTES + 10));

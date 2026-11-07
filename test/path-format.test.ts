@@ -6,7 +6,7 @@
 // 为什么值得单列：这轮的真实事故（`path.posix.resolve` 处理宿主路径、手拼 `${x}/` 做前缀
 // 比较）在 POSIX 上一切正常、只在 Windows 上炸，靠读代码与测试都抓不住。brand 把
 // "路径属于哪个世界"变成编译期约束。
-// 生产面现在只接了 `OsPath`（sandbox-scope / disaster-target / effective-disposition）；
+// 生产代码现在只接了 `OsPath`（sandbox-scope / disaster-target / effective-disposition）；
 // `PosixPath` / `Win32Path` 尚无生产消费方，本文件钉的是它们作为**将来约束**的类型语义。
 // 真要把词法层接上时，改这里是下一位读者该看的入口。
 import { describe, it } from "vitest";
@@ -18,7 +18,7 @@ import type { OsPath, PosixPath, Win32Path } from "../lib/path-format.ts";
 /** 一个只收宿主路径的判据（模拟 `sandboxDropsOf` / `disasterTargetPathOf` 那一类）。 */
 const wantsOsPath = (value: OsPath): string => value;
 
-/** 一个只收 shell 词面路径的判据（模拟 `lib/danger-rules.ts` 的词法层）。 */
+/** 一个只收 shell 用词路径的判据（模拟 `lib/danger-rules.ts` 的词法层）。 */
 const wantsPosixPath = (value: PosixPath): string => value;
 
 /** 一个只收 Windows 字形路径的判据。 */
@@ -31,11 +31,11 @@ describe("brand：类型层禁止跨世界混用", () => {
     assert.equal(wantsWin32Path(asWin32Path(String.raw`C:\Windows`)), String.raw`C:\Windows`);
   });
 
-  it("把 shell 词面路径喂给宿主判据 ⇒ 编译期红（这轮事故的形态）", () => {
+  it("把 shell 用词路径喂给宿主判据⇒ 编译期红（这轮事故的形态）", () => {
     const shellWord = asPosixPath("/etc");
-    // @ts-expect-error PosixPath 不可当 OsPath：`/etc` 是命令文本里的词面，不是宿主路径
+    // @ts-expect-error PosixPath 不可当 OsPath：`/etc` 是命令文本里的用词，不是宿主路径
     const attempt = (): string => wantsOsPath(shellWord);
-    // 断言的是**调用结果**，不是「箭头函数是不是个函数」：后者恒真，什么也钉不住。
+    // 断言的是**调用结果**，不是「箭头函数是不是个函数」：后者永远成立，什么也钉不住。
     // 这一行同时钉住 brand 的运行期零成本——红只可能来自上面那行类型判据。
     assert.equal(attempt(), "/etc");
   });
@@ -47,7 +47,7 @@ describe("brand：类型层禁止跨世界混用", () => {
     assert.equal(attempt(), String.raw`D:\w\proj`);
   });
 
-  it("win32 字形与 POSIX 词面也不互通", () => {
+  it("win32 字形与 POSIX 用词也不互通", () => {
     const windowsShape = asWin32Path(String.raw`C:\Windows`);
     // @ts-expect-error Win32Path 不可当 PosixPath：`C:\Windows` 的语义只在 Windows 读法里
     const attempt = (): string => wantsPosixPath(windowsShape);
@@ -68,7 +68,7 @@ describe("brand：类型层禁止跨世界混用", () => {
     // @ts-expect-error 裸 string 不能直接进 brand 形参
     const bareToOs = (): string => wantsOsPath(bare);
     // 断言落在**调用结果**上：brand 在运行期是零成本，四条负向判据的红只该来自上面那四行。
-    // （原写法断言 `typeof fn === "function"`，箭头函数恒真是函数，这一句钉不住任何东西。）
+    // （原写法断言 `typeof fn === "function"`，箭头函数永远成立是函数，这一句钉不住任何东西。）
     assert.deepEqual(
       [posixToWin(), winToOs(), osToWin(), bareToOs()],
       ["/etc", String.raw`C:\Windows`, "/w/proj", "/tmp"],

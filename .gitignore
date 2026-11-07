@@ -1,7 +1,7 @@
 node_modules/
 # 前导斜杠是必须的：不带它时 `client.js` 会匹配任意层级下的同名文件，将来某个子目录里
-# 真的放一份源码/入口叫这个名字，就会被静默忽略掉（干净克隆后编译失败，本地却看不出来）。
-# 下面每条都按这条口径写：本包没有子包目录，产物与缓存一律只认根级那一份。
+# 真的放一份源码/入口叫这个名字，就会被不做声地忽略掉（干净克隆后编译失败，本地却看不出来）。
+# 下面每条都按这条规则写：本包没有子包目录，产物与缓存一律只认根级那一份。
 /client.js
 /.toolchain/
 /host.js
@@ -12,10 +12,10 @@ node_modules/
 /*.tgz
 .DS_Store
 
-# 统一构建件的原子落盘草稿目录（shared/lib/build-artifacts 的 writeArtifact）。
+# 统一构建件的原子写到磁盘草稿目录（shared/lib/build-artifacts 的 writeArtifact）。
 /.tmp/
 
-# 本地联调用的凭据文件（README 把 .env 全族列为密钥面）。示例文件保留。
+# 本地联调用的凭据文件（README 把 `.env` 及其变体列为密钥面）。示例文件保留。
 /.env
 /.env.*
 !/.env.example

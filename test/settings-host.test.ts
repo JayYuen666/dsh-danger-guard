@@ -1,11 +1,11 @@
-// settings-host.ts（**设置条目**）单元测试：值面读数口 + 页面策略 + 服务面守卫。
+// settings-host.ts（**设置条目**）单元测试：值取值接口 + 页面策略 + 宿主服务守卫。
 //
 // 为什么单独一个文件：bulkhead-isolation.test.ts 用真实 cordis 跑通了「设置条目 provide、
-// 拦截半 ctx.get」这条通路，但它只在**服务面完好**时跑；守卫的失败支路（非对象 ctx、
+// 拦截半 ctx.get」这条通路，但它只在**宿主服务完好**时跑；守卫的失败支路（非对象 ctx、
 // 缺 effect/provide/fiber 形状不对、settings.configure 不在）只能在这里逐条打中。
 // 那几条支路是本包的 fail-safe 说明：本条目抛错只让**设置页**没掉，闸门在另一个条目里。
 //
-// ⚠ 本包的覆盖率门禁是四项 100%（vitest.config.ts，公共面在 shared/config/vitest.base.ts）：安全闸门上"测不到的分支"就是
+// ⚠ 本包的覆盖率门禁是四项 100%（vitest.config.ts，公共配置在 shared/config/vitest.base.ts）：安全闸门上"测不到的分支"就是
 //    "没验证过的放行/拒绝路径"，所以这里不做任何豁免。
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
@@ -104,7 +104,7 @@ describe("danger-guard 设置条目（settings-host.ts）", () => {
     harness = createSettingsCtx();
   });
 
-  it("挂出值面读数口：读到的就是宿主交进来的那份引用面", () => {
+  it("挂出值取值接口：读到的就是宿主交进来的那份被引用", () => {
     settingsPlugin.apply(harness.ctx as never, refsFrom(live));
     const raw: unknown = harness.provided[0]?.[1];
     assert.ok(isReader(raw), "provide 挂出了带 read() 的读数口");
@@ -120,7 +120,7 @@ describe("danger-guard 设置条目（settings-host.ts）", () => {
     live["strictMode"] = BUILTIN_BASE.strictMode;
   });
 
-  it("数组字段每次读都复制：下游就地改写读数口返回值也污染不了活值", () => {
+  it("数组字段每次读都复制：下游就地改写取值接口返回值也污染不了活值", () => {
     settingsPlugin.apply(harness.ctx as never, refsFrom(live));
     const raw: unknown = harness.provided[0]?.[1];
     assert.ok(isReader(raw), "读数口成形");
@@ -140,7 +140,7 @@ describe("danger-guard 设置条目（settings-host.ts）", () => {
     ]);
   });
 
-  it("effect 的 disposer 收全：卸载时撤读数口、也撤页面策略", () => {
+  it("effect 的 disposer 收全：卸载时撤取值接口、也撤页面策略", () => {
     settingsPlugin.apply(harness.ctx as never, refsFrom(live));
     assert.equal(harness.disposers.length, 2, "读数口 + 页面策略两条 effect");
     // 遍历前记长度、遍历后断言不变：disposer 的调用不得再往册子里追加（否则
@@ -154,7 +154,7 @@ describe("danger-guard 设置条目（settings-host.ts）", () => {
     assert.equal(harness.configured.length, 0, "页面策略随 fiber 回收");
   });
 
-  it("服务面守卫：非对象 ctx（null / 字符串 / 数组）一律抛，不装半个设置面", () => {
+  it("宿主服务守卫：非对象 ctx（null / 字符串 / 数组）一律抛，不装半个设置界面", () => {
     for (const bad of [null, "ctx", [1, 2]]) {
       assert.throws(
         () => {
@@ -167,7 +167,7 @@ describe("danger-guard 设置条目（settings-host.ts）", () => {
     }
   });
 
-  it("服务面守卫：effect / provide 不是函数、fiber 不是对象 → 各自抛", () => {
+  it("宿主服务守卫：effect / provide 不是函数、fiber 不是对象 → 各自抛", () => {
     const cases: Record<string, unknown>[] = [
       { ...createSettingsCtx().ctx, effect: 1 },
       { ...createSettingsCtx().ctx, provide: undefined },
@@ -186,10 +186,10 @@ describe("danger-guard 设置条目（settings-host.ts）", () => {
     }
   });
 
-  it("值面守卫：plain 值 / 缺字段 / 字段不是引用 → apply 阶段即抛，不拖到第一次 read", () => {
+  it("值守卫：plain 值 / 缺字段 / 字段不是引用 → apply 阶段即抛，不拖到第一次 read", () => {
     const { ctx } = createSettingsCtx();
-    // 0.1.6→0.1.7 迁移期踩过的形状错：plain 值面会让 snapshot() 的 `.get is not a function`
-    // 拖到拦截半第一次工具调用才爆——host 的读数口没有 try/catch，等于闸门每次调用都抛。
+    // 0.1.6→0.1.7 迁移期踩过的形状错：plain 值会让 snapshot() 的 `.get is not a function`
+    // 拖到拦截半第一次工具调用才爆——host 的取值接口没有 try/catch，等于闸门每次调用都抛。
     assert.throws(
       () => {
         settingsPlugin.apply(ctx as never, { ...BUILTIN_BASE } as never);
@@ -224,11 +224,11 @@ describe("danger-guard 设置条目（settings-host.ts）", () => {
       /reference surface/u,
       "字段是裸值而不是带 get() 的引用同样判不过",
     );
-    // 守卫抛错 = cordis 判本条目 FAILED、读数口不 provide：拦截半 ctx.get 落空即回落
+    // 守卫抛错 = cordis 判本条目 FAILED、取值接口不 provide：拦截半 ctx.get 落空即回落
     // BUILTIN_BASE——那条回落路径由 test/host.test.ts 与 bulkhead-isolation.test.ts 钉。
   });
 
-  it("值面形状齐但 get() 抛错 ⇒ apply 阶段点名，不拖到第一次工具调用", () => {
+  it("值形状齐但 get() 抛错 ⇒ apply 阶段点名，不拖到第一次工具调用", () => {
     const { ctx } = createSettingsCtx();
     const refs = refsFrom(live) as unknown as Record<string, { get: () => unknown }>;
     refs["maxDenies"] = {
@@ -241,7 +241,7 @@ describe("danger-guard 设置条目（settings-host.ts）", () => {
     }, /config values unreadable/u);
   });
 
-  it("运行期值面漂移时读数口回落底座，闸门不因一次坏设置抛错", () => {
+  it("运行期值漂移时取值接口回落底座，闸门不因一次坏设置抛错", () => {
     const { ctx, provided } = createSettingsCtx();
     settingsPlugin.apply(ctx as never, refsFrom(live));
     const entry = provided.find(([name]) => name === SETTINGS_READER);

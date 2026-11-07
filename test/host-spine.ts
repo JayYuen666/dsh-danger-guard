@@ -16,8 +16,8 @@
 // （installed @deepseek-ai/dsh-settings/lib/types/index.d.ts 的 `static inject`），两者属于
 // Loader 启动层——实测缺它们时 `ctx.plugin(SettingsForms)` 直接抛
 // "Cannot read properties of undefined (reading 'await')"。所以这里交回一份**按官方成员类型钉住**
-// 的读数面（`Pick<SettingsForms, …>`，签名漂移当场编译期红），而闸门依赖的那位
-// `SETTINGS_READER` 读数口由**本包自己的设置条目**真挂出来（不是测试替身）。
+// 的读数（`Pick<SettingsForms, …>`，签名漂移当场编译期红），而闸门依赖的那位
+// `SETTINGS_READER` 取值接口由**本包自己的设置条目**真挂出来（不是测试替身）。
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -47,7 +47,7 @@ import type {
 import type { SessionEvent, SessionId } from "@deepseek-ai/dsh-session";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { SettingsForms, SettingsNamespace } from "@deepseek-ai/dsh-settings";
-// 审批面的两个类型从**声明它那一侧**取（`@deepseek-ai/dsh-user-approval/types` 是 wire-safe
+// 审批通道的两个类型取自**声明它们的那个入口**（`@deepseek-ai/dsh-user-approval/types` 是 wire-safe
 // 入口，不拖 cordis/service 链）：本包不依赖它、也不 import 它的运行期实现。
 import type { ApprovalOutcome, ApprovalRequestEvent } from "@deepseek-ai/dsh-user-approval/types";
 import { brandString } from "@deepseek-ai/dsh-brand";
@@ -65,7 +65,7 @@ const SETTINGS_ENTRY = "danger-guard-settings";
  *  同一枚值。抄三遍不只被 sonarjs 点名，更是改一处漏两处的入口。 */
 const MOCK_ROUTE = "mock";
 
-/** 内容块类型名（StreamChunk 的臂名与结果块共用）。 */
+/** 内容块类型名（StreamChunk 的分支名与结果块共用）。 */
 const TEXT_BLOCK = "text";
 const TOOL_CALL_BLOCK = "tool-call";
 
@@ -79,10 +79,10 @@ export const TOOL_EDIT = "edit";
 export const TOOL_BASH = "bash";
 
 /** 预检注入消息的 `source.kind`——与 host.ts 那枚 `declare module` 声明的生产者名同字形。
- *  从夹具导出，用例侧就不许再手抄（改名时读的一侧先红，而不是断言静默失配）。 */
+ *  从夹具导出，用例侧就不许再自己抄（改名时读的一侧先红，而不是断言静默失配）。 */
 export const PREFLIGHT_SOURCE_KIND = "dangerguard-preflight";
 
-/** `settings` 读数面里本包真正会调的那几位，按官方成员取（不手抄签名）。 */
+/** `settings` 读数里本包真正会调的那几位，按官方成员取（不自己抄的签名）。 */
 type SettingsStub = Pick<SettingsForms, "configure" | "describe">;
 
 /** 一次性建好一个"像真工程"的临时目录：门禁的 projectRootOf 认盘上的标记文件，
@@ -103,7 +103,7 @@ export interface Spine {
   readonly ctx: Context;
   readonly harness: AgentLoopTestHarness;
   readonly project: ProjectFixture;
-  /** 会话/Agent 的 id：每台唯一——投递水位按「会话id|目标」记账，跨台同 id 会让上一台的
+  /** 会话/Agent 的 id：每台唯一——发送水位按「会话id|目标」记录下来，跨台同 id 会让上一台的
    *  水位串到这一台（本包的会话回收用例正是冲这条来的，见 host-integration.test.ts）。 */
   readonly sessionId: string;
   readonly guardFiber: Fiber;
@@ -155,13 +155,13 @@ export async function writeDisk(file: string, body: string | Buffer): Promise<st
   return file;
 }
 
-/** 读盘：断言"拦下来就没落盘 / 放行真的改了文件"，不靠插件自报。 */
+/** 读盘：断言"拦下来就没写到磁盘 / 放行真的改了文件"，不靠插件自报。 */
 export async function readDisk(file: string): Promise<string> {
   return readFile(file, "utf8");
 }
 
-/** 工程 src/ 下另起一枚目标文件。用例之间绝不共用目标：投递水位与扫描缓存都按
- *  「会话|目标」记账，同一枚文件被上一条用例碰过，这一条就已经不是"盲改"了。
+/** 工程 src/ 下另起一枚目标文件。用例之间绝不共用目标：发送水位与扫描缓存都按
+ *  「会话|目标」记录下来，同一枚文件被上一条用例碰过，这一条就已经不是"盲改"了。
  *  @param spine 测试台
  *  @param name src/ 下的文件名
  *  @param body 正文（默认可被 midBlind 的 old_string 命中）
@@ -209,7 +209,7 @@ function contentTool<Spec extends ParameterSchemaSpec>(options: {
   });
 }
 
-/** 官方参数面里"路径键"的真实出处（docs/tool-catalog.md + packages/fs/tool-fs/src/*.ts）：
+/** 官方参数表里"路径键"的真实出处（docs/tool-catalog.md + packages/fs/tool-fs/src/*.ts）：
  *  `dsh-tool-fs` 的 read/write/edit **只认 `file_path`**；`path` 只属于 opt-in 的
  *  `str_replace_editor`（且要求绝对路径）。本包额外认 `path` 是为那一条，不是为 stock 工具。 */
 function registerFileTools(ctx: Context): void {
@@ -268,7 +268,7 @@ function registerFileTools(ctx: Context): void {
       },
     }),
   );
-  // 真 bash 的必填面里还有 description，超时叫 timeoutMs、目录叫 workdir（不是 cwd）：
+  // 真 bash 的必填项里还有 description，超时叫 timeoutMs、目录叫 workdir（不是 cwd）：
   // packages/shell/tool-bash/src/index.ts:368 起。本包只从里面取 `command`。
   ctx.tools.register(
     contentTool({
@@ -287,12 +287,12 @@ function registerFileTools(ctx: Context): void {
   );
 }
 
-/** 检索类工具：本包只按"名字 + 参数口径 + 调用成功"给凭证，正文内容不参与判定，
+/** 检索类工具：本包只按"名字 + 参数规则 + 调用成功"给凭证，正文内容不参与判定，
  *  所以这里返回固定文本即可（真 grep 的命中与否不是门禁的判据）。
  *  ⚠ 这台 spine 只按 **stock profile 的真实工具**注册：`grep`(pattern*, path, include) 与
  *  `glob`(pattern*, path)（packages/fs/tool-fs-search/src/{grep,glob}.ts）。
  *  `zg_search`（root/query/fts/vector）由另一枚插件 `@jayyuen66/dsh-zvec-grep` 注册，这里**不装它**：
- *  于是"未注册的名字不该进指令"那两条用例有对照面（装了它的宿主上由
+ *  于是"未注册的名字不该进指令"那两条用例有对照（装了它的宿主上由
  *  test/host-contract.test.ts 的探测分支负责照点）。 */
 function registerSearchTools(ctx: Context): void {
   const searchParameters = {
@@ -352,10 +352,10 @@ function settingsStub(describe: SettingsStub["describe"]): SettingsStub {
   };
 }
 
-/** locale 条目的命名空间：名字从 shared 的常量取（本包读的正是这一位），品牌位按官方构造口给。 */
+/** locale 条目的命名空间：名字从 shared 的常量取（本包读的正是这一位），类型品牌按官方构造口给。 */
 const LOCALE_NS = brandString<SettingsNamespace>(LOCALE_SETTINGS_NAMESPACE);
 
-/** 品牌位一律经官方构造口给：`SessionId(...)`/`ToolCallId(...)` 那种"大写开头的直调"形会被
+/** 类型品牌一律经官方构造口给：`SessionId(...)`/`ToolCallId(...)` 那种"大写开头的直调"形会被
  *  new-cap 拦，而 brandString 就是官方自己的恒等构造（同 host.ts 用 brandNumber 的理由）。 */
 const sessionIdOf = (raw: string): SessionId => brandString<SessionId>(raw);
 const callIdOf = (raw: string): ToolCallId => brandString<ToolCallId>(raw);
@@ -365,9 +365,9 @@ const callIdOf = (raw: string): ToolCallId => brandString<ToolCallId>(raw);
  * 返回官方的四种结论之一。
  *
  * 为什么不装官方的 `ApprovalService` 真件：本包要钉的不是"官方怎么收集答案"（那是官方的
- * 契约面），而是"**我们的 `{kind:'ask'}` 决定，官方是怎么读、怎么物化的**"。所以
+ * 契约），而是"**我们的 `{kind:'ask'}` 决定，官方是怎么读、怎么物化的**"。所以
  * 上面那一位由官方的 `serviceAsk` 提供，而答案从这一枚替身来。
- * ⚠ `request` 的入参形状按官方 `ApprovalRequestEvent` 声明收（不手抄字段名）：
+ * ⚠ `request` 的入参形状按官方 `ApprovalRequestEvent` 声明收（不自己抄的字段名）：
  * 字段改名/换形状会在这里变成编译错误。
  */
 export interface ApprovalSpy {
@@ -381,7 +381,7 @@ export interface ApprovalSpy {
  * 装配一台真 spine：真 ToolRuntime + 真 SessionStore + 真投影注册表 + 本包两条条目。
  * @param row 设置条目的**用户层 config**（越界值会只炸设置条目自己，见 bulkhead 用例）
  * @param options.localePreference 宿主 locale 偏好（`settings.describe()` 里那一条的真形状）
- * @param options.approval 装上假审批服务（不给 = 宿主没装审批面，走 `serviceAsk` 的降级臂）
+ * @param options.approval 装上假审批服务（不给 = 宿主没装审批通道，走 `serviceAsk` 的降级分支）
  */
 export async function bootSpine(
   row: Record<string, unknown> = {},
@@ -422,7 +422,7 @@ export async function bootSpine(
   await mountAgentLoopTestDependencies(ctx, { workingDirectory: true });
   registerFileTools(ctx);
   registerSearchTools(ctx);
-  // 顺序照 shipped 拓扑：设置条目先挂出读数口，拦截条目随后 ctx.get 到它（反了则落回
+  // 顺序照 shipped 拓扑：设置条目先挂出取值接口，拦截条目随后 ctx.get 到它（反了则落回
   // BUILTIN_BASE——那条降级路径由 test/bulkhead-isolation.test.ts 专管，不在这里重测）。
   const settingsFiber = await ctx.plugin(
     {
@@ -623,7 +623,7 @@ export async function runTurn(spine: Spine, agent: Agent, prompt: string): Promi
   await idle;
 }
 
-/** 一次模型请求里模型能看见的消息面（role + source.kind + 展平文本）。 */
+/** 一次模型请求里模型能看能看见的消息（role + source.kind + 展平文本）。 */
 export interface VisibleMessage {
   readonly role: string;
   readonly sourceKind: string;
@@ -656,7 +656,7 @@ export function visibleAt(model: ScriptedModel, requestIndex: number): VisibleMe
  *  读的正是这一位（host.ts 的 `SessionLogFace`）——这些用例要断言的也是"落到这一位上的有没有"。
  *  所以整仓只在这里调它、只关一次告警，而不是每条用例各关一遍。 */
 function eventsOf(agent: Agent): readonly SessionEvent[] {
-  // oxlint-disable-next-line typescript/no-deprecated -- 被测面就是这一位，读取点单点化
+  // oxlint-disable-next-line typescript/no-deprecated -- 被测代码就是这一位，读取点单点化
   return agent.session.snapshotEvents();
 }
 
@@ -691,7 +691,7 @@ export function callResultOf(
   };
 }
 
-/** 会话里本包预检投出去的那条 notice 正文（A 面的落点）。 */
+/** 会话里本包预检投出去的那条 notice 正文（A 面的位置）。 */
 export function preflightNotices(agent: Agent): string[] {
   const notices = eventsOf(agent).filter((event) => event.type === EVENT_USER_MESSAGE);
   return notices
@@ -699,12 +699,12 @@ export function preflightNotices(agent: Agent): string[] {
     .map((event) => event.data.content.map(flattenBlock).join(" "));
 }
 
-/** mid 档盲改写进磁盘的正文（"放行即真落盘"的断言引用它，不另抄字形）。 */
+/** mid 档盲改写进磁盘的正文（"放行即真写到磁盘"的断言引用它，不另抄字形）。 */
 export const MID_BLIND_NEW_STRING = `const padded = "${"x".repeat(230)}";`;
 
-/** mid 档的盲改参数（写面 >200 字节、两侧都不碰导出面/签名关键字）。
+/** mid 档的盲改参数（写入 >200 字节、两侧都不碰导出名单/签名关键字）。
  *  ⚠ old_string 里出现 `export`/`function` 会因"替换掉一枚导出"而升 high 档——那是真判据
- *  （改导出面确实更危险），但 mid 档的用例就会莫名其妙走清单而不是递证据。 */
+ *  （改导出名单确实更危险），但 mid 档的用例就会莫名其妙走清单而不是递证据。 */
 export function midBlind(filePath: string): Record<string, unknown> {
   return {
     file_path: filePath,
@@ -713,7 +713,7 @@ export function midBlind(filePath: string): Record<string, unknown> {
   };
 }
 
-/** 高一档的盲改：触及导出面 ⇒ high ⇒ 缺项里多出"层"（test/e2e/docs）。B 面如今从**同一次**
+/** 高一档的盲改：触及导出名单 ⇒ high ⇒ 缺项里多出"层"（test/e2e/docs）。B 面如今从**同一次**
  *  扫描派生层结论，所以这一档照样带证据拦；只有扫描跑不完时（见 capTree）才让路给行动清单——
  *  要读"指令点了哪些检索工具"、或要让事实门的拒绝轮次真推进，都得先把遍历预算吃光。 */
 /** high 档盲改写进磁盘的导出行；`tag` 与 highBlind 同一取值。 */
@@ -740,10 +740,10 @@ export const markOf = (template: string): string => {
   return template.slice(0, at);
 };
 
-/** `[fact-gate]` 那三种口径的判别段。⚠ 前缀是**共用**的（行动清单 / 当场递证据 / 随读取附上
+/** `[fact-gate]` 那三种规则的判别段。⚠ 前缀是**共用**的（行动清单 / 当场递证据 / 随读取附上
  *  都以 `[fact-gate] ` 开头），所以拿 `markOf` 去判等于什么都没断言：本轮真踩过——「走清单」与
  *  「递证据」两条互斥的断言同时为真，一层用例因此在错误的分支上全绿。
- *  跳过前缀取到第一个标点为止，那一句才是三种口径各自独有的话。 */
+ *  跳过前缀取到第一个标点为止，那一句才是三种规则各自独有的话。 */
 export function gateMarkOf(template: string): string {
   const space = template.indexOf(" ");
   if (space === -1) {

@@ -3,19 +3,19 @@
 // 为什么单列：产它的 `lib/judge-stats.ts` 导入 `lib/danger-rules.ts`（带 `node:os` /
 // `node:path`），而**客户端**（设置卡的读数块）要读这份形状 —— 从 judge-stats 借类型会把
 // 那张 node 依赖拖进客户端类型程序（实测 TS2591：`Cannot find name 'node:os'`）。
-// 与 `lib/fix.ts` 是**同一条教训**：给客户端消费的形状必须住在没有运行期依赖的叶子上。
+// 与 `lib/fix.ts` 是**同一条教训**：给客户端消费的形状必须定义在没有运行期依赖的叶子上。
 //
 // 本模块只有类型，所以它对产物字节数的贡献是零。
 
 /** 一份可读的判定统计快照：跨 Remote 边界只能是 JSON，键一律是字符串，值一律是数字。
  *  **生产侧必须只写有限非负整数**：`NaN`/`Infinity` 在类型上放得过、却不是合法 JSON
  *  数值，序列化会变 `null`。消费侧的守卫在 `src/stats-reader.ts` 的
- *  `STATS_SNAPSHOT_SCHEMA`（`z.number().int().nonnegative()`），计数面新增写入点时
+ *  `STATS_SNAPSHOT_SCHEMA`（`z.number().int().nonnegative()`），计数新增写入点时
  *  不要破坏这条约定。 */
 export interface StatsSnapshot {
-  /** 判定次数（按面：`bash` / `secret`；面名由调用点的 `JudgeCost` 给出）。 */
+  /** 判定次数（按这一类：`bash` / `secret`；面名由调用点的 `JudgeCost` 给出）。 */
   readonly calls: Readonly<Record<string, number>>;
-  /** 其中的慢判定次数（≥ `slowMs`，按面）。 */
+  /** 其中的慢判定次数（≥ `slowMs`，按这一类）。 */
   readonly slow: Readonly<Record<string, number>>;
   /** `deny` 档的规则键命中次数（按键）。 */
   readonly hits: Readonly<Record<string, number>>;

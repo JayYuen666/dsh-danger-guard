@@ -69,7 +69,7 @@ describe("selfWritesStillPresent：内容自证的读取上限", () => {
   });
 
   // Windows 的 chmod 只切换只读属性，不撤读权限：把文件改成 0o000 之后它仍然读得动，
-  // 这条断言在那边恒为 true。「读失败收口成 false」的判据由上面「缺失路径」那一条在三个
+  // 这条断言在那边恒为 true。「读失败统一处理成 false」的判据由上面「缺失路径」那一条在三个
   // 平台上共同覆盖，这里只补 POSIX 权限这一种具体成因。
   it.skipIf(process.platform === "win32")(
     "普通文件但读不动（权限被剥）⇒ false，读异常不外冒",

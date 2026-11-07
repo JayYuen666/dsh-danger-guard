@@ -1,17 +1,17 @@
-// test/publish-manifest.test.ts —— 发布形态门禁：入口面必须**与发布器无关**地可解析。
+// test/publish-manifest.test.ts —— 发布形态门禁：入口必须**与发布器无关**地可解析。
 //
-// 为什么值得一条测试：构建与单测都在源码侧跑绿，而真实故障发生在装出去之后。两类坑都在
-// 那一侧。其一是入口指向没随包发出去的文件；其二是入口覆盖写在 `publishConfig` 里——
+// 为什么值得一条测试：构建与单测都在源码上跑绿，而真实故障发生在装出去之后。两类坑都在装出去的
+// 产物上。其一是入口指向没随包发出去的文件；其二是入口覆盖写在 `publishConfig` 里——
 // pnpm 发布时把它合并到顶层，npm 不合并（npm 会打印
 // "Unknown publishConfig config main/exports" 并忽略），同一个仓库换个发布器就发出一个
 // import 必失败的包。这里不模仿任何发布器的实现，而是把不变式钉成断言：**顶层入口自己就
 // 完整可解析，且 publishConfig 不再承载入口字段**，于是两套发布器语义的差恒为空。
 //
 // 第二组门禁扫注释：日期与轮次编号写下时有用，读的人只会困惑，且没有任何读者能从中重建
-// 当时的上下文。只扫注释行与文档；测试夹具里的日期（modifiedAfter 之类的边界值）是数据，
-// 角色文档里的日期是内容，两者都不在禁面内。
+// 当时的上下文。只扫注释行与文档；夹具里的日期（modifiedAfter 之类的边界值）是数据，
+// 角色文档里的日期是内容，两者都不在禁止名单内。
 //
-// **本机绝对路径**同样在禁面内，这条是实测逼出来的：`lib/danger-rules.ts` 里一句
+// **本机绝对路径**同样在禁止名单内，这条是实测逼出来的：`lib/danger-rules.ts` 里一句
 // 「`~someone/x` 展开成 `/Users/<user>/x`」的举例（原文用的是作者本机账号名），会被打包器
 // 原样搬进随包发布的 `host.js`，于是本机用户名出现在公共 tarball 里。正则要求路径段以字母
 // 数字开头，所以上面这个占位写法不命中——本仓注释里的 `<home>`、`<posix home>` 同属这个约定。
@@ -32,22 +32,22 @@ const pkgDir = path.join(import.meta.dirname, "..");
  */
 const FORBIDDEN_IN_COMMENTS: readonly RegExp[] = [
   /\b(?:19|20)\d{2}-\d{2}-\d{2}\b/u,
-  // 绝对路径才禁：前一位不是词字符或点号，避免把合法的相对说明符 `./home/…` 判成本机路径。
+  // 绝对路径才禁：前一位不是词字符或点号，避免把合法的相对模块说明符`./home/…` 判成本机路径。
   /(?<![\w.])\/(?:Users|home|root|mnt)\/[\w.-]+/u,
   /\b[A-Za-z]:[\\/](?:Users|Documents and Settings)[\\/][\w.-]+/u,
 ];
 
-/** `publishConfig` 里唯一允许出现的字段：可见性与源，都不是入口面。 */
+/** `publishConfig` 里唯一允许出现的字段：可见性与源，都不是入口。 */
 const ALLOWED_PUBLISH_CONFIG = new Set(["access", "registry"]);
 
-/** 遍历时跳过的目录：依赖、产物、以及本门禁刻意不管的面。 */
+/** 遍历时跳过的目录：依赖、产物、以及本门禁刻刻意不管的目录。 */
 const SKIP_DIRS = new Set([
   "node_modules",
   "coverage",
   "_env",
   "dist",
   ".git",
-  // 测试夹具里的日期与轮次编号是数据，不是注释噪音。
+  // 夹具里的日期与轮次编号是数据，不是注释噪音。
   "test",
   "tests",
   "__tests__",
@@ -55,7 +55,7 @@ const SKIP_DIRS = new Set([
   "agents",
 ]);
 
-/** package.json 里与入口面有关的形状；其余字段本门禁不关心。 */
+/** package.json 里与入口有关的形状；其余字段本门禁不关心。 */
 interface Manifest {
   readonly main?: string;
   readonly types?: string;
@@ -255,7 +255,7 @@ async function collectSources(dir: string, prefix: string): Promise<string[]> {
  * 取一段文本里属于注释或文档的行。文档（`.md`）整体算；代码只取注释行，免得把字符串
  * 字面量里的数据（日期夹具、示例路径）误判成注释噪音。
  *
- * @param file - 相对包根的文件名，用于决定判定口径
+ * @param file - 相对包根的文件名，用于决定判定规则
  * @param text - 文件全文
  * @returns 参与门禁的行
  */
@@ -336,9 +336,9 @@ describe("发布形态", () => {
     }
   });
 
-  it("通配 exports 的每个实际命中文件都在发布面里", async () => {
+  it("通配 exports 的每个实际命中文件都在发布名单里", async () => {
     // `./locale/*.json` 这类目标没有单个固定文件；新增一份 locale 却忘了写进 files 时，
-    // 消费方 import 该文件会解析失败，而入口面只查具体目标的断言看不到它。
+    // 消费方 import 该文件会解析失败，而入口只查具体目标的断言看不到它。
     const { manifest, shipped } = await readSurface();
     const expanded = await Promise.all(
       wildcardTargetsOf(manifest).map(async ({ label, pattern }) => ({
@@ -391,7 +391,7 @@ describe("发布形态", () => {
     expect(produced.length, "types/ 至少该产出一个声明文件").toBeGreaterThan(0);
   });
 
-  it("包根的每一份 .md 都在发布面里（npm 只自动附带 README* 与 LICENSE）", async () => {
+  it("包根的每一份 .md 都在发布名单里（npm 只自动附带 README* 与 LICENSE）", async () => {
     // 一次性封住这一类陷阱，而不是每加一份文档就补一条断言。踩过的两次：
     // `THIRD_PARTY_NOTICES.md` 与 `CHANGELOG.md` 都不在 npm 的无条件附带清单里（见
     // {@link ALWAYS_SHIPPED} 的实测），忘了写进 `files` 就静默不随包分发——npm 页面看不出
@@ -419,7 +419,7 @@ describe("发布形态", () => {
     const declaredAt = Math.min(
       ...produced.map((file) => statSync(path.join(pkgDir, "types", file)).mtimeMs),
     );
-    // 声明的依赖面：产出这批声明的那批输入。lib/ 下任一文件变新都算过期。
+    // 声明的依赖：产出这批声明的那批输入。lib/ 下任一文件变新都算过期。
     const sources = [
       "host.ts",
       "settings-host.ts",
@@ -441,7 +441,7 @@ describe("发布形态", () => {
     // 包管理器内部路径：`.pnpm/` 是 pnpm 的内容寻址目录名，出现在声明里说明类型是从
     // 硬链接路径解析来的，消费方在自己机器上解析不到。
     const forbidden: readonly RegExp[] = [
-      // 只认绝对路径：前一位不是词字符或点号，避免误伤合法的相对说明符 `./home/…`。
+      // 只认绝对路径：前一位不是词字符或点号，避免误伤合法的相对说明符`./home/…`。
       /(?<![\w.])\/(?:Users|home|root|mnt)\//u,
       /\b[A-Za-z]:[\\/](?:Users|Documents and Settings)[\\/]/u,
       /\.pnpm[\\/]/u,
@@ -509,8 +509,8 @@ describe("宿主依赖的版本形状（升级防线）", () => {
     // registry 上的 dist-tag 是实测出来的陷阱：`latest` 可能指向远早于宿主 ABI 的版本。
     // 精确钉是让「不带版本地装成远古版本」这件事不发生的最小条件；一旦放宽成 `^`/`~`，
     // 宿主某天发新 minor 就会自动跟上去，而插件与宿主 ABI 耦合，那等于让本包在没有测试的
-    // 情况下换掉编译用的宿主类型面。
-    // 只判 dev 这一侧：它才是本包真正装下来的那一份。peer 记的是「运行期由宿主提供」，
+    // 情况下换掉编译用的宿主类型声明。
+    // 只判 dev这一侧 段：它才是本包真正装下来的那一份。peer 记的是「运行期由宿主提供」，
     // 装什么版本由宿主决定，判据在下面那条。
     const { manifest } = await readSurface();
     // 过滤出违规项再一次性断言，而不是在循环里按条件 expect：失败时 diff 直接列出
@@ -523,8 +523,8 @@ describe("宿主依赖的版本形状（升级防线）", () => {
   });
 
   it("devDependencies 里的 dsh-* 全部同版本（不许装出第二份宿主类型）", async () => {
-    // 宿主类型面被这些包以 type-only 方式消费；同一次安装里出现两枚 dsh-session 的拷贝，
-    // nominal 类型（品牌串、投影状态）会开始互相不认，而那不报编译错、只报运行期
+    // 宿主类型被这些包以 type-only 方式消费；同一次安装里出现两枚 dsh-session 的拷贝，
+    // nominal 类型（类型品牌、投影状态）会开始互相不认，而那不报编译错、只报运行期
     // 「认不出这个 callId」。同版本是让这件事不发生的最小条件。
     const { manifest } = await readSurface();
     const dshDev = Object.entries(manifest.devDependencies ?? {}).filter(([name]) =>

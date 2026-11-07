@@ -4,11 +4,11 @@
 // 与体积预算（`test/dist-size.test.ts`）—— **两条都不执行产物**，所以"产物是语法上无效的 JS"
 // 这一类错它们一条都抓不住。真踩过：rolldown 不认识标准装饰器，会把 `@Remote("stats")`
 // **原样吐进 `host.js`**，而 `npm run build` 报**成功** —— 那一段一旦发出去，插件在宿主里
-// 直接加载失败，且没有任何本地信号。修法（`decorator-transform.mjs`）本身也需要这条门禁兜底：
+// 直接加载失败，且没有任何本地信号。修法（`decorator-transform.mjs`）本身也需要这条门禁后备：
 // 它跑 `tsc` 且**不看退出码**（`--noResolve` 下必有 TS2307），所以"产物到底成不成"只能靠真加载。
 //
 // 只加载两个 host 产物：`client.js` 是浏览器 UMD 外壳，在 Node 里 import 会撞 `window is not
-// defined`（那是**设计如此**，见 README 的导出面那一节），拿它当"加载失败"会是一条假门禁。
+// defined`（那是**设计如此**，见 README 的导出名单那一节），拿它当"加载失败"会是一条假门禁。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -80,11 +80,11 @@ describe("产物可加载：两个 host 产物能被 Node 真的 import 进来",
     // 源码里那个装饰器用法还在（注释里提到过），但**不能**出现在可执行位置：`@Remote("stats")`
     // 的形状一旦出现就是预转换没生效 —— 那是非法 JS，真跑起来由上面那条加载用例当场抛出。
     // 判据不锚行首：产物是 minify 过的单行形态，锚 `^\s*` 会让它只可能以「不在行首」的形状出现，
-    // 那种情况下这条反而恒绿。字符串字面量里出现 `@Remote(` 不是本产物已有形态（服务键是
+    // 那种情况下这条反而永远通过。字符串字面量里出现 `@Remote(` 不是本产物已有形态（服务键是
     // `dangerGuardStats` 一类），漏检的代价比误报大，所以按形状判而不是按行位置判。
     assert.doesNotMatch(host, /@Remote\s*\(/u, "装饰器没被预转换：产物是非法 JS");
     // ⚠ 这里**不**再断言 `__esDecorate`：产物开了 minify，那枚标识符会被 mangle（实测 0 次），
-    // 断言它会变成恒红/恒绿之间的摇摆。降级到底成没成，唯一可信的证据是真加载（上面两条）
+    // 断言它会变成恒红/永远通过之间的摇摆。降级到底成没成，唯一可信的证据是真加载（上面两条）
     // 加上源侧的契约用例（test/stats-remote.test.ts 拿 remoteMethods() 对标记）。
     // 剩下这条正向断言只钉一件事：服务类没被 DCE 掉（它的服务键是字符串字面量，mangle 不动）。
     assert.match(host, /dangerGuardStats/u, "服务键不见了：装饰器那一段被摇树摇没了？");

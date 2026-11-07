@@ -1,10 +1,10 @@
-// decorator-transform.mjs —— **装饰器预转换**（构建与测试两条管线共用这一份）。
+// decorator-transform.mjs —— **装饰器预转换**（构建与测试两条流水线共用这一份）。
 //
 // 为什么需要它（每一步都实测过）：
 //  1. 官方 Typert Remote **只能用标准装饰器（TC39）声明**：`remoteMethods()` 只读 `@Remote`
 //     写在原型上的那个描述符，没有程序化替代；而 `Remote` 的实现对 legacy 签名**直接抛**
 //     （`context === undefined` 那条分支 + `context.addInitializer`），所以 legacy 降级也不行。
-//  2. 本仓的两条管线的解析器**都不降级标准装饰器**：rolldown/oxc 的 `DecoratorOptions` 只有
+//  2. 本仓两条流水线的解析器**都不降级标准装饰器**：rolldown/oxc 的 `DecoratorOptions` 只有
 //     `legacy` / `emitDecoratorMetadata` 两个开关（"predates the TC39 standardization process"），
 //     实测它把 `@Remote("stats")` **原样吐进产物** —— 那是一段**非法 JS**，插件在宿主里会
 //     直接加载失败，而**构建报成功**。
@@ -13,14 +13,14 @@
 //  4. 剩下的可行入口是 **`tsc` CLI 本身**（它就是那个编译器）：实测它对标准装饰器产出完整的
 //     `__esDecorate(this, null, _stats_decorators, { kind: "method", … })` —— 正是 `Remote` 要的签名。
 //
-// 所以本模块跑一次 `tsc`，把**单个**带装饰器的文件编译成 JS 交给管线。
+// 所以本模块跑一次 `tsc`，把**单个**带装饰器的文件编译成 JS 交给流水线。
 //
 // ⚠ `--noResolve` 不是可选项：不加它 tsc 会**顺着 import 把整张图都编译一遍**（实测吐出了
-// `danger-rules.js` 等一串），而复用它的产物等于让管线吃两份源码。带上它之后 tsc 只编这一个
-// 文件，且**说明符逐字保留**（`from "./judge-stats.ts"` —— 管线的 `.ts` 解析照常）。
+// `danger-rules.js` 等一串），而复用它的产物等于让流水线吃两份源码。带上它之后 tsc 只编这一个
+// 文件，且**模块说明符逐字保留**（`from "./judge-stats.ts"` —— 流水线的 `.ts` 解析照常）。
 // 代价是它对每个 import 报一条 TS2307（"找不到模块"）：那是 `--noResolve` 的必然产物而不是
 // 错误信号，所以这里**不看退出码**，只认"产物文件真的出来了"。真出错时那条路会由产物加载
-// 门禁（`test/artifact-loads.test.ts`）与测试管线各自当场炸掉，不会静默。
+// 门禁（`test/artifact-loads.test.ts`）与测试流水线各自当场炸掉，不会静默。
 //
 // ⚠ 这一步是**同步**的（`execFileSync`）且输出丢弃（`stdio: "ignore"`）：构建与测试的日志必须
 // 干净 —— 上面那条"必然的 TS2307"绝不该出现在任何人的终端里（`--noResolve` 的报错正是我们
@@ -37,12 +37,12 @@ import path from "node:path";
  *  判据是「`@` 前面是空白或结构位置」，不是「`@` 在行首」：合法写法里有
  *  `class X { @Remote("stats") m() {} }`、`export default @dec class {}`、
  *  `const C = @dec class {}` 这些内联形态，行首锚定会把它们全部漏掉 —— 漏掉的后果是
- *  含装饰器的原文直接进管线（正是文件头说的「产物是非法 JS、构建却报成功」）。
- *  反向的误判（字符串里出现 `@foo`）只多跑一次 tsc，不会产出错东西，所以这一侧不必收紧。 */
+ *  含装饰器的原文直接进流水线（正是文件头说的「产物是非法 JS、构建却报成功」）。
+ *  反向的误判（字符串里出现 `@foo`）只多跑一次 tsc，不会产出错东西，所以这个方向不必收紧。 */
 const DECORATOR_SYNTAX = /(?:^|[\s{;(,])@[A-Za-z_$][\w$]*/u;
 
 /** 字符串字面量整段抄进 out（保留转义对），返回 `{ text, next }`。
- *  引号内的两个斜线的行注释标记是文本而不是注释，所以这一支必须独立成函数。 */
+ *  字符串里的 `//` 是文本而不是行注释标记，所以这一支必须独立成函数。 */
 function copyStringLiteral(code, at) {
   const quote = code[at];
   let text = quote;
@@ -123,7 +123,7 @@ const TSC_BIN = path.join(
 /**
  * 源文件后缀 → tsc 为它产出的 JS 后缀。
  *
- * 门槛接受 `.mts` / `.cts`，而 tsc 对它们的产物是 `.mjs` / `.cjs`（不是 `.js`）。
+ * 后缀门槛接受 `.mts` / `.cts`，而 tsc 对它们的产物是 `.mjs` / `.cjs`（不是 `.js`）。
  * 把后缀写死成 `.js` 时，这两种输入会去读一个不存在的文件，栈里只有一句 ENOENT。
  * @param {string} file - 源文件路径
  * @returns {string} 产物后缀
@@ -136,13 +136,13 @@ function emittedExtensionOf(file) {
 }
 
 /**
- * 清理 tsc 注入的装饰器管线：删掉那行**永不生效**的 metadata 发布，并把注入的调用从
+ * 清理 tsc 注入的装饰器调用样板：删掉那行**永不生效**的 metadata 发布，并把注入的调用从
  * **源映射**里摘掉（不是给产物插提示）。两件事都是为了让四项 100% 的门禁只盯**我们手写的代码**。
  *
  * ① **metadata 发布**：降级产物里有
  *    `if (_metadata) Object.defineProperty(this, Symbol.metadata, { … });`，
  *    而 `_metadata` 来自 `typeof Symbol === "function" && Symbol.metadata ? … : void 0`。
- *    实测运行期 `typeof Symbol.metadata === "undefined"`（Node 26），所以那个 `if` 的真臂
+ *    实测运行期 `typeof Symbol.metadata === "undefined"`（Node 26），所以那个 `if` 的真分支
  *    永远不走 —— 而它的源位置压在**我们那枚类声明**上，覆盖率就会盯着一个不可能为真的分支红。
  *    删掉它是安全的：官方 `Remote` 只往原型上写一枚方法描述符，**从不读 `context.metadata`**
  *    （packages/typert/protocol/src/index.ts 的 `addMarkerInitializer`）。
@@ -152,19 +152,19 @@ function emittedExtensionOf(file) {
  *    前者的上下文里带 TC39 为方法规定的 `access: { has: …, get: … }` 两枚箭头（官方实现同样
  *    不读 `context.access`），后者对本类（没有实例字段初值）是纯噪音 —— 它们的源位置又恰好
  *    压在我们的类/构造器那两行上。做法是把这两行在**源映射**里的映射项置空
- *    （同 lib/tool-ledger.ts 的口径：不可达或非本手写的臂要留痕）。
+ *    （同 lib/tool-ledger.ts 的规则：不可达或非本手写的分支要留痕）。
  *
  * ⚠ 留痕落在**源映射**里而不是产物里：产物行保持逐字原样（插注释既改字节，又会让 `mappings`
- * 错位），只有 `coverageHints` 那条管线把映射项置空。它只加给**测试管线**：构建产物不该为
+ * 错位），只有 `coverageHints` 为真时把映射项置空。它只加给**测试流水线**：构建产物不该为
  * 覆盖率留任何形状（旧实现往产物里插注释，minifier 认不出、会把它们原样留在产物里）。
  * ⚠ 只做**锚点明确的替换**：锚点对不上就原样返回（宁可让覆盖率当场红一次，也不猜着切文件）。
  * @param {string} code - tsc 产物
- * @param {boolean} coverageHints - 把注入的调用从源映射里摘掉（只有测试管线要）
+ * @param {boolean} coverageHints - 把注入的调用从源映射里摘掉（只有测试流水线要）
  * @param {string[] | null} mapLines - tsc 的逐行源映射（产物行与它逐行对齐）
  * @returns {{ code: string, mapLines: string[] }} 清理后的产物与逐行映射
  */
 function pruneInjectedPlumbing(code, coverageHints, mapLines) {
-  // 目标是**任意标识符**，不是固定写 `this`：tsc 按装饰器落点给出不同的接收者 ——
+  // 目标是**任意标识符**，不是固定写 `this`：tsc 按装饰器位置给出不同的接收者 ——
   // 方法装饰器写 `this`（见 lib/stats-remote.ts 的产物），类装饰器或静态成员写 `_classThis`，
   // 派生类写 `_classSuper` 一类临时名。写死 `this` 时只有方法那一支被裁掉，类/静态成员那一支
   // 的发布句会原样留下 —— 而它同样"永不生效"，且会让"删了哪些行"随装饰器位置而变。
@@ -206,7 +206,7 @@ function pruneInjectedPlumbing(code, coverageHints, mapLines) {
     out.push(line);
     mapped.push(sourceMapping);
   }
-  // 一条都没匹配上是**允许**的：门槛是"可能是装饰器"的快速筛，字符串里出现 ` @word`
+  // 一条都没匹配上是**允许**的：前置门槛只筛"可能是装饰器"，字符串里出现 ` @word`
   // 这类误报会白白跑一次 tsc，产物原样返回。真出现"tsc 换了输出形状"时，那条永不生效的
   // 发布句会留在产物里，覆盖率当场红 —— 那正是本文件头写明的取舍（不猜着切文件）。
   return { code: out.join("\n"), mapLines: mapped };
@@ -216,7 +216,7 @@ function pruneInjectedPlumbing(code, coverageHints, mapLines) {
  * 把一个带装饰器的 TS 文件编译成 JS。
  * @param {string} code - 源文本（当前实现只做"要不要编"的门槛，编译交给 tsc 读盘上的原文）
  * @param {string} file - 源文件的**绝对路径**（tsc 按它定位产物名）
- * @param {boolean} [coverageHints] - 把注入的调用从源映射里摘掉（只有测试管线要，见上）
+ * @param {boolean} [coverageHints] - 把注入的调用从源映射里摘掉（只有测试流水线要，见上）
  * @returns {{code: string, map: { sources?: string[]; mappings?: string } | null}} 编译后的代码与源映射
  *  （声明成实际形状而不是 `object`：调用方要钉 sources 时不必再各自 cast 一次）
  */
@@ -240,7 +240,7 @@ export function lowerStandardDecorators(code, file, coverageHints = false) {
           "--noResolve",
           "--target",
           "es2024",
-          // `preserve` 让 import 说明符**逐字保留**（含 `.ts`），管线照常解析。
+          // `preserve` 让 import说明符**逐字保留**（含 `.ts`），流水线照常解析。
           "--module",
           "preserve",
           // 源映射不是可选的：覆盖率按源文件归因，少了它 `lib/stats-remote.ts` 会从
@@ -305,7 +305,7 @@ export function lowerStandardDecorators(code, file, coverageHints = false) {
 }
 
 /** 插件 id → 文件名：剥掉 `?` 之后的 query（`x.ts?import` / `x.ts?raw` 是同一份源码的
- *  不同取用方式）。两条管线都必须先过它 —— 只让 Vite 侧剥 query 时，rolldown 侧那些带 query
+ *  不同取用方式）。两条流水线都必须先过它 —— 只让 Vite 侧剥 query 时，rolldown 侧那些带 query
  *  的 id 会因后缀判据不匹配而**静默跳过**降级。 */
 function fileIdOf(id) {
   return id.includes("?") ? id.slice(0, id.indexOf("?")) : id;
@@ -322,7 +322,7 @@ export function rolldownDecorators() {
   };
 }
 
-/** Vite 插件（测试管线）：与上面同源，只是挂到 Vite 的钩子上（`enforce: pre` 保证在它前面）。 */
+/** Vite 插件（测试流水线）：与上面同源，只是挂到 Vite 的钩子上（`enforce: pre` 保证在它前面）。 */
 export function viteDecorators() {
   return {
     name: "danger-guard:standard-decorators",
@@ -330,7 +330,7 @@ export function viteDecorators() {
     transform(code, id) {
       const file = fileIdOf(id);
       // 单 return：两个分支只差"要不要编译"，而 lint 的 consistent-return 盯着返回值形状。
-      // 第三个实参 = 覆盖率提示：**只有测试管线要**（构建产物的字节不该带它，见 pruneInjectedPlumbing）。
+      // 第三个实参 = 覆盖率提示：**只有测试流水线要**（构建产物的字节不该带它，见 pruneInjectedPlumbing）。
       return needsDecoratorLowering(file, code)
         ? lowerStandardDecorators(code, file, true)
         : undefined;

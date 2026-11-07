@@ -48,7 +48,7 @@ const basisTable = (): Map<string, unknown> => ledgerAt(0);
 /** 暂存那份台账（第 1 项）。 */
 const stagedTable = (): Map<string, unknown> => ledgerAt(1);
 
-/** 目标目录：按平台根拼，不写死 POSIX 形（Windows 上 `/w` 是「当前盘相对」，落点会漂）。 */
+/** 目标目录：按平台根拼，不写死 POSIX 形（Windows 上 `/w` 是「当前盘相对」，写到哪儿会变）。 */
 const WORK_ROOT = path.resolve(path.parse(process.cwd()).root, "w");
 /** 被判的目录（键里的 goal 段）。 */
 const OTHER_ROOT = path.resolve(path.parse(process.cwd()).root, "w2");

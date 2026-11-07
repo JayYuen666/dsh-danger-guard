@@ -1,7 +1,7 @@
 // test/lesson-report.test.ts —— 上报表面的异常隔离：总线或上下文抛错只跳过上报，不中断判定。
 //
 // 这三条路径跑在 tools.guard 的热路径上（deny 上报与成本采样），任何一条把异常带出去，
-// 都会把一次拦截变成一次调用错误。假件按真实服务的形状写：方法依赖接收者、可选读面是数据属性。
+// 都会把一次拦截变成一次调用错误。假件按真实服务的形状写：方法依赖接收者、可选读取接口是数据属性。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
@@ -11,14 +11,14 @@ import { statsSnapshot } from "../lib/judge-stats.ts";
 
 const DENY = { category: "dangerous-bash", signature: "rm -rf /", detail: "denied", evidence: {} };
 
-/** 一枚可选读面；`get` 抛错时模拟抛错 getter。 */
+/** 一枚可选读取接口；`get` 抛错时模拟抛错 getter。 */
 const contextWith = (get: (name: string) => unknown): ReportContext => ({
   get,
   cwd: process.cwd(),
   sessionId: "session-1",
 });
 
-describe("lesson-loop 上报面的异常隔离", () => {
+describe("lesson-loop 上报的异常隔离", () => {
   it("取总线时抛错 ⇒ 静默跳过，不把异常带进判定链", () => {
     const context = contextWith(() => {
       throw new Error("service getter failed");

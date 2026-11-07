@@ -1,6 +1,6 @@
 ## 0.1.13
 
-`apply_patch` 纳入三条防线；宿主开发基线抬到 `0.2.2-rc.1`，支持窗口滚到 `^0.2.1-rc.5 || ^0.2.2-alpha.3`，`engines.node` 地板抬到 `>=24.9.0`；设置卡的组件面改由 shared 的 `./client` 供。默认配置与拦截行为不变，需要留意的是 `engines.node` 抬高后 node 22 装不上本包，以及窗口滚动后安装器的 peer 落点。
+`apply_patch` 纳入三条防线；宿主开发基线抬到 `0.2.2-rc.1`，支持窗口滚到 `^0.2.1-rc.5 || ^0.2.2-alpha.3`，`engines.node` 下限抬到 `>=24.9.0`；设置卡片的组件改由 shared 的 `./client` 供。默认配置与拦截行为不变，需要留意的是 `engines.node` 抬高后 node 22 装不上本包，以及窗口滚动后安装器的 peer 位置。
 
 ### Added
 
@@ -8,57 +8,57 @@
 
 ### Changed
 
-- **宿主开发基线**：`devDependencies` 的 `@deepseek-ai/dsh-*` 全族抬到 `0.2.2-rc.1`，`@deepseek-ai/cordis` 抬到 `4.1.0`，`@deepseek-ai/schemastery` 抬到 `3.19.0`；`@deepseek-ai/dsh-ptc-runtime` 从 devDependencies 移除（源码与测试都不再引用它）。根 catalog 与 overrides 的投影同步，`pnpm-lock.yaml` 随之重解。
-- **支持窗口与 Node 地板**：`engines.dsh` 与四枚 `@deepseek-ai/dsh*` peer 由 `^0.2.1-rc.3 || ^0.2.2-alpha.2` 改为 `^0.2.1-rc.5 || ^0.2.2-alpha.3`；`@deepseek-ai/schemastery` 的 peer 由 `^3.18.6-alpha.1` 放宽为 `^3.18.5 || ^3.18.6-alpha.1`，好让宿主两条线各自的实装版本（rc 线 `3.18.5`、`0.2.2-rc` 线 `3.19.0`）都能被同一条范围收下；devDependencies 仍是精确钉版，那是编译期的纪律。`engines.node` 由 `>=22.12.0` 抬到 `>=24.9.0`：`0.2.2` 线宿主自己的地板就是这一枚，写低了等于承诺一个宿主不会启动的运行环境。
+- **宿主开发基线**：`devDependencies` 里整组 `@deepseek-ai/dsh-*` 抬到 `0.2.2-rc.1`，`@deepseek-ai/cordis` 抬到 `4.1.0`，`@deepseek-ai/schemastery` 抬到 `3.19.0`；`@deepseek-ai/dsh-ptc-runtime` 从 devDependencies 移除（源码与测试都不再引用它）。根 catalog 与 overrides 的投影同步，`pnpm-lock.yaml` 随之重解。
+- **支持窗口与 Node 下限**：`engines.dsh` 与四枚 `@deepseek-ai/dsh*` peer 由 `^0.2.1-rc.3 || ^0.2.2-alpha.2` 改为 `^0.2.1-rc.5 || ^0.2.2-alpha.3`；`@deepseek-ai/schemastery` 的 peer 由 `^3.18.6-alpha.1` 放宽为 `^3.18.5 || ^3.18.6-alpha.1`，好让宿主两条线各自的实装版本（rc 线 `3.18.5`、`0.2.2-rc` 线 `3.19.0`）都能被同一条范围收下；devDependencies 仍是精确钉版，那是编译期的纪律。`engines.node` 由 `>=22.12.0` 抬到 `>=24.9.0`：`0.2.2` 线宿主自己的下限就是这一枚，写低了等于承诺一个宿主不会启动的运行环境。
 - **卡片组件改由 shared 的 `./client` 供**：`src/client-entry.ts` 与 `src/stats-reader.ts` 的运行期值导入从 `./lib/card-ui`、`./lib/card-diff`、`./lib/record` 迁到 `./client`，`package.json` 新增 `dsh.client.external`，`build-client.mjs` 的外置清单同步；`cordis.patch.yml` 因此插入一条**不写 id** 的 `@jayyuen66/dsh-plugin-shared` 组件行——写 id 会在插件页多出一个可关闭的组件，关掉后本包设置卡失去组件供应。shared 的声明下限随之抬到 `^0.2.4`。
 - **CI 的 node 矩阵收敛**：`ci.yml` 的 `node: [22, 24]` 加 macOS 排除改为单格 `node: [24.9]`，`ci.yml` 与 `publish.yml` 的 `node-version` 由 `24` 改为 `24.9`，与 `engines.node` 同值；门禁跑在一个本包已声明不支持的运行环境上，证的是别的东西。
-- **拦截半体积预算随 `apply_patch` 上浮**：`test/dist-size.test.ts` 的预算由 125,500 B 抬到 128,000 B（实测 126,645 B，余量口径不变）。
-- **文档纠偏**：dsh 徽章由 `^0.2.1-rc.3` 抬到 `^0.2.1-rc.5`，与 `engines.dsh` 首条同值；「确认它真的在工作」里 `--no-verify` 那一档写反了——`noVerify` 四档全拒（`lib/mode-policy.ts` 的 `BASE` 表每一列都是 `deny`，自动审查档也硬拒），原文却写「自动审查放行」，读的人会以为换档就能过；`factGateEnabled` 的管辖面补上「补丁目标无法完整核对时的拒绝不在它管辖内」；组合层的条目数由「两行」改为「三条条目」，并写明 shared 那一行刻意不写 id 的后果；双语两侧各补上对方已有的一句（英文侧的事实门逐目标、中文侧的官方补丁解析器）。
+- **拦截半的体积预算随 `apply_patch` 一起抬高**：`test/dist-size.test.ts` 的预算由 125,500 B 抬到 128,000 B（实测 126,645 B，余量规则不变）。
+- **文档纠偏**：dsh 徽章由 `^0.2.1-rc.3` 抬到 `^0.2.1-rc.5`，与 `engines.dsh` 首条同值；「确认它真的在工作」里 `--no-verify` 那一档写反了——`noVerify` 四档全拒（`lib/mode-policy.ts` 的 `BASE` 表每一列都是 `deny`，自动审查档也硬拒），原文却写「自动审查放行」，读的人会以为换档就能过；`factGateEnabled` 的管辖范围补上「补丁目标无法完整核对时的拒绝不在它管辖内」；组合层的条目数由「两行」改为「三条条目」，并写明 shared 那一行刻意不写 id 的后果；双语两侧各补上对方已有的一句（英文侧的事实门逐目标、中文侧的官方补丁解析器）。
 
 ## 0.1.12
 
-开发基线抬到 `0.2.2-alpha.3`，宿主支持窗口从单条范围改成两条宿主线的并集；默认配置与拦截行为不变。同一批改动按审查判据加固了测试与发布链：补上几条点名成因的红，替掉两处只会抛裸 `ENOENT` 或静默放过的形状。需要留意的是发布元数据——`peerDependencies` 与 `engines.dsh` 现在覆盖 `0.2.1-rc.3` 与 `0.2.2-alpha.2` 两条线，安装器的 peer 解析因此会落到较新的那一支。另有一处真实宿主上的修复：设置卡的统计块此前在浏览器里渲染成一行 `…validate is not a function`，见 Fixed 第一条。
+开发基线抬到 `0.2.2-alpha.3`，宿主支持窗口从单条范围改成两条宿主线的并集；默认配置与拦截行为不变。同一批改动按审查判据加固了测试与发布链：补上几条点名成因的红，替掉两处只会抛出一句 `ENOENT`、或者静默放过的形状。需要留意的是发布元数据——`peerDependencies` 与 `engines.dsh` 现在覆盖 `0.2.1-rc.3` 与 `0.2.2-alpha.2` 两条线，安装器的 peer 解析因此会落到较新的那一支。另有一处真实宿主上的修复：设置卡的统计块此前在浏览器里渲染成一行 `…validate is not a function`，见 Fixed 第一条。
 
 ### Changed
 
-- **宿主开发基线**：`devDependencies` 里的 `@deepseek-ai/dsh-*` 全族抬到 `0.2.2-alpha.3`，`@deepseek-ai/cordis` 抬到 `4.0.6-alpha.2`，`@deepseek-ai/schemastery` 抬到 `3.18.6-alpha.2`；根 catalog 与 overrides 的投影同步，`pnpm-lock.yaml` 随之重解。
+- **宿主开发基线**：`devDependencies` 里整组 `@deepseek-ai/dsh-*` 抬到 `0.2.2-alpha.3`，`@deepseek-ai/cordis` 抬到 `4.0.6-alpha.2`，`@deepseek-ai/schemastery` 抬到 `3.18.6-alpha.2`；根 catalog 与 overrides 的投影同步，`pnpm-lock.yaml` 随之重解。
 - **支持窗口写成并集**：`peerDependencies` 里的四枚宿主包与 `engines.dsh` 由 `^0.2.1-rc.3` 改为 `^0.2.1-rc.3 || ^0.2.2-alpha.2`。caret 只吃自己那条元组内的预发布版本，单条范围会让安装器把新线判成不满足；宿主装载门读 `engines.dsh` 且带 `includePrerelease`，不受这条影响。并集窗口按干净目录里的 `npm install` 实测过：退 0，无 `ERESOLVE`。
 - **发布链的 pnpm 取值**：`ci.yml` 的两个 job 与 `publish.yml` 从 `version: 12` 改为 `env.PNPM_VERSION: 12.11.2`，与伞根 `packageManager` 同源；浮动主版本会让门禁与发布在补丁版之间漂移，而本仓的 `cordis.patch.yml` 记着可用下限 ≥12.3.0。
 - **CodeQL**：删掉 `packages: read`（本仓的 CodeQL 步骤没有 `packs` / `queries` 输入）；fork PR 的 `analyze` 改 `continue-on-error`（外部贡献者的 token 只读，上传 SARIF 必然 403，而跳过整步在分支保护里记作通过，等于「未扫描即绿」），其余事件仍判红。
-- **README 双语窗口口径**：两份都写明「发布时点取证到的最高版本不是区间上限」，并把逐版取证的判据说明为宿主 `--dump-config` 的层行；设置卡与它的命名空间调用另在发布基线上全量取证一次。
+- **README 双语窗口规则**：两份都写明「发布时点取证到的最高版本不是区间上限」，并把逐版取证的判据说明为宿主 `--dump-config` 的层行；设置卡与它的命名空间调用另在发布基线上全量取证一次。
 - **动作钉版**：`pnpm/action-setup` 由 6.1.0 抬到 6.1.1（`ci.yml` 两处、`publish.yml` 一处），`github/codeql-action` 的 init / analyze / upload-sarif 由 4.39.1 抬到 4.39.2。其余动作已是最新；每一枚的 SHA 都按上游 tag 解到 commit 再与注释版本核对，annotated tag 多解一层。
 - **`.gitignore`**：产物与缓存条目一律加前导斜杠（`/client.js`、`/coverage/`、`/.toolchain/` 等），补 `/*.tgz` 与 `.DS_Store`。workflow、dependabot 与 scorecard 的注释不再写死宿主族版本号，改为指向根表。
 
 ### Added
 
-- **产物缺席是一条点名红**：`test/dist-size.test.ts` 在量体积之前先判产物在不在盘上，缺件时提示「先跑 build」，与「体积回退」分成两条不同的红；预算常量旁边写明余量口径与顶穿时的处置。
-- **客户端扫描面的空集自检**：`test/schema-coverage.ts` 扫不到任何客户端源文件时抛在布局上，而不是交回空集合让调用方去报「字段全都没绑」。写入惯用法的匹配面同时补上 `set<string>('x')` 的泛型实参段与无插值模板字面量两类，引号改为后向引用配对，`"x'` 这类不配对写法不再算命中。
+- **产物缺席是一条点名红**：`test/dist-size.test.ts` 在量体积之前先判产物在不在盘上，缺件时提示「先跑 build」，与「体积回退」分成两条不同的红；预算常量旁边写明余量规则与顶穿时的处置。
+- **客户端扫描的空集自检**：`test/schema-coverage.ts` 扫不到任何客户端源文件时抛在布局上，而不是交回空集合让调用方去报「字段全都没绑」。写入惯用法的匹配同时补上 `set<string>('x')` 的泛型实参段与无插值模板字面量两类，引号改为后向引用配对，`"x'` 这类不配对写法不再算命中。
 - **宿主契约用例的判据**：`rejection` 的观测窗口从单轮宏任务改成两轮，并写明为什么一轮不够；「停用期不建分片」补上反向断言——切回启用后用同一 session id 打，配额若被停用期预支会直接放行。`lru` 补容量 1、恰好填满、默认容量三例。预检的目录预算溢出改用具名常量，遍历顺序变化不再影响这条用例的成立。
 - **收台进 `finally`**：`test/host-spine.ts` 的 fiber dispose 与临时目录清理拆开，dispose 抛错时不再把临时工程留在 `os.tmpdir`。
 
 ### Fixed
 
 - **Windows 两格的两条真实红**：`test/disaster-target.test.ts` 只注入 `HOME` 时，Windows 的 `os.homedir()` 读的是 `USERPROFILE`，用例会把真实家目录当成「可判」；改为两枚环境变量一起注入、一起恢复。`lib/self-write-proof.ts` 把 stat 失败与读正文失败合并成同一层 `catch`（结论同为 false），让「缺失路径」那条跨平台用例覆盖它；`chmod 0o000` 那条在 Windows 上显式跳过——chmod 只切换只读属性，不撤读权限，读完仍是可读的。
-- **设置卡的统计块在真实宿主上只剩一行错误**：`src/stats-reader.ts` 的形状校验原先调用 zod 的 `.validate`。本仓 `devDependencies` 那份 zod 有这个方法，而浏览器里的 `zod` 由宿主壳层的平台模块提供、版本更旧，没有它——类型检查与单测全绿，真机卡片上统计块却渲染成 `…validate is not a function`。改用 `safeParse(...).success`；`test/build-client.test.ts` 补一条两侧判据：产物里不得出现 `.validate(`，并且必须仍有 `.safeParse(`（否则「本来就没有」会让前一条恒绿）。
+- **设置卡的统计块在真实宿主上只剩一行错误**：`src/stats-reader.ts` 的形状校验原先调用 zod 的 `.validate`。本仓 `devDependencies` 那份 zod 有这个方法，而浏览器里的 `zod` 由宿主壳层的平台模块提供、版本更旧，没有它——类型检查与单测全绿，真机卡片上统计块却渲染成 `…validate is not a function`。改用 `safeParse(...).success`；`test/build-client.test.ts` 补一条两侧判据：产物里不得出现 `.validate(`，并且必须仍有 `.safeParse(`（否则「本来就没有」会让前一条永远通过）。
 - **`build-types.mjs`**：`typescript` 清单里声明的 `tsc` 入口不在盘上时点名路径与清单，而不是让子进程以一条与成因无关的 `ENOENT` 失败。
-- **预检超时与爆炸半径预演的超时改为单源**：`host.ts` 的 `PREFLIGHT_TIMEOUT_MS` 直接取 `lib/blast-radius.ts` 的 `BLAST_TIMEOUT_MS`（取值不变）。两处各写一枚同值常量时，「同值」只是一句注释，改一边不会有任何门响。
+- **预检超时与爆炸半径预演的超时改为唯一来源**：`host.ts` 的 `PREFLIGHT_TIMEOUT_MS` 直接取 `lib/blast-radius.ts` 的 `BLAST_TIMEOUT_MS`（取值不变）。两处各写一枚同值常量时，「同值」只是一句注释，改一边不会有任何门响。
 - **`lib/confirm.ts`**：`bashVerdictOf` 的两个分支合并成一个表达式；`BashDangerOptions` 新增必填字段时由 tsc 在一处提醒，不必两头对齐。
 - **注释与文档的漂移**：`src/client-entry.ts` 不再复述设置项清单与 `BUNDLE_PKG` 的来源；`decorator-transform.mjs` 的返回类型写成实际形状（`sources` / `mappings`），调用方钉源映射时不必各自 cast；client 构建头注明 `src/*.ts` / `lib/*.ts` 也是输入。
 
 ## 0.1.11
 
-一轮跨面审查修复：shell 词法与包装词判据重建、沙箱让路前提收紧、事实门与预检读面收口，扩展密钥模式补上上报与保存回路；发布链与 CI 同步加固。默认配置不变；需要留意的行为变化是 read-only 档的管道命令与自动审查硬拦范围这两处收紧。
+一轮跨模块审查修复：shell 词法与包装词判据重建、沙箱让路前提收紧、事实门与预检读取接口统一处理，扩展密钥模式补上上报与保存回路；发布链与 CI 同步加固。默认配置不变；需要留意的行为变化是 read-only 档的管道命令与自动审查硬拦范围这两处收紧。
 
 ### Added
 
-- **扩展密钥模式模块**：新增 `lib/secret-patterns.ts`（扩展密钥模式的校验、编译与缓存）与 `lib/secret-pattern-report.ts`（去重点名上报）；编译按清单内容记账复用，非法模式在设置装配时与拦截前各补报一次、同一串只报一次。设置卡保存消费受理位，被拒绝时翻译为 rejection 并保留草稿。
+- **扩展密钥模式模块**：新增 `lib/secret-patterns.ts`（扩展密钥模式的校验、编译与缓存）与 `lib/secret-pattern-report.ts`（去重点名上报）；编译按清单内容记录下来复用，非法模式在设置装配时与拦截前各补报一次、同一串只报一次。设置卡保存消费受理结果，被拒绝时翻译为 rejection 并保留草稿。
 - **前缀词数据表**：新增 `lib/prefix-tables.ts`，`pipeShell` 与 `runPrefix` 共用唯一的前缀词/取值旗标表。
 - **测试层**：新增 fast-check 属性测试两件（danger-rules、segments）与逐条点名 OCR 编号的 `test/ocr-fixes.test.ts`；新增 secret-patterns、settings-read、setup-logs、lesson-report、disaster-target、danger-regexes 六个单测文件；约 50 个既有测试文件加固。
 
 ### Changed
 
 - **档位处置两处收紧**：read-only 档 `pipeShell` 由 allow 改 ask；自动审查硬拦由两条扩为三条（加 `noVerify`）且先于 `!askable` 判；unknown 档不再吃沙箱让路。README 档位表同步。
-- **发布链加固**（`.github/workflows/publish.yml`）：发布闸比完整 ref、token 清洗抽到 `.github/scripts/normalize-token.sh` 且不落盘跨步传、registry 读取加超时与重试、预检改判「本地要发的版本已存在」、发布后轮询 5 分钟、pnpm 加 cache；actionlint 改 `-config-file` 按文件豁免；codeql 超时 120 分钟并取消同 PR 旧分析；scorecard 加 concurrency；dependabot 分组改 `*`。
+- **发布链加固**（`.github/workflows/publish.yml`）：发布闸比完整 ref、token 清洗抽到 `.github/scripts/normalize-token.sh` 且不写到磁盘跨步传、registry 读取加超时与重试、预检改判「本地要发的版本已存在」、发布后轮询 5 分钟、pnpm 加 cache；actionlint 改 `-config-file` 按文件豁免；codeql 超时 120 分钟并取消同 PR 旧分析；scorecard 加 concurrency；dependabot 分组改 `*`。
 - **构建与元数据**：host 产物构建结果按进程缓存，类型零声明即失败；author 改对象形；`@deepseek-ai/schemastery` peer 放宽为 `^3.18.6-alpha.1`；catalog 的 shared 抬到 0.2.2；devDependencies 新增 fast-check 4.10.2。
 - **体积预算棘轮上调**：HOST 117,400→125,500、SETTINGS 3,500→5,100 字节。
 
@@ -69,19 +69,19 @@
 - **误报两处**：`terraform -auto-approve=false` 不再判成跳过确认；`git config core.hooksPath` 纯读值不再算写入。
 - **容器工具判据**（`lib/container-rules.ts`）：`--dry-run` 跳独立取值，补 TLS 三件套、kubectl 日志旗标与 `buildx prune`。
 - **爆炸半径**（`lib/blast-radius.ts`）：`git clean -x/-X` 短旗标簇不再跑预演后盲问；新增 `cd`/`pushd`/`popd`/`env --chdir` 离开 cwd 子树的判据；预演输出的 `truncated`/`aborted` 非布尔真值按形状不符退回盲问。
-- **灾难目标**（`lib/disaster-target.ts`）：盘符 `C:` 与 UNC `//` 词面判不透明；空词面、`$HOME` 未设置时不再编造落点。
+- **灾难目标**（`lib/disaster-target.ts`）：盘符 `C:` 与 UNC `//` 按词形判不透明；空输入、`$HOME` 未设置时不再编造位置。
 - **沙箱让路前提**（`lib/sandbox-scope.ts`、`lib/effective-disposition.ts`）：workspaceRoot 读不出时整份根表不留；`resolve`/`canonicalize` 抛错按读不到处理；灾难目标折规范形再比，symlink 前缀（`/tmp`→`/private/tmp`）不再误判「盖得住」。
 - **事实门基线**（`lib/read-basis.ts`）：无暂存不落读取基线；基线结算移到 `next()` 之后并带 `blocked` 位；pre/post-execute 各段包 try，装配抛错只撤本层补充不炸瀑布。
 - **自写证明**（`lib/self-write-proof.ts`）：先 `isFile()`（FIFO 不再阻塞主路径）、改有界读、空写入按「不知」。
 - **写载荷识别**（`lib/edit-targets.ts`）：键名折 snake_case、普通对象也算写，`newContent`/`patch:{hunks}` 等不再漏判目标。
 - **预检**（`lib/preflight-scan.ts`）：`scanned` 只计真读到正文；`size` 缺席时多读 1 字节判截断；断链改标 `incomplete` 与预算截断分离；零命中补「没读成正文」文案。
-- **投影读口**（`lib/projection-reader.ts`）：先判 handle 后判 disposer，可调用 handle 不再读错来源；`stateOf`/`dispose` 抛错收口、disposer 幂等闸门。
-- **设置值面**（`lib/settings-read.ts`）：`numOf` 收紧为正安全整数并单源导出；`strArray` 按字段去重告警、非数组也告警；读数口抛错回落内置基线。
-- **健壮性散修**：`MTIME_UNKNOWN` 改 `-Infinity`；tool-ledger 逐个比较防 RangeError；judge-stats/lesson-report/stats-remote 上报链路异常隔离；`askable` 白名单只认 `"ask"`。
+- **投影读口**（`lib/projection-reader.ts`）：先判 handle 后判 disposer，可调用 handle 不再读错来源；`stateOf`/`dispose` 抛错统一处理、disposer 幂等闸门。
+- **设置值**（`lib/settings-read.ts`）：`numOf` 收紧为正安全整数并统一从唯一来源导出；`strArray` 按字段去重告警、非数组也告警；取值接口抛错回落内置基线。
+- **健壮性方面的零散修复**：`MTIME_UNKNOWN` 改 `-Infinity`；tool-ledger 逐个比较防 RangeError；judge-stats/lesson-report/stats-remote 上报链路异常隔离；`askable` 白名单只认 `"ask"`。
 
 ## 0.1.10
 
-开发基线抬到 `0.2.2-alpha.2`，宿主支持窗口写成滚动三版，设置卡与插件页文档改走共享面。默认配置不变；需要留意的行为变化是额外可写根的沙箱覆盖与内容自证上限这两处保守收紧。
+开发基线抬到 `0.2.2-alpha.2`，宿主支持窗口写成滚动三版，设置卡与插件页文档改走共享模块。默认配置不变；需要留意的行为变化是额外可写根的沙箱覆盖与内容自证上限这两处保守收紧。
 
 ### Added
 
@@ -92,7 +92,7 @@
 
 - **开发基线抬到 `0.2.2-alpha.2`，宿主支持窗口写成 `^0.2.1-rc.3`**（`engines.dsh` 与 `@deepseek-ai/dsh*` peer 同一条范围；`devDependencies` 仍精确钉住开发基线）。窗口内 `0.2.1-rc.3` / `0.2.1-rc.4` / `0.2.2-alpha.2` 列入支持范围。
 - **会话投影注册改为双协议**：`await register()` 之后按 disposer / handle 形状分流；注册成功后才发布台账读口，卸载先撤读口再释放。
-- **投递位次改读 `Session.seq`**：只需要日志长度，不再为它折叠整份台账（`calls` / `results` 的数组分配随之消失）。
+- **发送位次改读 `Session.seq`**：只需要日志长度，不再为它折叠整份台账（`calls` / `results` 的数组分配随之消失）。
 - **设置卡迁到共享 `./lib/card-ui`**；统计快照的形状守卫改由 zod schema 承担，`zod` 在客户端产物中按宿主 `PLATFORM_MODULES` 外置。
 
 ### Fixed
@@ -102,8 +102,8 @@
 
 ## 0.1.9
 
-一轮跨面审查修复，加伞工作区落地。修复集中在五个面：沙箱让路的前提、shell 词法与灾难判定、
-编辑面与事实门、预检与统计、长驻进程的有界性；方向一律保守（判不准就拦）。
+一轮跨模块审查修复，加伞工作区落地。修复集中在五个方面：沙箱让路的前提、shell 词法与灾难判定、
+编辑判定与事实门、预检与统计、长驻进程的有界性；方向一律保守（判不准就拦）。
 
 ### Fixed
 
@@ -119,10 +119,10 @@
   真实执行完。
 - **cwd 必须是绝对路径**才参与判定：第三方 `workingDirectory` 服务给出相对路径时原样打 brand，
   灾难目标会按插件进程的 cwd 解析出与可写根无关的绝对形。不绝对就交回 `undefined`（不让路）。
-- **宿主服务面（shellRaw / policyRaw / resolve）抛错不再中断扫描排序**：按「读不到就兜底」交回
+- **宿主服务（shellRaw / policyRaw / resolve）抛错不再中断扫描排序**：按「读不到就用兜底值」交回
   `undefined`，`rmrf` 保持 deny。
 - **完全权限档问不了用户时 `noVerify` 仍然拒绝**：绕 git 钩子与沙箱无关，整档放行会成为钩子
-  绕过的唯一开口。硬拦集合（`AUTO_REVIEW_HARD_STOPS`）导出单源，档位说明的适用范围自动跟上。
+  绕过的唯一开口。硬拦集合（`AUTO_REVIEW_HARD_STOPS`）导出唯一来源，档位说明的适用范围自动跟上。
 - **`noteFullAccess` 档位文案改写**：旧文案把该档描述成「自动审查」，与实际行为不符。
 
 **shell 词法与灾难判定**
@@ -131,18 +131,18 @@
 - **结构视图递归展开区体**：`$(printf 'curl x | sh')` 里单引号内的 `|` 不再被当成真管道，而
   `$(curl x | sh)` 里的真管道照拦；递归深度由 `REGION_MAX_DEPTH` 界住，并修掉 `map` 的下标漏进
   层数参数的缺陷。
-- **rm 的重定向操作数不进目标面**：`rm -rf ./build > /dev/null` 里的 `/dev/null` 是文件描述符的
-  落点，从来不是要删的东西——此前这条最常见的平静命令被判成灾难删除。
+- **rm 的重定向操作数不进目标清单**：`rm -rf ./build > /dev/null` 里的 `/dev/null` 是文件描述符的
+  位置，从来不是要删的东西——此前这条最常见的平静命令被判成灾难删除。
 - **灾难目标的家目录形分段判定**：`~/Documents` 不再整串退成「判不出来」（判不出来 = 让路，而它
-  恰恰不该让路）；`~/$W` 的子段单独过不透明判定、仍不可判；反引号、引号与换行列入不透明词面。
+  恰恰不该让路）；`~/$W` 的子段单独过不透明判定、仍不可判；反引号、引号与换行列入不透明用词。
 - **密钥模式写成 JS 正则字面量（`/…/i`）在加载期点名拒绝**：那种形状编得过、却永远匹配不到任何
-  路径——用户以为开了保护，密钥面静默失效。
+  路径——用户以为开了保护，密钥检查静默失效。
 - **容器 CLI 认 `--` 终止符**：`kubectl delete pod foo -- --dry-run=client` 里那是给 foo 的位置
   参数，读成预演会让一次真实删除被判 dry-run；`kubectl -- delete` 与 `kubectl delete` 在子命令
   位置等价；补登 kubectl 的 `-v` / `--v` / `--vmodule` / `--username` / `--password` /
   `--profile` 等值旗标。
 
-**编辑面与事实门**
+**编辑判定与事实门**
 
 - **写载荷判定放宽为「键名在写形态名单、或键名后缀像写（`*_text` / `*_content` / `*_string`），
   且取值非空」**：名单按实际写形态列（`old_str` / `edits` / `patch` / `diff` …），新 provider 换
@@ -157,16 +157,16 @@
 - **全局 mtime 基线改在结论落定（`settleVersion`）后刷新**：`observeVersion` 里写会让紧随其后的
   另一个会话看不到跳变；换代（`clearReadBasis`）时整表清空。
 - **自证归因要求 `selfTextPresent === true`**：`undefined` 是「取不到写入文本」的不知，不是自证。
-- **配额放行判据单源**（`releaseValid`）：只读查询与真放行共用一条判据，防两张皮。
-- **stat 的非有限 mtime 折成 unknown**：NaN 恒假会让外部改动检测静默失效；ENOENT 前缀匹配带词
+- **配额放行判据使用唯一来源**（`releaseValid`）：只读查询与真放行共用一条判据，防两张皮。
+- **stat 的非有限 mtime 折成 unknown**：NaN 永远不成立会让外部改动检测静默失效；ENOENT 前缀匹配带词
   边界（`ENOENTX` 不再误判成缺失）。
 - **设置数组「配坏」回落默认而不是清空**：全部项被丢弃时回 `undefined`（调用方用内置默认，名单
-  不缩、词表不空），`[]` 显式清空语义不变——两者在这份配置里方向相反。写面阈值交叉校验：
+  不缩、词表不空），`[]` 显式清空语义不变——两者在这份配置里方向相反。写入阈值交叉校验：
   `smallEditChars ≥ bigEditChars` 时 mid 档不可达，整对回落内置阈值并告警一次。
 
 **预检与统计**
 
-- **文件预算的口径从「读过正文的」改成「走到过的」**：预算挂在 `scanned` 上时隔离文件不消耗预算、
+- **文件预算的规则从「读过正文的」改成「走到过的」**：预算挂在 `scanned` 上时隔离文件不消耗预算、
   `unread` 无界增长；预算检查移到所有「这一份不读」的判断之前。
 - **零命中结论区分「没读到」与「按规则未读」**：走到但读不动 / 超大的文件单独计数
   （`unreadNotQuarantined`）并配新文案——`complete` 只说明遍历没被预算截断，说明不了「都读过了」。
@@ -179,10 +179,10 @@
 
 - **AskDeduper 的分片数有界**（按插入序淘汰，缺省上限 256）：会话标识按请求生成时漏调 drop 会让
   外层 Map 无界增长。
-- **判定统计读面注册失败不再打掉整条门禁**：服务键被占或注册口坏了时收口成一句告警——设置卡
+- **判定统计读取接口注册失败不再打掉整条检查**：服务键被占或注册口坏了时统一处理成一句告警——设置卡
   少一栏，闸门不受影响。
 - **工具台账的结构不变量进 schema**（行按 seq 严格升序、`length` 大于任何行内 seq）＋ 幂等自卫
-  （`seq < length` 的重投递不再追加第二份拷贝）＋ 按对象身份记忆化解析（热路径上不再为最多两千行
+  （`seq < length` 的重发送不再追加第二份拷贝）＋ 按对象身份记忆化解析（热路径上不再为最多两千行
   逐行重建对象）。
 - **去重上报的弹卡文案逐语言生成**（原先只拼英文）；教训总线守卫只判 `report`——`pass` 面形状
   漂移不再连带关掉 deny 上报。
@@ -192,22 +192,22 @@
 
 ### Changed
 
-- **构建脚本换成 shared 构建切面的薄配置层**（host/client/types 产物 sha256 与改造前逐字节
+- **构建脚本换成 shared 构建模块的薄配置层**（host/client/types 产物 sha256 与改造前逐字节
   一致）；补 ci/codeql/scorecard/dependabot 四份工作流与 actionlint 按文件豁免；catalog 与
-  overrides 按伞根真源投影（shared 下限 0.1.9）；宿主线 0.2.1-rc.2 → 0.2.1-rc.3（engines /
-  peer / dev 与两份 README 的徽章、正文同步）；Node 地板 `>=22.12.0`；`oxlint` 抬到 1.89 带来
+  overrides 按伞根唯一来源投影（shared 下限 0.1.9）；宿主线 0.2.1-rc.2 → 0.2.1-rc.3（engines /
+  peer / dev 与两份 README 的徽章、正文同步）；Node 下限 `>=22.12.0`；`oxlint` 抬到 1.89 带来
   的一处 `String#replaceAll` 机械修复。
 
 ### Verification
 
 - 伞根 `pnpm --config.verify-deps-before-run=false run check dsh-danger-guard`：typecheck、
-  lint、构建、全量测试与格式检查全绿，四项覆盖率 100%（纯类型模块按既有口径不计分母），
+  lint、构建、全量测试与格式检查全绿，四项覆盖率 100%（纯类型模块按既有规则不计分母），
   噪点 0 条、零输出腿 0 条、没跑到的腿 0 条。
 - `verify:link` 8/8（shared 0.1.9 链接态）。
 
 ## 0.1.8
 
-事实门的证据链收紧了五处口径。它们有同一个根因的两个侧面：**"观察过文件状态"与"已经取得
+事实门的证据链收紧了五处规则。它们有同一个真正的原因的两个侧面：**"观察过文件状态"与"已经取得
 该状态下的有效证据"被混在了同一套基线里**。
 
 同一轮还修了审批通道与命令扫描之间的跨通道缺口：被沙箱覆盖的 `rmrf` 此前会被扫描层当成
@@ -241,9 +241,9 @@
 - **预演文案按每种语言分别渲染。** 不再把宿主当次语言的那一份原样贴到其他 locale；
   `git status` 探针同时改用 `git --no-optional-locks status --porcelain`，避免可选锁与
   索引刷新。
-- **外部改动信号被第一次评估吃掉。** 判定外部改动的同时就刷新了观测基线，而失效点只存在于
+- **外部改动信号被第一次评估顺手消费掉。** 判定外部改动的同时就刷新了观测基线，而失效点只存在于
   局部变量里：同一目标连判两次（中间不读取），第二次便看不到任何变化，模型还没读过的新内容
-  上的旧 read 证据重新成立。失效点现在随观测写进同一条台账记录，一直有效到真的补上一次成功
+  上的旧 read 证据重新成立。失效点现在随观测写进同一条记录，一直有效到真的补上一次成功
   读取。
 - **失败或被拦的读取会把基线推向前。** guard 跑在工具执行之前，原实现在那一刻无条件写基线；
   于是"成功读 → 外部改 → 失败读 → 编辑放行"这条路上，中间那次外部改动再也检不出来。读取观测
@@ -255,13 +255,13 @@
   执行、已失败或被别的策略 block 掉的调用在日志里与成功的长得一样。这类调用现在一律按**状态
   未知**处理，不再计入 read/refs/层证据，也不再冒充"自己改的编辑"参与外部改动归因。
 - **层结论在遍历被截断时仍宣称零命中。** 扫描走进某一层之后在层内部撞上文件预算时，`dirs` 里
-  照样有那一层，于是"0 处命中"被算成结论并记进投递水位，门禁此后不再要求那一层。扫描现在记录
-  走过但**没读正文**的文件（超限、凭据面、读不动），零命中结论要求那棵子树真的读完；找到命中
+  照样有那一层，于是"0 处命中"被算成结论并记进发送水位，门禁此后不再要求那一层。扫描现在记录
+  走过但**没读正文**的文件（超限、凭据一类的东西、读不动），零命中结论要求那棵子树真的读完；找到命中
   则不受此限（实证不需要穷尽）。
 - **层集合缓存的键缺 `projectRoot`。** 上溯终点由项目根决定，而它对同一枚目标可以随会话 cwd
-  变化；键里少这一位时，窄根会话先评估会把宽根会话对该层的需求整片吃掉，反过来则给窄根会话
+  变化；键里少这一位时，窄根会话先评估会把宽根会话对该层的需求整片跳过，反过来则给窄根会话
   要一层它够不到的目录。
-- **引用扫描缓存在"版本未知"时也算命中。** 版本探针失败时两侧都是 `undefined`，`undefined ===
+- **引用扫描缓存在"版本未知"时也算命中。** 版本探测失败时两侧都是 `undefined`，`undefined ===
   undefined` 被当成"版本没变"，一份无法自证新旧的扫描结果因此被复用。现在要求这一趟真的探到
   版本才吃缓存。
 - **预检失败的日志文案与实际行为不符。** 那条路径把决定原样交回下游（随后由同步 guard 判定），
@@ -270,15 +270,15 @@
   而外部改动水位恰好等于放行水位时（放行后中间没有别的评估推进 `seenLen`，这正是
   常见形态）仍被当成有效配额。现在只有严格早于放行水位才保留配额；等于或晚于都失效
   并重新过门。当前**可判定地**仍缺 `read` 时同样不复用旧配额，预检的 `releasedFor`
-  与 `check` 共用这条判据；不可判定态沿用旧配额，由交互确认兜底。
-- **状态键没有跟随目标归一化。** host 把原始 `file_path` 交给状态机，证据与投递却用
+  与 `check` 共用这条判据；不可判定态沿用旧配额，回退到交互确认。
+- **状态键没有跟随目标归一化。** host 把原始 `file_path` 交给状态机，证据与发送却用
   `resolveTarget` 后的绝对目标；相对/绝对写法会分裂计数，`cd` 到另一个项目后同一
   相对路径还会复用上一项目的配额。现在 `check` / `releasedFor` 统一使用归一化目标。
 - **缺 `input` 与 `determinate:false` 走成两条路。** 缺省输入原先按 `[read, refs]`
   持续拒绝、永不进入交互确认；现在归一为 `undeterminable(NO_DELIVERY)`：首拒给行动
   清单，重试转 `indeterminate`。
 - **`.txt` 不再按文档扩展名免取证。** `CMakeLists.txt` / `requirements.txt` 是构建与
-  依赖逻辑，不是无执行影响的文档；豁免面收回到 `md` / `markdown` / `rst` / `adoc`。
+  依赖逻辑，不是无执行影响的文档；豁免名单收回到 `md` / `markdown` / `rst` / `adoc`。
 - **已确认行不再直接拼接内部 need 键。** 中英两语各自提供可读名，`read/refs/test/e2e/docs`
   不再以英文内部键混进中文消息。
 - **构造参数与运行时 `maxDenies` 的非法值有了确定行为。** 构造参数必须是正安全整数
@@ -290,7 +290,7 @@
 ### Changed
 
 - 外部改动之后，预检把目标正文当场递进拒绝理由时**同时解除失效点**。"模型在这一条结果里读到
-  了新内容"是那条判据的解除条件，不能靠投递位次判——水位记的是日志长度，而外部改动发生在日志
+  了新内容"是那条判据的解除条件，不能靠发送位次判——水位记的是日志长度，而外部改动发生在日志
   之外，两者会取到同一个下标，照旧判"缺 read"而把模型卡在重试循环里。
 - **去重表改成明确的上报语义。** `AskDeduper.first` 改名为 `shouldReport`，注释与测试统一为
   "首次上报 / 不再上报"；`perSession` 只接受正安全整数，非法容量直接拒绝，避免 `NaN` /
@@ -301,8 +301,8 @@
   "未了结的外部改动水位"（-1 = 没有），旧名字与接口注释却写成"最近一次成功编辑"。
 - **`pending` / `released` 改为真正的访问型 LRU。** `check` 命中两份台账都会刷新位次；
   `releasedFor` 仍是纯只读。单会话上限按两张台账各自 `maxFiles` 计算（约 2×），注释同步。
-- **不可判定退化面的契约写清。** `undeterminable` 只消费 read/refs 投递水位，不把
-  `layerSeqs` 混进这一面；两项都已投递时直接放行；"缺信息一律要更多"的旧表述收敛为
+- **不可判定退化的那条的契约写清。** `undeterminable` 只消费 read/refs 发送水位，不把
+  `layerSeqs` 混进这条退化路径；两项都已发送时直接放行；"缺信息一律要更多"的旧表述统一成
   实际行为。
 - **类型收窄与常量冻结。** `NO_DELIVERY` 及其 `layerSeqs` 在运行时冻结；`FactDenial`
   的数组改为只读并复制；`layerSeqs` 收窄为 `LayerNeed`（read/refs 不参与）。
@@ -324,7 +324,7 @@
 - **heredoc 体按定界符整段隔离。** 支持 `<<` / `<<-`、引号 / 反斜杠 / 混合引号定界符、
   空定界符与多定界符；体内落单引号不再污染外层命令行。定界符带引号**不**改变正文仍按命令源
   扫描——`bash <<'EOF'` 的体仍是脚本；代价是 `cat <<'EOF'` 的数据正文也可能被误拦，
-  这是有意的保守口径。
+  这是有意的保守规则。
 - **只把空格与制表符当词边界。** NBSP 不再把 `rm\u00A0-rf /` 拆成 `rm`；
   引号外续行不再产生位置空词。
 - **截断不再短路兄弟 region。** 深套在前时，后面的浅层 region 仍会展开；
@@ -389,8 +389,8 @@
 
 - **`lib/mode-policy.ts`**：判据本体。`decideRule(facts, key) → allow | ask | deny`，四档 × 全部规则键
   的矩阵是一张表，每个格子就是一个结论。`test/mode-policy.test.ts` 用**独立写死的期望值**逐格钉住
-  （不是从实现派生），完整键集由 `BASE` 派生而非手抄，所以新增规则键不会漏测。
-- **`lib/policy-facts.ts`**：把宿主只读服务面折成四位档位事实——沙箱模式、**能否询问**、是否自动审查、
+  （不是从实现派生），完整键集由 `BASE` 派生而非自己抄，所以新增规则键不会漏测。
+- **`lib/policy-facts.ts`**：把宿主只读宿主服务折成四位档位事实——沙箱模式、**能否询问**、是否自动审查、
   沙箱是否完全覆盖这次目标。三者都不调 `approval.request()`：那会往会话日志写一对审计事件，
   等于为"判断能不能问"而先问一次。
 - **`lib/policy-deny.ts`**：拒绝文案的三段拼法（基础理由 → 出路 → 档位说明），降级来的 deny
@@ -427,11 +427,11 @@
   那条兜底不参与，`su -c "…"` 这类会直接放行，漏一个就是一条现成的逃逸口。
 - 绝对 glob 与花括号展开的灾难判定：展开后命中根路径的形态此前未覆盖。
 - 爆炸半径预演带上 `sandboxPolicy`：只读预演不许回落到部署级宽松策略。
-- 判定统计读面收口。
+- 判定统计读取接口统一处理。
 
 ## 0.1.5
 
-- 迁移收尾：去掉自写 HTTP 读面相关代码与文案，读面统一走官方 Typert Remote。
+- 迁移收尾：去掉自写 HTTP 读取接口相关代码与文案，读取接口统一走官方 Typert Remote。
 - 绝对 glob 的展开形态此前整片漏拦（真 shell 把 `rm -rf /e?c` 展开成 `/etc`）；改为按同段正则
   判受保护前缀。
 - 花括号展开同样漏拦：`rm -rf /{etc,usr}` 这类按 shell 语义展开后判定，超预算 / 残缺 / 字面
@@ -442,39 +442,39 @@
 
 ⚠ **0.1.3 不可用**（已发布，请勿安装）：它的 client 入口读了一枚**未 `inject`** 的服务，cordis 读即抛
 ⇒ web boot 失败、页面卡在错误页（`web boot: 1 entry did not activate`）。**host 半（真正的拦截）不受影响**，
-坏的是设置卡那一条 client 入口。本版修掉它，并把这类错误钉进两道门禁。
+坏的是设置卡那一条 client 入口。本版修掉它，并把这类错误钉进两道检查。
 
 ### Fixed
 
-- **client 入口不再触碰未 inject 的服务（0.1.3 的致命回归）。** 根因：`apply` 里那句
+- **client 入口不再触碰未 inject 的服务（0.1.3 的致命回归）。** 真正的原因：`apply` 里那句
   `ctx.remote === undefined ? …` 一读就抛 —— cordis 对**未写进 `inject` 清单的服务**读取是**抛错**
   （`cannot get property "remote" without inject`，vendor/cordis/src/reflect.ts:144）。官方消费者
-  （`ui-permission-presets`）把 `'remote'` 与 `'remote.<命名空间>'` 都写进 inject，而本包这条读面是
-  **可选**的（没装远程面的部署里卡片仍要照常渲染）⇒ 不能那么写。修法：走 **`ctx.get("remote")`**
-  （显式读取，不受 inject 门禁约束；官方网关自己也是这么读可选服务的），挂载后再按网关的服务键
+  （`ui-permission-presets`）把 `'remote'` 与 `'remote.<命名空间>'` 都写进 inject，而本包这条读取接口是
+  **可选**的（没装远程通道的部署里卡片仍要照常渲染）⇒ 不能那么写。修法：走 **`ctx.get("remote")`**
+  （显式读取，不受 inject 检查约束；官方网关自己也是这么读可选服务的），挂载后再按网关的服务键
   **`remote.dangerGuardStats`** 取命名空间。
-- 两道新门禁：卡片用例的 ctx 桩件套上 **cordis 的 inject 门禁**（读未声明服务即抛，且带负向对照
-  证明这层门禁真的会抛），读面另有 4 条单元用例（挂载幂等 / 按 `remote.<ns>` 读 / 失败如实抛）。
-  0.1.3 之所以能发出去，正是因为当时的桩件是普通对象、不模拟这门禁。
+- 两道新检查：卡片用例的 ctx测试替身套上 **cordis 的 inject 检查**（读未声明服务即抛，且带负向对照
+  证明这层门禁真的会抛），读取接口另有 4 条单元用例（挂载幂等 / 按 `remote.<ns>` 读 / 失败如实抛）。
+  0.1.3 之所以能发出去，正是因为当时的测试替身是普通对象、不模拟这检查。
 
 ### Changed
 
 - **配额放行只免上层探查，不免 `read`（决策 ④）。** 此前熬满 `maxDenies` 的目标会被**整体**放行，
   包括 `read` —— 那等于给一个**从未看过原文**的目标开长期免检，后面每次编辑都不再要求读过文件。
   现在达上限而缺项里仍有 `read` 时**扣下配额、照常拒**（文案多一行点明"配额只免上层探查"），
-  补上 `read` 后下一轮即兑现。防死锁仍然成立：贵的那几项（引用面与各层探查）照样免。
+  补上 `read` 后下一轮即兑现。防死锁仍然成立：贵的那几项（引用证据与各层探查）照样免。
 
 ## 0.1.3
 
-判定面与**宿主官方保护面**对齐，并给拒绝理由补上"照做得到"的出路。判据表新增两族
-（git 破坏族 7 枚、基础设施族 5 枚），并新增一条**需确认**通道接宿主的审批面。
+判定与**宿主官方保护机制**对齐，并给拒绝理由补上"照做得到"的出路。判据表新增两族
+（git 破坏族 7 枚、基础设施族 5 枚），并新增一条**需确认**通道接宿主的审批通道。
 
 ### Added
 
 - **需确认档（`ask`）：规则键的第二档处置，接宿主原生审批。** 此前本包只有"硬拒"与"放行"
   两档，而 `nestedShellUnconfirmed` 那条虽写着"请贴给用户确认"，机制上只是把一段话丢回给
   模型 —— **模型可以无视它直接重试**。现在有一条真正的审批通道：
-  - 归属面是**一张表** `RULE_TIER: Record<BashDenialKey, "deny" | "ask">`（`lib/danger-rules.ts`）。
+  - 归属表是**一张表** `RULE_TIER: Record<BashDenialKey, "deny" | "ask">`（`lib/danger-rules.ts`）。
     两条性质由它**结构性**保证：**加了规则键却忘定档 = 编译错误**（`Record` 的完整性），
     **一枚键同时属于两档不可能**（同一格塞不进两个值）。
   - 这条分工是硬需求，不是风格：`tools.guard` 是**同步**谓词而 `ApprovalService.request()`
@@ -488,7 +488,7 @@
   - `nestedShellUnconfirmed` 随之翻到 `ask` 档（行为变更，见下）。
   - 集成层用真 `ToolRuntime` 走官方 `serviceAsk` 的**四个出口**各钉一条：
     `allowed-once` 放行并真的执行 / `rejected` 拒 / `unavailable` 拒并点明无审批通道 /
-    `cancelled` 拒；另有"无审批面 ⇒ fail-closed 且理由用我们交的那句"与"`deny` 档不问审批"。
+    `cancelled` 拒；另有"无审批通道 ⇒ fail-closed 且理由用我们交的那句"与"`deny` 档不问审批"。
 - **严重度择优：`deny` 压过 `ask`。** 引入 `ask` 档带出一个漏拦：`commandDanger` 原本
   "首命中即返回"，而一枚 `ask` 档命中会让扫描**提前收工** —— `python3 -c "…" && rm -rf /`
   里第二段**从未被判定**，用户点了"允许"之后灾难照常执行。现在逐段扫到拿到 `deny` 为止
@@ -496,17 +496,17 @@
 - **拒绝理由自带出路（`Fix`）。** 此前给模型的是**判断**（"请移除该旗标"），不是**动作**。
   现在 `BashVerdict` 带一枚结构化的 `fix`：git 绕过点名越界的那几枚旗标（短簇点名整枚簇，
   因为簇里别的字母是真旗标）、灾难 rm 点名真正成灾的目标（**排除安全目标** —— 一条
-  `rm -rf ./build ~` 里该动的是 `~`）。形状住在零依赖叶子模块 `lib/fix.ts`：放 `danger-rules`
+  `rm -rf ./build ~` 里该动的是 `~`）。形状定义在零依赖叶子模块 `lib/fix.ts`：放 `danger-rules`
   里会让 `lib/messages.ts` 为拿类型把它（带 `node:os`/`node:path`）拖进**客户端类型程序**（实测 TS2591）。
   `bashDanger` 随之退化成一行键投影，**428 处既有断言零改动**。
 - **git 破坏族（7 枚规则键，全部 `ask`）**：`gitResetHard` / `gitCheckoutDiscard` /
   `gitRestoreDiscard` / `gitCleanForce` / `gitStashDrop` / `gitBranchDelete` / `gitForcePush`。
   此前本包拦 `git commit --no-verify`（一次提交跳过钩子）却放行 `git reset --hard`
   （可能丢掉三天的工作）——威胁模型不自洽。判据与 `gitBypass` **共用同一趟走查**
-  （`gitFacts` 扩展三枚面：长旗标原词 / 短簇字母 / 位置参数 + `--` 分界），按子命令查表
+  （`gitFacts` 扩展三项：长旗标原词 / 短簇字母 / 位置参数 + `--` 分界），按子命令查表
   （`GIT_DESTRUCTIVE`）而不是长 `if` 链：链上加满七条会把复杂度推到 25，而上限是 20。
   每条文案都写明**该先跑什么**（`git stash push -u` / `git clean -nd` / `git branch --merged` /
-  `--force-with-lease`）。已知边界逐条钉了现状用例：裸 `git checkout <path>` 不判
+  `--force-with-lease`）。已知边界逐条钉了现状用例：只给一个参数、不带 `--` 的 `git checkout <path>` 不判
   （与切分支词法上不可分）、`checkout -B` 不判、push 目标分支不解析、`rebase --abort` 未收。
 - **基础设施破坏族（5 枚规则键，全部 `ask`）**：`tfDestroy` / `tfAutoApprove` / `dockerPrune` /
   `kubectlDelete` / `dbMigrate`。最后一枚来自 dsh 官方自带的示例 mod `Blast Radius`
@@ -522,13 +522,13 @@
   `git status --porcelain` / `git clean -nd` / `git stash list` / `git branch -vv` / `git log`），
   把清单接进审批请求的 `reason` 与 **`displayReason` 的每一门语言**（只接 `reason` 的话弹窗
   看不到证据，这次改动就白做了）。**空输出当时被写成结论**（"此刻不会改动任何东西"）；
-  这一说法后来被真实 git 行为证伪，现行口径见本版 Fixed 的「爆炸半径预演不再把"探针没输出"
+  这一说法后来被真实 git 行为证伪，现行规则见本版 Fixed 的「爆炸半径预演不再把"探测脚本没输出"
   说成"不会改动任何东西"」一条。
   其余边界见 `lib/blast-radius.ts` 的文件头。
 
 - **判定统计读数进设置卡（官方 Typert Remote）。** 卡片此前只有输入控件，看不到"拦了什么、慢在哪"。
   现在宿主侧挂一枚读数服务（`lib/stats-remote.ts`，`@Remote("stats")`），卡片打开时（另有「刷新」）
-  拉一次并渲染：各面判定次数、`deny`/`ask` 两档的规则键命中、事实门配额放行次数（告警色）与慢判定。
+  拉一次并渲染：各处判定次数、`deny`/`ask` 两档的规则键命中、事实门配额放行次数（告警色）与慢判定。
   - **只走官方通道**：设置面没有"宿主计算值"的口子（`ctx.settings` 只有 configure/describe/update/
     replace/mutate），所以唯一的合法路径就是 Remote —— 官方 `permission-presets` 正是这么把进程级
     目录交给客户端 UI 的。
@@ -536,11 +536,11 @@
     也不需要 `create()`，而无参一元 JSON 结果正是它覆盖的形状。两侧一致性由门禁钉住：
     `test/stats-remote.test.ts` 用官方 `remoteMethods()` 读宿主标记，再与客户端 descriptor 逐字段对质。
   - **装饰器预转换**（`decorator-transform.mjs`）：官方 `Remote` 只能用**标准装饰器（TC39）**声明，
-    而本仓两条管线的解析器都不降级它 —— 实测 rolldown 会把 `@Remote("stats")` **原样吐进产物**
+    而本仓两条流水线的解析器都不降级它 —— 实测 rolldown 会把 `@Remote("stats")` **原样吐进产物**
     （非法 JS，插件在宿主里直接加载失败）而构建报成功。进程内也没有替代入口（本仓 TS 7 的 JS 面上
     只有 `version`），故这一步跑一次 `tsc`（`--noResolve`：只编这一个文件、说明符逐字保留）。
   - **读法是按需拉取、不订阅**：判定统计只在 agent 干活时变，跨宿主重连缓存旧值正是要避开的失效。
-    当前部署没装 Remote 面时那一段显示「读不到」，卡片照常（可选读面，拦截面绝不为它下线）。
+    当前部署没装 Remote 面时那一段显示「读不到」，卡片照常（可选读取接口，拦截本身绝不为它下线）。
   - 新增一条产物级门禁：`test/artifact-loads.test.ts` —— 产物**真的能被 Node 加载**（本轮踩过的
     失效模式正是"产物非法 JS 而构建报成功"，逐字节比对新旧与体积预算两条都抓不住它）。
 
@@ -551,25 +551,25 @@
   才轮到目标那个深目录与它同级的 `test/` 层），于是 `complete` 永远为 false、凭证永远给不出。
   现在层级**自下而上**（目标所在目录 → … → 项目根）、层内**广度优先**（同层文件先读完再下钻
   —— 这条是实测踩出来的：纯深度优先下，一个装几百个文件的子目录会把同层的引用者挤掉，
-  连既有夹具的 `hits.ts` 都读不到）。已走过的目录进 `visited`，下层那棵树不会在上层重走。
+  连既有夹具的 `hits.ts` 都读不到）。已走过的目录进 `visited`，下层的子树不会在上层重走。
   凭证判据同步修正为 `遍历未被截断` **或** `找到了引用`（`refsCreditable`）：门禁认可模型自己
   那次**作用域正确**的检索当凭证，而那次检索也不是穷尽的 —— 要求我们这趟扫描穷尽比那还严。
-  而"**零命中 + 被截断**"仍然不给凭证：假阴性全住在那一种里。
+  而"**零命中 + 被截断**"仍然不给凭证：假阴性全部来自那一种情况。
 - **`ancestorLevelsOf` 的两处边界 bug**（新写的函数，测试当场抓出两个）：`root === "/"` 时
   往上一级会走到空串而循环退出，于是**丢掉 root 自己** —— `/` 下的文件与其余兄弟目录永远不会
-  被走；同一族的 `\`${root}/\`` 对 `root = "/"` 会拼出 `"//"` 而 `startsWith` 恒假
+  被走；同一族的 `\`${root}/\`` 对 `root = "/"` 会拼出 `"//"` 而 `startsWith` 永远不成立
   （与 `lib/sandbox-scope.ts` 那条同源，两处都做了尾斜杠归一）。
 - **新增 `test/preflight-scan.test.ts`**（10 条）：`lib/preflight-scan.ts` 一直是导出的，
-  却只经 host 接线被测，于是若干内部出口在集成层根本走不到 —— 最典型的一条：**一层只有一个
+  却只经 host 接线被测，于是若干内部返回路径在集成层根本走不到 —— 最典型的一条：**一层只有一个
   文件时，"逐项查取消"的第二次永远不会发生**，那处守卫成了死代码而覆盖率门只是把它算进去。
   顺带发现 `test/fixtures/local-fs-face.ts` 的 `abortAfterLstat` 选项**从未被任何用例用过**
   （一枚死夹具），现在有了；`ancestorLevelsOf` 因此导出**只为可测**（照 host 的 `noteJudgeCost`
   先例，写明理由）：它的两条边界只有"目标直接在 `/` 下"与"目标不在 root 之下"才走到。
 - **`isAncestorDirOf` 对根目录的判定是个安全 bug**：它用 `"${candidate}/"` 拼前缀，`candidate = "/"`
-  时得到 `"//"`，`startsWith` 恒假 —— 于是 `rm -rf /` 会被新加的沙箱让路判据判成"包不住可写根"
+  时得到 `"//"`，`startsWith` 永远不成立 —— 于是 `rm -rf /` 会被新加的沙箱让路判据判成"包不住可写根"
   而**放行一次全盘删除**。修法与用例在某单测里各钉一处（该用例专测这一支）。
 - **`preflightSignalOf` 不容缺席的调用方信号**：官方 `ToolExecution` 把它标为必填，而该函数
-  抛在 `confirmFactory` 里、**不在任何 try 之内** —— "宿主送来一枚没带 signal 的执行面"会被
+  抛在 `confirmFactory` 里、**不在任何 try 之内** —— "宿主送来一枚没带 signal 的执行上下文"会被
   变成"整次工具调用成异常"。一句可选的测量读数不该有那个权力，现在缺席只留墙钟。
 - **`clipBlast` 的"被收紧"判据拿原文 `trim()` 比**：porcelain 输出的**前导空格是有意义的**
   （` M a.ts` = 工作区已改），trim 之后比会把"只是行首有空格"判成被截断，于是给用户添一句假话。
@@ -593,14 +593,14 @@
 - **`rmrf` 在宿主沙箱确实管得住时让路。** dsh 自带进程级沙箱，它的拒绝会附带**官方认可的升级
   路径**：`[sandbox: escalation available — retry this exact command once with
   sandbox_permissions + justification; the approval prompt asks the user]`。我们的硬拒跑在
-  bash 工具之前，把那条路整个掐死了。现在读宿主的能力面（`ctx.shell.sandboxMode` 是执行器的
+  bash 工具之前，把那条路整个掐死了。现在读宿主的能力清单（`ctx.shell.sandboxMode` 是执行器的
   自报、`ctx.sandboxPolicy.resolve()` 同步交出生效 mode，源码注释原话"Enforcing filesystem,
   one-shot bash, and terminal backends read the **SAME** resolved policy here"）决定是否让路。
   **判据被刻意收紧**：不是直觉上的"目标在可写根之外"，而是**"目标包不住任何可写根"** ——
   `workspace-write` 的语义是*允许*改工作区内的文件，于是 `rm -rf ~`（工作区在 `~` 下）会
   **先删光工作区内容**、再在边界外被拒；沙箱是路径白名单，**不提供原子性**。所以
   `~`/`/`/`.`/`..` 一律不让路，只有 `rm -rf /etc/foo`、`rm -rf ~/Downloads` 这类才让。
-  `danger-full-access`（含 `auto` 档）/ 无沙箱装配 / 读不到能力面 → 保持硬拒（那时我们是唯一兜底）。
+  `danger-full-access`（含 `auto` 档）/ 无沙箱装配 / 读读不到能力清单 → 保持硬拒（那时我们是唯一兜底）。
   ⚠ **`auto` 档仍然必要**：它的旋钮组合是 `danger-full-access` + `ask` + 逐调用 reviewer，
   而 reviewer 的 allow **不等于用户批准**，沙箱此时完全不拦。
 - **`secretPath` 保持一律拦**，不跟着让路：`dsh-fs-sandbox` 与 `dsh-fs-local` 是**互斥装配**，
@@ -608,25 +608,25 @@
   漏拦是凭据外泄且难以发现。
 - `devDependencies` 新增 `@deepseek-ai/dsh-shell` 与 `@deepseek-ai/dsh-sandbox-policy`
   （workspace `overrides` 里已有的 `0.2.1-alpha.2`；**type-only 使用**，产物里零新说明符）。
-- **结构：三处单源搬迁**（`host.ts` 一路顶在 `eslint/max-lines` 的 2000 行预算上）：
+- **结构：三处唯一来源搬迁**（`host.ts` 一路顶在 `eslint/max-lines` 的 2000 行预算上）：
   - `lib/judge-stats.ts` —— 判定成本统计（只依赖 `console`）。它同时是**设置卡要展示的那份
-    数据**（`noteJudgeCost` 由 host 转发一枚，对外声明面逐字不变）。
+    数据**（`noteJudgeCost` 由 host 转发一枚，对外声明逐字不变）。
   - `lib/confirm.ts` —— `ask` 通道的决定构造（宿主无关，可脱离宿主单测）。
-  - `lib/sandbox-scope.ts` —— 沙箱管辖面的读与包含性判据；`realpathOf` 由宿主**注入**
+  - `lib/sandbox-scope.ts` —— 沙箱管辖范围的读与包含性判据；`realpathOf` 由宿主**注入**
     （lib 不 import `node:fs`，那是本仓纪律）。
-  - `lib/settings-read.ts` —— `strArray`（设置值面的防御性收窄）与 `bashOptsOf`
+  - `lib/settings-read.ts` —— `strArray`（设置值的防御性收窄）与 `bashOptsOf`
     （guard 与需确认档**共用**的那份词表装配）。
   - `lib/blast-radius.ts` —— 预演常量表与渲染。
   - 另把 `resolvedFormsOf` 搬进 `lib/target-paths.ts`（那本来就是那个模块的名字）。
-- `test/dist-size.test.ts` 的 host.js 预算按实测上浮 ~4% 调整（两轮共 +17.6 KB）。
+- `test/dist-size.test.ts` 的 host.js 预算按实测值加约 4% 调整（两轮共 +17.6 KB）。
 
 - **产物开 `minify: true` + `comments: false`。** 装载器只 `await import()` 文本（`vendor/include/src/
   index.ts:222`），注释与空白此前占掉一半以上，而没有人会去读装载器吃的文件。实测 host 309,394→86,727 B
-  （−72%）、settings 7,293→2,881 B、client 38,782→23,436 B；`types/` 的声明**不**压缩：那是发布面给
+  （−72%）、settings 7,293→2,881 B、client 38,782→23,436 B；`types/` 的声明**不**压缩：那是发布清单给
   编辑器读的 API 文档（JSDoc 就是它的正文）。
 - **更正一条写在 `test/dist-size.test.ts` 里的错误结论**：此前记的是"压缩后跨包说明符双双消失，
-  于是两道外部化门禁会变成恒绿"。实测否证 —— 那是 `from"x"` 与 `from "x"` 的**空白差异**，
-  说明符一直在。真正会被 minify 打瞎的是**带标识符的文本判据**（内联体被 mangle，实测故意不外部化
+  于是两道外部化门禁会变成永远通过"。实测否证 —— 那是 `from"x"` 与 `from "x"` 的**空白差异**，
+ 说明符一直在。真正会被 minify 打瞎的是**带标识符的文本判据**（内联体被 mangle，实测故意不外部化
   `dsh-brand` 时产物里 `brandNumber` 一次都查不到），所以 `test/build-host.test.ts` 的内联判据改成
   **结构性**的：看 chunk 的 `moduleIds` 里有没有依赖表的包（负向对照实测会红）。客户端的同类判据
   （`test/build-client.test.ts`）改成按**属性名与字面量**判（引号容忍三种形态）。
@@ -644,117 +644,117 @@ ask 通道、沙箱读法、两族新规则的用例。
 
 ### Added
 
-- **预检（Phase 2）：门禁要的证据现在**编辑之前**就到模型手里，取代"先拒绝、再由模型自己去查"**。两个面各挂一条官方瀑布，分工按「证据在什么时刻才真的算被看见」定，而不是按方便定：
-  - **A 面（只读检视 `read` / `view` / `str_replace_editor view`）挂 `tools/post-execute`**：引用面随**这次读取的结果**一起出去（官方 `PostToolDecision.accept{additionalContexts}`），agent-loop 在 commit 那条结果时收下、排到下一个 step 边界（`packages/core/agent-loop/src/tool-calls.ts:57,157`「accepts committed result context for the next step boundary」）。于是模型下一次动手编辑前就看得见"谁引用它"——这才是前置。按 mid 档问缺项（要 refs 的**最低**必要档：此刻还没有写参数，按 high 问会顺带要层证据、按 low 问根本没有 refs 这项要求）。
-  - **B 面（写类调用）挂 `tools/pre-execute`**：模型**没读就改**时，当场取到的正文与引用面写进这一次的拒绝理由（官方 `PreToolDecision.deny{reason}`，宿主 materialize 成本次调用的错误结果），并记下投递水位；原样重试即放行。物理停止仍在 dispatch 之前，所以"改之前先看清它"这条不变式一个字没让。
-  - **为什么把上一轮的 `exec.agent.inject()` 撤掉**（官方契约逐字核对过，`packages/core/agent/src/runtime-types.ts:233-241`）：`inject()` 把消息排在 **next pre-step**、不唤醒 driver，而模型的上下文按 step 推进——它在第 N 步决定这次编辑，只能看见第 N-1 步为止的内容。所以那条通道"取证时点"在前、"可见时点"却在编辑**生效之后**，那叫事后补证；官方还明说排队可能被取消/丢弃（"Cancellation or disposal may discard pending context"、"It may miss a request whose pre-step already claimed its batch"），水位却会把它记成"补过了"。两个面因此都改走**必然落地**的通道：结果本体、或拒绝理由。
-  - **不抢别人的决定**：两条瀑布都先 `await next()`，下游已经 deny/cancel/ask/block 就原样交回。B 面另外让路三道：会被密钥面拦下的目标（见 Fixed 的「预检不再把密钥正文送进模型上下文」）、已配额放行的目标（新增 `FactGate.releasedFor()` 只读查询，不改状态机任何一格——防死锁承诺不能被插件自己新加的拒绝换掉）、什么都没挣到的那一趟（正文读不出、扫描没跑成或被预算截断、或层缺项里有一层没被这次扫描覆盖）。
-  - **有界是硬要求，不是优化**：平台**不会放弃**一枚挂起的 pre-execute promise（installed dsh-tools `lib/types/index.d.ts:39-42` "never abandons their promise"），一次卡死的扫描会把整次工具调用永久挂住。引用扫描四道预算（文件 256 / 目录 256 / 单文件 64KB 超限跳过 / 命中 40，另有单行 200 字符），跳过依赖·产物与点开头目录，顺序 `await` 而不是 `Promise.all`（并发读会一次打开成百上千个 fd，macOS 默认 ulimit 256；那一次 `await` 同时也是取消/墙钟的中断检查点）；取消信号与 3 秒墙钟合流（`AbortSignal.any([exec.signal, AbortSignal.timeout(3000)])`，工程上界而不是产品策略，故不落设置面）。扫描没跑成（取消/墙钟）整趟作罢——半份"已探过引用面"比不注入更糟。
+- **预检（Phase 2）：门禁要的证据现在**编辑之前**就到模型手里，取代"先拒绝、再由模型自己去查"**。两边各挂一条官方瀑布，分工按「证据在什么时刻才真的算被看见」定，而不是按方便定：
+  - **A 面（只读检视 `read` / `view` / `str_replace_editor view`）挂 `tools/post-execute`**：引用证据随**这次读取的结果**一起出去（官方 `PostToolDecision.accept{additionalContexts}`），agent-loop 在 commit 那条结果时收下、排到下一个 step 边界（`packages/core/agent-loop/src/tool-calls.ts:57,157`「accepts committed result context for the next step boundary」）。于是模型下一次动手编辑前就看得见"谁引用它"——这才是前置。按 mid 档问缺项（要 refs 的**最低**必要档：此刻还没有写参数，按 high 问会顺带要层证据、按 low 问根本没有 refs 这项要求）。
+  - **B 面（写类调用）挂 `tools/pre-execute`**：模型**没读就改**时，当场取到的正文与引用证据写进这一次的拒绝理由（官方 `PreToolDecision.deny{reason}`，宿主 materialize 成本次调用的错误结果），并记下发送水位；原样重试即放行。物理停止仍在 dispatch 之前，所以"改之前先看清它"这条不变式一个字没让。
+  - **为什么把上一轮的 `exec.agent.inject()` 撤掉**（官方约定逐字核对过，`packages/core/agent/src/runtime-types.ts:233-241`）：`inject()` 把消息排在 **next pre-step**、不唤醒 driver，而模型的上下文按 step 推进——它在第 N 步决定这次编辑，只能看见第 N-1 步为止的内容。所以那条通道"取证时点"在前、"可见时点"却在编辑**生效之后**，那叫事后补证；官方还明说排队可能被取消/丢弃（"Cancellation or disposal may discard pending context"、"It may miss a request whose pre-step already claimed its batch"），水位却会把它记成"补过了"。两边因此都改走**必然落地**的通道：结果本体、或拒绝理由。
+  - **不抢别人的决定**：两条瀑布都先 `await next()`，下游已经 deny/cancel/ask/block 就原样交回。B 面另外让路三道：会被密钥检查拦下的目标（见 Fixed 的「预检不再把密钥正文送进模型上下文」）、已配额放行的目标（新增 `FactGate.releasedFor()` 只读查询，不改状态机任何一格——防死锁承诺不能被插件自己新加的拒绝换掉）、什么都没挣到的那一趟（正文读不出、扫描没跑成或被预算截断、或层缺项里有一层没被这次扫描覆盖）。
+  - **有界是硬要求，不是优化**：平台**不会放弃**一枚挂起的 pre-execute promise（installed dsh-tools `lib/types/index.d.ts:39-42` "never abandons their promise"），一次卡死的扫描会把整次工具调用永久挂住。引用扫描四道预算（文件 256 / 目录 256 / 单文件 64KB 超限跳过 / 命中 40，另有单行 200 字符），跳过依赖·产物与点开头目录，顺序 `await` 而不是 `Promise.all`（并发读会一次打开成百上千个 fd，macOS 默认 ulimit 256；那一次 `await` 同时也是取消/墙钟的中断检查点）；取消信号与 3 秒墙钟合流（`AbortSignal.any([exec.signal, AbortSignal.timeout(3000)])`，工程上界而不是产品策略，故不落设置界面）。扫描没跑成（取消/墙钟）整趟作罢——半份"已经查过引用"的证据比不注入更糟。
   - 设置项 `preflightEnabled`（boolean，默认 `true`，`.volatile()`）：关掉即退回"先拒绝、再由模型自己补证"的老路径，**判据一条不减**，变的只是这次取证谁去跑。`enabled` / `factGateEnabled` 关闭、目标为文档扩展名（与门禁共用同一枚 `SKIP_EXT_RE`，导出给预检用）、工具不在上述名单、`exec.agent`/会话形状不符时整趟跳过。仍**不给卡片控件**（沿用上一轮那条豁免与理由，见 `test/build-client.test.ts`）。
-  - **刻意的口径变化两处**（记在此处，免得日后被当成漏判）：① B 面的 deny 走的是 pre-execute，同步 guard 因此**不会**跑到——事实门那次的 `reportDeny`（lesson-loop）与拒绝计数不再发生，换来的是模型没有被"拒一次再去查"；取证通过时的 `reportPass` 照旧在重试那一趟上报。② 判定缺项走的是与 guard **同一条** `evidenceFor`，它会顺带刷新 read 的 mtime 基线；A 面判在读取**之后**，于是基线比 guard 那次更准，但"读取与本次附加之间的外部改动"会被并成一次观测（与 `recordReadObservation` 那条残余窗口同源，方向保守，代价最多一次重读）。
-  - **层证据也在这一版并进来了**：high 档（新建、触及导出签名、高风险路径、大段重写、`strictMode`）原本还要求 test/e2e/docs 各一次可归因检索，而那一度正是"预检整趟让路"的理由；本版把层结论并进同一次引用扫描、并记进投递水位（`DeliveryWatermark.layerSeqs`），来龙去脉见 Fixed 的「high 档不再因为层证据给不出而多拒一轮」。
-  - 值导入面：A 面用官方的 `createUserMessage`（`@deepseek-ai/dsh-llm`）造那条上下文，`source` 走官方 `MessageSourceMap` 的**合并式扩展**声明本包自己的 kind（`dangerguard-preflight`），`form: "notice"` 由官方 `ContextFormed` 判别并要求带一行 ≤120 字的 `summary`（`packages/llm/llm/src/message.ts:95-99,122-133`）——这一整套的形状与官方 `repeat-tool-reminder` 逐字同形（其 `src/index.ts:14-18,210-225`）。它必须**外部化**：落 `peerDependencies`（`dependencies` 仍是禁区，`test/publish-manifest.test.ts` 钉着），`build-host.test.ts` 那条"说明符在、官方函数体不在"的断言继续兜内联。
-  - 三个入口共用**同一条认定链**：`evaluateFactGate`（同步判定）、A 面、B 面都经 `factEvidenceOf`（读法面 `EvidenceReadings` + 查询面 `FactEvidenceQuery`），于是"门禁会看到哪些缺项"与"预检补了哪些缺项"不可能不一致——两处各算一遍迟早会漂。会话键的完整形状也单源成一枚 `sessionTargetKeyOf`（五处读法共用；此前只共用前缀，剩下的拼接各写一遍，少一个分隔符不会编译报错、只会让水位静默读不到）。
-  - I/O 与渲染本体提到 **`lib/preflight-scan.ts`**：那一侧只做"取证据 + 渲染成模型读得懂的文本"，不碰会话键、不碰状态机；扫描起点（`projectRootOf`）与匹配词（`buildStems` / `MIN_STEM`）刻意**留在 host 侧算好送进去**——这两处一旦跟着搬走，"预检扫的"与"门禁认的"就成了两套。顺带让 host.ts 回到 `eslint/max-lines` 的代码行预算内。
-- `test/host-preflight.test.ts` 四十四条用例钉住接线与边界，全部经 `tools/pre-execute` / `tools/post-execute` 监听器与 `ctx.tools.guard` 三个**真实入口**断言。替身载荷一律按官方 `Events` 的两条投影 checked（`Parameters<Events["tools/pre-execute"]>` 等），不再手抄形状——`kind` 拼错、结果少一枚必填位、decision 换臂都会变成编译错误而不是"绿着的假用例"；`callId`/`rootCallId`/`token` 这三枚幻影品牌集中在 `execOf` 里补一次（同 `test/fixtures/events.ts` 补信封的理由），下游那条已有上下文用 `createUserMessage` 造（自己拼 `{role:"user"…}` 等于绕开官方 id 铸造）。覆盖面：三种只读检视各附一块引用块且不重复给、同会话不二次附加、写类不经 A 面、读取失败不附、block/value/content/已有上下文四种合并、截断扫描不附也不记凭证、零命中全称那句只在扫完时出现、B 面四种让路（密钥面 / 层缺项 / 配额放行 / 什么都没挣到）、正文截断、目录与不存在目标不拦、坏 agent 三形、认定链抛错兜底、目录预算与文件预算各自的文案、缓存复用与作废重扫、水位随会话销毁回收、旧水位不顶外部改动。夹具是真实临时目录：`projectRootOf` 认盘上的工程标记、二进制靠 NUL 字节、非普通文件靠 `isFile()`，替身路径会让"扫到了什么"整段退化成空断言。
-- **密钥面判定的真实路径改读官方通道，三形并列取并集**（第 4 项）。此前目标的真实路径只有一处来源：host 侧的 `realpathSync`（`realpathOf`）。本地后端下它没问题，而宿主的 fs 是**可插拔执行世界**的（fs-sandbox / ssh / e2b）——在那种部署下"本机 realpath"说的是另一份盘：看不见软链面还是小事，真正的漏是**执行世界里那枚凭据文件在本机恰是无害路径**时密钥闸判不到它（反方向也成立，只是那一侧的代价是多拦）。
+  - **刻意的规则变化两处**（记在此处，免得日后被当成漏判）：① B 面的 deny 走的是 pre-execute，同步 guard 因此**不会**跑到——事实门那次的 `reportDeny`（lesson-loop）与拒绝计数不再发生，换来的是模型没有被"拒一次再去查"；取证通过时的 `reportPass` 照旧在重试那一趟上报。② 判定缺项走的是与 guard **同一条** `evidenceFor`，它会顺带刷新 read 的 mtime 基线；A 面判在读取**之后**，于是基线比 guard 那次更准，但"读取与本次附加之间的外部改动"会被并成一次观测（与 `recordReadObservation` 那条残余窗口同源，方向保守，代价最多一次重读）。
+  - **层证据也在这一版并进来了**：high 档（新建、触及导出签名、高风险路径、大段重写、`strictMode`）原本还要求 test/e2e/docs 各一次可归因检索，而那一度正是"预检整趟让路"的理由；本版把层结论并进同一次引用扫描、并记进发送水位（`DeliveryWatermark.layerSeqs`），来龙去脉见 Fixed 的「high 档不再因为层证据给不出而多拒一轮」。
+  - 值导入：A 面用官方的 `createUserMessage`（`@deepseek-ai/dsh-llm`）造那条上下文，`source` 走官方 `MessageSourceMap` 的**合并式扩展**声明本包自己的 kind（`dangerguard-preflight`），`form: "notice"` 由官方 `ContextFormed` 判别并要求带一行 ≤120 字的 `summary`（`packages/llm/llm/src/message.ts:95-99,122-133`）——这一整套的形状与官方 `repeat-tool-reminder` 逐字同形（其 `src/index.ts:14-18,210-225`）。它必须**外部化**：落 `peerDependencies`（`dependencies` 仍是禁区，`test/publish-manifest.test.ts` 钉着），`build-host.test.ts` 那条"说明符在、官方函数体不在"的断言继续兜内联。
+  - 三个入口共用**同一条认定链**：`evaluateFactGate`（同步判定）、A 面、B 面都经 `factEvidenceOf`（读法 `EvidenceReadings` + 查询接口 `FactEvidenceQuery`），于是"门禁会看到哪些缺项"与"预检补了哪些缺项"不可能不一致——两处各算一遍迟早会漂。会话键的完整形状也唯一来源成一枚 `sessionTargetKeyOf`（五处读法共用；此前只共用前缀，剩下的拼接各写一遍，少一个分隔符不会编译报错、只会让水位静默读不到）。
+  - I/O 与渲染本体提到 **`lib/preflight-scan.ts`**：那个文件只做"取证据 + 渲染成模型读得懂的文本"，不碰会话键、不碰状态机；扫描起点（`projectRootOf`）与匹配词（`buildStems` / `MIN_STEM`）刻意**留在 host 侧算好送进去**——这两处一旦跟着搬走，"预检扫的"与"门禁认的"就成了两套。顺带让 host.ts 回到 `eslint/max-lines` 的代码行预算内。
+- `test/host-preflight.test.ts` 四十四条用例钉住接线与边界，全部经 `tools/pre-execute` / `tools/post-execute` 监听器与 `ctx.tools.guard` 三个**真实入口**断言。替身载荷一律按官方 `Events` 的两条投影 checked（`Parameters<Events["tools/pre-execute"]>` 等），不再自己抄的形状——`kind` 拼错、结果少一枚必填位、decision 换分支都会变成编译错误而不是"绿着的假用例"；`callId`/`rootCallId`/`token` 这三枚 brand 标记集中在 `execOf` 里补一次（同 `test/fixtures/events.ts` 补信封的理由），下游那条已有上下文用 `createUserMessage` 造（自己拼 `{role:"user"…}` 等于绕开官方 id 铸造）。覆盖面：三种只读检视各附一块引用块且不重复给、同会话不二次附加、写类不经 A 面、读取失败不附、block/value/content/已有上下文四种合并、截断扫描不附也不记凭证、零命中全称那句只在扫完时出现、B 面四种让路（密钥检查 / 层缺项 / 配额放行 / 什么都没挣到）、正文截断、目录与不存在目标不拦、坏 agent 三形、认定链抛错兜底、目录预算与文件预算各自的文案、缓存复用与作废重扫、水位随会话销毁回收、旧水位不顶外部改动。测试数据是真实临时目录：`projectRootOf` 认盘上的工程标记、二进制靠 NUL 字节、非普通文件靠 `isFile()`，替身路径会让"扫到了什么"整段退化成空断言。
+- **密钥检查判定的真实路径改读官方通道，三形并列取并集**（第 4 项）。此前目标的真实路径只有一处来源：host 侧的 `realpathSync`（`realpathOf`）。本地后端下它没问题，而宿主的 fs 是**可插拔执行世界**的（fs-sandbox / ssh / e2b）——在那种部署下"本机 realpath"说的是另一份盘：看不见软链状态还是小事，真正的漏是**执行世界里那枚凭据文件在本机恰是无害路径**时密钥闸判不到它（反方向也成立，只是另一个方向的代价是多拦）。
   硬约束先说清：官方那条真实路径通道是 async 的（`ctx.fs.resolve` → `processPath`；`processPath` 同步，但只吃已 resolve 的 target），而 `tools.guard` 是**同步**谓词——"拦截那一刻"没法 await。所以做法是三形并列、判定取并集：
   - **声明形**：模型字面量（宿主不替我们解析，官方明确排除输入改写）；
   - **本机形**：`realpathOf`（同步，guard 当场唯一付得起的解析）；
-  - **官方形**（新增 `lib/target-paths.ts`）：`fs/observed` 顺手记下后端自己报的那一枚（零额外 I/O），预检 B 面在密钥面让路判定**之前** async 问一次 `resolve` + `processPath` 写进同一枚 LRU 缓存——官方保证 pre-execute 整趟跑完才轮到 guard，所以**同一次调用**的拦截判定就吃得到。
+  - **官方形**（新增 `lib/target-paths.ts`）：`fs/observed` 顺手记下后端自己报的那一枚（零额外 I/O），预检 B 面在密钥检查让路判定**之前** async 问一次 `resolve` + `processPath` 写进同一枚 LRU 缓存——官方保证 pre-execute 整趟跑完才轮到 guard，所以**同一次调用**的拦截判定就吃得到。
   三形**从不互相替换**（`resolvedFormsOf` 交的是清单，`lib/danger-rules.ts` 的 `resolvedPaths` 随之从单值改成 `readonly string[]`），于是官方那一形缺席或陈旧只会少一形、不会多放；缓存陈旧的方向同样是多拦而不是漏拦。`fs/observed` 是 emit 模式（官方明说监听器抛错会让**别人的**那次工具调用失败），故取路径那一步整个包在 try 里；只记**绝对**的 `displayPath`（相对形与远端 URI 没有 cwd 就归一不了，猜一种归一等于造一枚永远读不到的键）；`targetKey` 一个字节都不解析（官方明令 opaque）。
-  身份问询复用（review 那一轮按"现在就穿递"补齐）：Layer 2 的 `resolve` 结果交回调用方并透传给正文读取与版本探针（`lib/preflight-scan.ts` 的 `targetOrResolveOf`），于是**同一枚目标在一次盲改里只问一次身份**——远端后端下改造前后的身份往返数相同（目标一枚 + 扫描起点一枚），不是从两次抬成四次。官方形那枚缓存另给上限 1000：它的写入频率由**外部事件**决定（`fs/observed` 对会话碰到的每枚文件都发一次），共用 200 会把它冲成一件摆设，而一条只是两枚短路径串，放大五倍仍是定长。
-  用例：`test/danger-rules.test.ts` 两条（并集里任一形命中即拦、空清单与缺席同解），`test/host-preflight.test.ts` 七条（官方形落在凭据面 ⇒ B 面整趟让路且密钥闸照旧拦、`fs/observed` 报绝对形后同步 guard 的结论当场翻转、报相对形不记、后端拒绝 `processPath` 或 `resolve` 抛 ⇒ 那一形缺席而拦截面一条不减、没有 fs 后端 ⇒ 报了也记不下、无声明目标的调用一枚 resolve 都不发），`test/host-contract.test.ts` 两条改断上报清单。容量口径与 LRU 写入单源进 `lib/lru.ts`（见 Changed 的结构那条）。
+  身份问询复用（review 那一轮按"现在就穿递"补齐）：Layer 2 的 `resolve` 结果交回调用方并透传给正文读取与版本探测（`lib/preflight-scan.ts` 的 `targetOrResolveOf`），于是**同一枚目标在一次盲改里只问一次身份**——远端后端下改造前后的身份往返数相同（目标一枚 + 扫描起点一枚），不是从两次抬成四次。官方形那枚缓存另给上限 1000：它的写入频率由**外部事件**决定（`fs/observed` 对会话碰到的每枚文件都发一次），共用 200 会把它冲成一件摆设，而一条只是两枚短路径串，放大五倍仍是定长。
+  用例：`test/danger-rules.test.ts` 两条（并集里任一形命中即拦、空清单与缺席同解），`test/host-preflight.test.ts` 七条（官方形落在凭据一类的东西 ⇒ B 面整趟让路且密钥闸照旧拦、`fs/observed` 报绝对形后同步 guard 的结论当场翻转、报相对形不记、后端拒绝 `processPath` 或 `resolve` 抛 ⇒ 那一形缺席而拦截一条不减、没有 fs 后端 ⇒ 报了也记不下、无声明目标的调用一枚 resolve 都不发），`test/host-contract.test.ts` 两条改断上报清单。容量规则与 LRU 写入唯一来源进 `lib/lru.ts`（见 Changed 的结构那条）。
 - **预检的取证 I/O 从 `node:fs` 迁到宿主 `ctx.fs`**（第 2 项）。旧写法假定"本地盘就是工具用的那份盘"，而宿主的 fs 是可插拔执行世界的（fs-sandbox / ssh / e2b 后端）——在那种部署下预检会去读**主机上**同名的文件，把它当成"目标的当前正文"或"谁引用了它"抄进模型上下文：既给错证据，又是一条外泄路径。现在 `lib/preflight-scan.ts` 只吃官方的 `FileSystem` 投影（`PreflightFs = Pick<FileSystem, …>`，type-only，产物里没有对 `@deepseek-ai/dsh-fs` 的运行时引用），各位各司其职：
   - `resolve` 定身份（**跟**软链）、`listDir` 列一层、`readByteRange` 只读窗口——正文的上界因此由后端的窗口语义保证，而不是"读完整份再切"；
   - `lstat` 不跟最后一段，**软链一律不进队列**（官方注释明说这一位就是给"在跟之前先拒掉"的用方；真后端的 `listDir` 给的 type 是跟过链的，靠它挡不住指向 `/` 的链）；
   - 缓存失效位从宿主侧 mtime 换成后端给的 opaque `FsVersion`——远程后端下 mtime 要么探不到、要么探到的是另一份同名文件的时间。
-  三条失败口径全部落成用例（新增 `test/preflight-fs-face.test.ts` 十条，用 `test/fixtures/local-fs-face.ts` 那份按官方六位实现的本地夹具注入失败）：**整趟作废**只留给取消（回 `undefined` ⇒ 不注入也不记凭证）；**降级不作废**给"目录列不出 / 子项探不到 / 文件读不动"（`complete: false` ⇒ 文案换成"已扫范围内"、refs 凭证不给，但已取到的正文照给）；**本来就不算数**给软链、点开头目录、依赖/产物目录、超大文件与二进制（跳过而不降级，因为按口径本来就不读）。迁移中由编译器与真后端各自抓到两处：缓存判据写成 `cached?.version === version` 时"两边都 undefined"会去读一枚不存在的条目（TS 直接报错），以及 `ctx.fs` **不能按属性读**——cordis 对未声明 inject 的服务名是抛错而不是回 undefined（真 spine 实测 "cannot get property \"fs\" without inject"），所以它走可选注入装箱，与投影台账同一手法；`inject: ["fs"]` 是刻意**不**用的：那会让没装 fs 后端的 profile 整个闸门不再激活。"没装 fs 后端 ⇒ 预检整趟不参与、拦截面不受影响"另有一条用例（`test/host-preflight.test.ts`）。
+  三条失败规则全部落成用例（新增 `test/preflight-fs-face.test.ts` 十条，用 `test/fixtures/local-fs-face.ts` 那份按官方六位实现的本地夹具注入失败）：**整趟作废**只留给取消（回 `undefined` ⇒ 不注入也不记凭证）；**降级不作废**给"目录列不出 / 子项探不到 / 文件读不动"（`complete: false` ⇒ 文案换成"已扫范围内"、refs 凭证不给，但已取到的正文照给）；**本来就不算数**给软链、点开头目录、依赖/产物目录、超大文件与二进制（跳过而不降级，因为按规则本来就不读）。迁移中由编译器与真后端各自抓到两处：缓存判据写成 `cached?.version === version` 时"两边都 undefined"会去读一枚不存在的条目（TS 直接报错），以及 `ctx.fs` **不能按属性读**——cordis 对未声明 inject 的服务名是抛错而不是回 undefined（真 spine 实测 "cannot get property \"fs\" without inject"），所以它走可选注入装箱，与投影记录同一手法；`inject: ["fs"]` 是刻意**不**用的：那会让没装 fs 后端的 profile 整个闸门不再激活。"没装 fs 后端 ⇒ 预检整趟不参与、拦截不受影响"另有一条用例（`test/host-preflight.test.ts`）。
 
 - **测试补到三层：同一份源码，三种"谁来跑这次调用"**。此前只有单元层——`ctx.tools` 是一只手搓桩（`test/bulkhead-isolation.test.ts` 里那句 `ctx.provide("tools", { guard })`），于是"官方到底怎么把调用交给我们、我们的决定又被官方怎么处理"从来没被跑过；补上的两层都用官方发布件（`@deepseek-ai/dsh-agent-loop-testkit` 等，全部钉 `0.2.1-alpha.2` 同线，只进 `devDependencies`）：
   - **集成层** `test/host-integration.test.ts`（25 条）：真 `ToolRuntime` + `defineContentToolFixture` 造的真读真写工具，直接 `ctx.tools.execute` 派发。钉住瀑布顺序（pre-execute 整趟跑完才轮到单调 guard，于是被别的插件截住的那几趟**不推进**事实门轮次）、deny 的物化（`Error: <理由>` + `isError`）、`additionalContexts` 与别的插件并存且不改写正文、下游 `block` 不被翻成 `accept`。
-  - **点对点层** `test/agent-loop-e2e.test.ts`（9 条）：真 `AgentLoop` + 真 SessionStore，模型换成按官方 `LlmAdapter` 面实现的脚本（`test/host-spine.ts` 的 `ScriptedModel`）。断言取在"第 i 次请求里模型能看见什么"（`model.requests[i]`）与"磁盘上文件真的变了"两处。这一层测的是上一轮 A/B 改造的**全部论点**——证据在模型下一次动手之前可见：读取附上的引用面确实出现在**决定那次编辑的那一条请求**里，而不是编辑之后。
-  - 顺带测出来的四条宿主事实都写进了用例注释（其中两条改变了用例该放在哪一层）：**直接 `ctx.tools.execute` 不写会话日志**（只有 loop 会 `appendToolCall`），所以"模型自己读过/搜过"只能在点对点层成立，集成层里能顶的只有预检投递水位——这条边界被显式写成一条断言（`agent.session.snapshotEvents().length === 0`），免得日后有人拿集成层的红去改判据；**同一步里的多枚调用按调度序执行**，先读后改 ⇒ 编辑凭那次读取放行，反过来先改后读 ⇒ 拦（两条都钉，因为只钉一边就等于没测到"闸门被自己的并发绕过去"那种形状）；官方 `Agent` 的类型面只有 `id`（`dsh-agent/lib/types/runtime-types.d.ts:143` 的 `session` 在实现侧），本包按运行时判的形状没变；真 `SettingsForms` 注入 `configEditor` + `profileContext`（属 Loader 启动层，实测缺它们时 `ctx.plugin(SettingsForms)` 直接抛），所以 spine 里唯一保留的桩就是 `settings`，而它按 `Pick<SettingsForms, "configure" | "describe">` 钉住成员签名、描述符按官方 `SettingsDescriptor` 必填位给齐。
+  - **点对点层** `test/agent-loop-e2e.test.ts`（9 条）：真 `AgentLoop` + 真 SessionStore，模型换成按官方 `LlmAdapter` 面实现的脚本（`test/host-spine.ts` 的 `ScriptedModel`）。断言取在"第 i 次请求里模型能看见什么"（`model.requests[i]`）与"磁盘上文件真的变了"两处。这一层测的是上一轮 A/B 改造的**全部论点**——证据在模型下一次动手之前可见：读取附上的引用证据确实出现在**决定那次编辑的那一条请求**里，而不是编辑之后。
+  - 顺带测出来的四条宿主事实都写进了用例注释（其中两条改变了用例该放在哪一层）：**直接 `ctx.tools.execute` 不写会话日志**（只有 loop 会 `appendToolCall`），所以"模型自己读过/搜过"只能在点对点层成立，集成层里能顶的只有预检发送水位——这条边界被显式写成一条断言（`agent.session.snapshotEvents().length === 0`），免得日后有人拿集成层的红去改判据；**同一步里的多枚调用按调度序执行**，先读后改 ⇒ 编辑凭那次读取放行，反过来先改后读 ⇒ 拦（两条都钉，因为只钉一边就等于没测到"闸门被自己的并发绕过去"那种形状）；官方 `Agent` 的类型上只有 `id`（`dsh-agent/lib/types/runtime-types.d.ts:143` 的 `session` 在实现侧），本包按运行时判的形状没变；真 `SettingsForms` 注入 `configEditor` + `profileContext`（属 Loader 启动层，实测缺它们时 `ctx.plugin(SettingsForms)` 直接抛），所以 spine 里唯一保留的桩就是 `settings`，而它按 `Pick<SettingsForms, "configure" | "describe">` 钉住成员签名、描述符按官方 `SettingsDescriptor` 必填位给齐。
   - 装上官方件之后 tsc 立刻抓到一处早已失效的宽松：`test/host-preflight.test.ts` 里 `agent` 那位过去靠"`@deepseek-ai/dsh-agent` 不在依赖 ⇒ `ToolExecution.agent` 塌成 `any`"塞替身，注释还写着这条理由。现在 `fakeAgent` 给得出合法 `SessionId`（官方 `Agent` 面就一位），坏形状那一档改由单点 `as never` 交代并写明为什么（本包要测的正是"宿主送来不像 Agent 的东西"）。
 
 ### Changed
 
-- **上报键：`resolvedPath` 换成 `resolvedPaths`**。密钥面命中时的那一格由单值改成**清单**——判定吃的就是并集，只报一枚等于把"哪一形命中的"这件事藏起来，而非本地部署下恰恰只有官方那一形说得准。**这一格只改本包就够**：核过同级 lesson-loop 仓，它把 `evidence` 当不透明袋存（`row.evidence = evidence`）、从不按字段名读——本包已有的 `judgeMs` / `judgeLength` 在那一仓里同样 0 命中，HTTP/UI 投影甚至直接 `Omit<RuleCard, "evidence">`。
-- **安装：显式拒绝 koffi 的构建脚本**（`pnpm-workspace.yaml` 的 `allowBuilds`）。`@deepseek-ai/dsh-fs-local`（真 spine 那两层测试要真 FsLocal 才装的 devDependency）直接依赖 `koffi@3.1.1`，而它只被 dsh-fs-local 的 win32 那一支**懒加载**（`GetFileSecurityW` / `ReplaceFileW`；官方模块注释原话 "non-Windows processes never open Win32 libraries"），发布流水线又只有 `ubuntu-latest` 一枚 runner。pnpm 12 对"没做过决定"的依赖直接报 `ERR_PNPM_IGNORED_BUILDS` 并让 `pnpm install` 失败——发布流程就卡在这一步。这里给的是**显式拒绝**而不是默默忽略，也不是顺手放行一枚用不上的第三方原生构建；将来若在 Windows 上跑真 FsLocal 的后端面，改成 `true` 即可，别无其它改动。
-- **结构：三处单源，代价是产物变大**。host.ts 顶到 `eslint/max-lines` 的 2000 行预算，于是把两件事搬出去各自的模块——台账容量与 LRU 写入进 `lib/lru.ts`（`lruPut` 现多收一枚可选 `cap`：默认仍是 200，官方真实路径那枚缓存单独 1000，理由见 `lib/target-paths.ts`），目标路径的归一形与官方形进 `lib/target-paths.ts`（写口在 async 侧、读口在同步谓词里，键形必须逐字同源，收在一处才不至于漂）。取证 I/O 与渲染本体早在上一节就在 `lib/preflight-scan.ts`，本版只是把这两枚新邻居并进去。**值导入面一字未增**：产物里仍只有 `dsh-brand` / `dsh-llm` / `schemastery` / `zod` 四枚外部说明符加 shared 的三枚深路径，`@deepseek-ai/dsh-fs` 保持 type-only（`test/build-host.test.ts` 与 `test/publish-manifest.test.ts` 各自钉着）。产物预算随之从 250,000 抬到 264,000（实测 253,498 B，理由写在 `test/dist-size.test.ts` 的注释里）。
+- **上报键：`resolvedPath` 换成 `resolvedPaths`**。密钥检查命中时的那一格由单值改成**清单**——判定吃的就是并集，只报一枚等于把"哪一形命中的"这件事藏起来，而非本地部署下恰恰只有官方那一形说得准。**这一格只改本包就够**：核过同级 lesson-loop 仓，它把 `evidence` 当不透明袋存（`row.evidence = evidence`）、从不按字段名读——本包已有的 `judgeMs` / `judgeLength` 在那一仓里同样 0 命中，HTTP/UI 投影甚至直接 `Omit<RuleCard, "evidence">`。
+- **安装：显式拒绝 koffi 的构建脚本**（`pnpm-workspace.yaml` 的 `allowBuilds`）。`@deepseek-ai/dsh-fs-local`（真 spine 那两层测试要真 FsLocal 才装的 devDependency）直接依赖 `koffi@3.1.1`，而它只被 dsh-fs-local 的 win32 那一支**懒加载**（`GetFileSecurityW` / `ReplaceFileW`；官方模块注释原话 "non-Windows processes never open Win32 libraries"），发布流水线又只有 `ubuntu-latest` 一枚 runner。pnpm 12 对"没做过决定"的依赖直接报 `ERR_PNPM_IGNORED_BUILDS` 并让 `pnpm install` 失败——发布流程就卡在这一步。这里给的是**显式拒绝**而不是默默忽略，也不是顺手放行一枚用不上的第三方原生构建；将来若在 Windows 上跑真 FsLocal 的后端，改成 `true` 即可，别无其它改动。
+- **结构：三处唯一来源，代价是产物变大**。host.ts 顶到 `eslint/max-lines` 的 2000 行预算，于是把两件事搬出去各自的模块——记录容量与 LRU 写入进 `lib/lru.ts`（`lruPut` 现多收一枚可选 `cap`：默认仍是 200，官方真实路径那枚缓存单独 1000，理由见 `lib/target-paths.ts`），目标路径的归一形与官方形进 `lib/target-paths.ts`（写口在 async 侧、读口在同步谓词里，键形必须逐字同源，收在一处才不至于漂）。取证 I/O 与渲染本体早在上一节就在 `lib/preflight-scan.ts`，本版只是把这两枚新邻居并进去。**值导入一字未增**：产物里仍只有 `dsh-brand` / `dsh-llm` / `schemastery` / `zod` 四枚外部说明符加 shared 的三枚深路径，`@deepseek-ai/dsh-fs` 保持 type-only（`test/build-host.test.ts` 与 `test/publish-manifest.test.ts` 各自钉着）。产物预算随之从 250,000 抬到 264,000（实测 253,498 B，理由写在 `test/dist-size.test.ts` 的注释里）。
 
 ### Fixed
 
 - **引用扫描不再把凭据文件的正文抄进证据**。预检的引用扫描会读根目录下**每一枚**普通文件，并把命中那一行**原文**抄给模型（`· {file}:{line}: {text}`）——而密钥闸只管"编辑这类路径"，管不到"扫描顺手把 `.env` 的一行抄进引用命中"。目标文件名撞进凭据文件是常态而非边角（改 `token.ts`，`.env` 里正写着 `token = "…"`），于是本包存在的理由之一——凭据正文不外泄——被自己的取证通道开了个洞。这条洞是**集成层跑出来的**：单元层的手搓 fs 夹具里没有凭据文件参与扫描。
-  现在扫描侧走的是**同一把词表**：新增 `lib/danger-rules.ts` 的 `isSecretPath`（`editDanger` 的内部一步，同一份内置分支 + 同一份 `extraSecretPatterns`），host 用它造 `scanQuarantineOf(cfg)` 传给扫描；命中的路径**整个不读**（不是脱敏——脱敏等于在证据里留一份"这里有内容"的形状）。份数随结果交回，于是零命中那一支不再宣称"没有任何引用者"，改说"已读范围内零命中，另有 N 个凭据面文件按本包规则未读"（中英各两条新文案）。refs 凭证**照给**：遍历确实扫完了，被隔离的原因不是"没扫到"而是"不许读"，把它算成 incomplete 会逼模型去做一件它也做不到的检索。
-  用例：`test/host-integration.test.ts` 两条（真磁盘 + 真 FsLocal：内置 `.env` 那一支、用户 `extraSecretPatterns` 那一支，各自带**对照组**——摘掉判据后同一枚扫描确实会抄出那行，免得修复被"文件本来就没命中"冒充）、`test/host-preflight.test.ts` 一条（值面 `extraSecretPatterns` 不是数组时按内置词表继续：不抛，也不放宽）。
-- **拒绝理由只点这台宿主上注册着的检索工具**（可照做性）。`refSearchTools` 的默认名单是两路来源拼起来的：`grep`(pattern*, path, include) 与 `glob`(pattern*, path) 出自宿主 stock 目录（`docs/tool-catalog.md`、`packages/fs/tool-fs-search/src/{grep,glob}.ts`），而 `zg_search` 连同它的 `root`/`query`/`fts`/`vector` 参数面出自**另一枚插件**——本仓同级包 `@jayyuen66/dsh-zvec-grep`。这个名字**装不装逐台不同**，而文案是无条件点的：没装那枚插件的宿主上，模型照着「zg_search 的 root 指向 …」去做只会撞一次「工具不存在」，缺项原样还在，只能连拒到 `maxDenies` 换一次配额放行——与上一轮那条「检索起点不可达」同族：闸门判得对，给出的路走不通。
-  现在指令侧点名的名单先过一道在位探测：新增 `toolPresentOf(svc.tools)`，用官方成员 `ToolRuntime.get(name)`（installed dsh-tools `index.d.ts:164`）逐个问「这台宿主注册着吗」，只把答有的写进文案——装了 `dsh-zvec-grep` 的宿主上 `zg_search` 照点，严格口径一字不损。**默认名单不改**（它记的是「哪些检索算凭证」，与该工具此刻在不在无关）。三条口径写在函数注释里，也都落成用例：探测**缺席或抛错一律算「在」**（多点名一个名字只是让模型白烧一次调用，少点名一个真存在的工具则是把模型要走的门关上）；`GuardService` 的 `get` 挂 `Partial`，因为它是探测面而不是判定面；**记账侧一字未动**（没注册的工具本来就被调用不到，筛与不筛同解），所以这次改动不会给任何形态的检索开新凭证。名单被筛空时走那句「当前设置里没有任何计入取证的检索工具」——那是配置的实情，不是一条看起来能走的路。
+  现在扫描侧走的是**同一把词表**：新增 `lib/danger-rules.ts` 的 `isSecretPath`（`editDanger` 的内部一步，同一份内置分支 + 同一份 `extraSecretPatterns`），host 用它造 `scanQuarantineOf(cfg)` 传给扫描；命中的路径**整个不读**（不是脱敏——脱敏等于在证据里留一份"这里有内容"的形状）。份数随结果交回，于是零命中那一支不再宣称"没有任何引用者"，改说"已读范围内零命中，另有 N 个凭据一类的东西文件按本包规则未读"（中英各两条新文案）。refs 凭证**照给**：遍历确实扫完了，被隔离的原因不是"没扫到"而是"不许读"，把它算成 incomplete 会逼模型去做一件它也做不到的检索。
+  用例：`test/host-integration.test.ts` 两条（真磁盘 + 真 FsLocal：内置 `.env` 那一支、用户 `extraSecretPatterns` 那一支，各自带**对照组**——摘掉判据后同一枚扫描确实会抄出那行，免得修复被"文件本来就没命中"冒充）、`test/host-preflight.test.ts` 一条（值 `extraSecretPatterns` 不是数组时按内置词表继续：不抛，也不放宽）。
+- **拒绝理由只点这台宿主上注册着的检索工具**（可照做性）。`refSearchTools` 的默认名单是两路来源拼起来的：`grep`(pattern*, path, include) 与 `glob`(pattern*, path) 出自宿主 stock 目录（`docs/tool-catalog.md`、`packages/fs/tool-fs-search/src/{grep,glob}.ts`），而 `zg_search` 连同它的 `root`/`query`/`fts`/`vector` 参数表出自**另一枚插件**——本仓同级包 `@jayyuen66/dsh-zvec-grep`。这个名字**装不装逐台不同**，而文案是无条件点的：没装那枚插件的宿主上，模型照着「zg_search 的 root 指向 …」去做只会撞一次「工具不存在」，缺项原样还在，只能连拒到 `maxDenies` 换一次配额放行——与上一轮那条「检索起点不可达」同族：闸门判得对，给出的路走不通。
+  现在指令侧点名的名单先过一道在位探测：新增 `toolPresentOf(svc.tools)`，用官方成员 `ToolRuntime.get(name)`（installed dsh-tools `index.d.ts:164`）逐个问「这台宿主注册着吗」，只把答有的写进文案——装了 `dsh-zvec-grep` 的宿主上 `zg_search` 照点，严格规则一字不损。**默认名单不改**（它记的是「哪些检索算凭证」，与该工具此刻在不在无关）。三条规则写在函数注释里，也都落成用例：探测**缺席或抛错一律算「在」**（多点名一个名字只是让模型白烧一次调用，少点名一个真存在的工具则是把模型要走的门关上）；`GuardService` 的 `get` 挂 `Partial`，因为它是一次探测而不是判定；**记录下来侧一字未动**（没注册的工具本来就被调用不到，筛与不筛同解），所以这次改动不会给任何形态的检索开新凭证。名单被筛空时走那句「当前设置里没有任何计入取证的检索工具」——那是配置的实情，不是一条看起来能走的路。
   用例：`test/host-integration.test.ts` 三条（这台 spine 没装 `zg_search` ⇒ 它与 `root 指向` 都不进文案、配置里添的未注册名字被滤掉、全名单缺席时给出「无法记账」那句），`test/host-contract.test.ts` 三条（get 认得出的才点、get 抛错退化为不筛、tools 面没有 get 同样不筛）。
-  ⚠ 本条第一版的措辞已被修正：当时写成「宿主里不存在这条工具」，并把 `root`/`fts`/`vector` 说成「没有任何工具受理」——都不对。`zg_search` 与它的参数面都是真的，只是逐台装配；要修的缺陷是无条件点名。
-- **文件头与 README 里那条 realpath 假前提被纠正**（`host.ts` 头部、README 两条边界 ⑦）。原文写的是「宿主另把 realpath 解析形一起送进判定」——按源码核对不成立：`ToolExecution.arguments` 在策略链之前就被快照并深冻结（`packages/core/tools/src/index.ts:1447-1451`），官方又明确排除输入改写（`PreToolDecision` 的注释原话 "Input rewriting is excluded because arguments are already logged and presented"），而路径解析发生在**工具体内**（`packages/fs/tool-fs/src/read-target.ts:25`），晚于整条判定链；全仓 grep `resolvedPaths` 零命中。真实情况是本包自己用 `realpathOf`/`resolvedFormsOf` 把真实路径折进判定——结论（软链面可见、TOCTOU 只收窄）一字未变，变的是这条能力**记在谁账上**。留着的代价很具体：下一个人会认为"宿主会做，这里删掉即可"，然后"凭据文件是软链"那一面静默失效。现在它由 `test/host-integration.test.ts` 的两条行为断言钉住（相对路径按会话 cwd 归一后仍交出真正文、`ln -s .env` 的链接形仍按密钥面拦且正文一个字都不出现），不再只靠注释。
-- **high 档不再因为「层证据给不出」而多拒一轮**（第 3 项：层结论从同一次扫描派生）。事实门对 high 档额外要求 test/e2e/docs 层各一次可归因检索，而预检此前的口径是「层缺项 ⇒ 整趟让路」：模型即使原样重试也拿不到那几层的证据，只能自己去搜——预检省下的那一轮在 high 档上一分都省不到，而 high 档恰恰是改导出面/签名那类最需要前置事实的改动。
-  现在层结论与引用面**共用同一趟走树**：扫描本就逐目录记下走到过哪里（`RefScan.dirs`），于是「门禁要的那层目录内有几处命中」只是这次扫描的派生量，不为此多花一次 I/O；结论随拒绝理由一起给出（`preflightLayerLine`，中英各一条），并与 read/refs 一起记进投递水位（`DeliveryWatermark.layerSeqs`，只抬不清），原样重试即放行。
+  ⚠ 本条第一版的措辞已被修正：当时写成「宿主里不存在这条工具」，并把 `root`/`fts`/`vector` 说成「没有任何工具受理」——都不对。`zg_search` 与它的参数表都是真的，只是逐台装配；要修的缺陷是无条件点名。
+- **文件头与 README 里那条 realpath 假前提被纠正**（`host.ts` 头部、README 两条边界 ⑦）。原文写的是「宿主另把 realpath 解析形一起送进判定」——按源码核对不成立：`ToolExecution.arguments` 在策略链之前就被快照并深冻结（`packages/core/tools/src/index.ts:1447-1451`），官方又明确排除输入改写（`PreToolDecision` 的注释原话 "Input rewriting is excluded because arguments are already logged and presented"），而路径解析发生在**工具体内**（`packages/fs/tool-fs/src/read-target.ts:25`），晚于整条判定链；全仓 grep `resolvedPaths` 零命中。真实情况是本包自己用 `realpathOf`/`resolvedFormsOf` 把真实路径折进判定——结论（软链状态可见、TOCTOU 只收窄）一字未变，变的是这条能力**记在谁账上**。留着的代价很具体：下一个人会认为"宿主会做，这里删掉即可"，然后"凭据文件是软链"这条检查静默失效。现在它由 `test/host-integration.test.ts` 的两条行为断言钉住（相对路径按会话 cwd 归一后仍交出真正文、`ln -s .env` 的链接形仍按密钥检查拦且正文一个字都不出现），不再只靠注释。
+- **high 档不再因为「层证据给不出」而多拒一轮**（第 3 项：层结论从同一次扫描派生）。事实门对 high 档额外要求 test/e2e/docs 层各一次可归因检索，而预检此前的规则是「层缺项 ⇒ 整趟让路」：模型即使原样重试也拿不到那几层的证据，只能自己去搜——预检省下的那一轮在 high 档上一分都省不到，而 high 档恰恰是改导出名单/签名那类最需要前置事实的改动。
+  现在层结论与引用证据**共用同一趟走树**：扫描本就逐目录记下走到过哪里（`RefScan.dirs`），于是「门禁要的那层目录内有几处命中」只是这次扫描的派生量，不为此多花一次 I/O；结论随拒绝理由一起给出（`preflightLayerLine`，中英各一条），并与 read/refs 一起记进发送水位（`DeliveryWatermark.layerSeqs`，只抬不清），原样重试即放行。
   两条口径钉死。**没覆盖就不成结论**：遍历被预算截断、那层在扫描起点之外、或那层是软链（门禁的层探查走 `statSync` 跟链，扫描按官方 `lstat` 口径不跟）时 `layerConclusionsOf` 回 undefined，整趟让路给行动清单，绝不投半份「这层我探过了、零命中」。**词表单源**：门禁算缺项与预检派生结论吃同一枚 `extraTestDirsOf(cfg)`——两边各写一遍 `strArray(...) ?? []` 时，任何一侧改了读法都会把「门禁要一层、预检查不到那层」变成永远让路的死结。
   用例：`test/host-preflight.test.ts` 三条（真实 `test/` 层 ⇒ 同一次扫描派生结论、guard 那几项全记 done、原样重试放行；遍历被预算截断 ⇒ 让路；层目录是软链 ⇒ 扫描跑得完也让路），`test/host-integration.test.ts` 一条（新建文件那趟的理由里随行 `[层探查]`）。
 - **两条用例曾在错误的分支上全绿：判别标记取的是共用前缀**（测试面）。`headFirst`（行动清单）、`preflightHandoff`（当场递证据）、`preflightAttach`（随读取附上）三条文案都以 `[fact-gate] ` 开头，而两层真 spine 用例的标记取的是「模板首词」⇒ 三个标记同值，于是「走清单」与「递证据」两条**互斥**的断言同时为真。第 3 项改完 high 档的层证据后才暴露：点对点层「照清单做过即放行」与集成层「pre-execute 截住 ⇒ 轮次不推进」实际走的是递证据那条路，断言却照样绿。
   现在取法收在一处（`test/host-spine.ts`）：`gateMarkOf` 跳过共用前缀、取到第一个标点；`markOf` 只留给 `[引用探查]` / `[目标内容]` / `[层探查]` 那类**独占标签**（单元层那份同口径，注释写明为什么不能用于 `[fact-gate]`）。转红的两条按各自本意补齐前提：要点名「清单」就必须让 B 面答不出证据，所以先 `capTree` 吃光遍历预算（这枚助手随之收进 spine，两层共用）。补齐之后点对点层那条证的正是集成层证不到的那一半——凭证来自**会话日志里模型自己的**读与搜；集成层另加一条对照（模型自己 dispatch 的 grep 换不到任何凭证：那一趟引用面仍由本包当场扫出来）。
 - **项目根缓存的键漏了会话目录 ⇒ 两个会话互相吃对方的根**（精确性；本轮 review 揪出，不是本轮引入）。`projectRootOf` 在祖先链上找不到工程标记时，回落值取决于"cwd 是不是目标的祖先"（是 ⇒ 取 cwd，范围更大；不是 ⇒ 取目标父目录，那是唯一必然仍是祖先的取值），而缓存键只有 `targetN`。于是同一枚目标（典型是 `/tmp` 下整条祖先链都没有标记的草稿脚本）先被 A 会话按"cwd 是祖先"评估过之后，B 会话再来就吃到 A 的根：拒绝理由里递给模型的检索起点、引用扫描的起点、层相对形（`toPosixRelative`）的基准三处一起错位。方向是保守的（层结论对不上就整趟让路，不会误放行），代价是白给的摩擦——模型照着一个不属于自己会话的起点去搜，搜了也不算数。现在键形是 `会话目录|目标`，与判定真正依赖的输入一致。
   用例：`test/project-root-scope.test.ts` 一条（同一枚目标先用"cwd 是祖先"的会话评估、再用无关目录的会话评估 ⇒ 起点必须回落成目标父目录，而不是吃到上一趟的根）。
-- **review 收口的两条**（一条性能、一条是覆盖率测量在骗人）。
+- **review 收尾的两条**（一条性能、一条是覆盖率测量在骗人）。
   - **pre-execute 的热路径白烧定时器**：第 4 项刚接上时，`runPreflight` 对**每一次**工具调用都算一遍 `preflightSignalOf`（`AbortSignal.any` + `AbortSignal.timeout(3000)`），包括 bash / grep 这些根本没有声明目标的调用——那正是"每次工具调用都要过"的路，白烧的是一枚定时器加一次信号合流。现在先取 `declaredTargets`，为空就一枚 resolve 都不发、也不造信号。用例：`test/host-preflight.test.ts` 一条（bash 调用过一趟 B 面，探针数到 `resolve` 调用次数为 0）。
-  - **`x ?? await f()` 会把下一行的覆盖率算进没走到的那条臂**：穿递 target 时先写成 `const target = resolved ?? (await fs.resolve(...))`，随后 `head = await fs.readByteRange(...)` 那行在四项 100% 的门禁里恒报 0 次——而正文确实读到了（同一条用例的 `READ_MARK` 与真内容断言都过）。用探针确认那行**每次**都执行，才定位到是 v8 → istanbul 的区间归并把紧随其后的语句并进了逻辑表达式的右臂。写法因此改成两条 `return` 的独立函数 `targetOrResolveOf`（lint 的 `prefer-nullish-coalescing` 想改回 `??`，注释里写明为什么不能听它），并把"一次盲改对同一枚目标只问一次身份"用探针钉成断言（`asked === [target, root]`），否则这类失真只会在下一次改动时重新出现。
+  - **`x ?? await f()` 会把下一行的覆盖率算进没走到的那条分支**：穿递 target 时先写成 `const target = resolved ?? (await fs.resolve(...))`，随后 `head = await fs.readByteRange(...)` 那行在四项 100% 的检查里恒报 0 次——而正文确实读到了（同一条用例的 `READ_MARK` 与真内容断言都过）。用探测脚本确认那行**每次**都执行，才定位到是 v8 → istanbul 的区间归并把紧随其后的语句并进了逻辑表达式的右分支。写法因此改成两条 `return` 的独立函数 `targetOrResolveOf`（lint 的 `prefer-nullish-coalescing` 想改回 `??`，注释里写明为什么不能听它），并把"一次盲改对同一枚目标只问一次身份"用探测脚本钉成断言（`asked === [target, root]`），否则这类失真只会在下一次改动时重新出现。
 - **事实门不再索要"结构上取不到"的凭证**。`projectRootOf` 向上找不到工程标记（`package.json` / `.git` / `tsconfig.json` / `Cargo.toml` / `pyproject.toml` / `pnpm-workspace.yaml`）时，项目根原先回落成**会话 cwd**；会话 cwd 与目标分处两棵树时（最典型的是 `/tmp` 下的草稿脚本）它**不是目标的祖先目录**。而拒绝文案会把项目根当检索起点原样递给模型，引用取证的判据（`isProjectScopeOf`）又只认「检索起点是目标的祖先」——两头一夹，模型**照着拒绝理由做也拿不到凭证**，只能连拒到 `maxDenies` 换一次配额放行，外加一条 `[danger-guard] fact-gate: <目标> 连续无证据拒绝达上限，配额放行（maxDenies）` 警告。闸门判定没错，给出的路却走不通。
   现在回落值必须满足与判据**同源**的不变式：新增 `isAncestorDirOf()`，项目根回落与引用取证判据共用同一枚（此前是两处各自 `startsWith`，天然可漂）。cwd 只在**确实是目标的祖先**时才采用（会话就在目标所在树里时，它范围更大、层探查更准）；否则退到目标自己的父目录——那是唯一必然仍是祖先的取值。
   已知代价（记在此处，避免日后被当成回归）：项目外目标不再越过自身目录去探 test/e2e/docs 层。对着 `/tmp` 问"有没有 tests/"本来就没有意义。
 - `test/project-root-scope.test.ts` 三条用例钉住这条不变式：拒绝理由里给出的检索起点必须是目标的**祖先目录**，且**沿该起点检索一次即放行**（"提示可照做"才是判据的意义）；对照支覆盖「真实项目内仍取最近的标记目录」与「cwd 是祖先时仍取 cwd」。检索起点从文案的反引号路径里取，与语言、措辞无关——文案改版会让用例红，而不是静默失效。该用例在修复前实测为红（起点落在无关的会话 cwd 上），修复后转绿。
 - **上报给 lesson-loop 的 bash 教训现在带得上"是哪条命令"**。`dangerous-bash` 分类原先给"`-c` 体未被检查"那一类传常量签名（`NESTED_UNCONFIRMED_SIGNATURE`，当时的理由是命令原文会把同一条教训按套娃形态碎成无数张卡）。但那条理由现在由 **lesson-loop 的类别级归并**承担（`CATEGORY_SIGNATURES` 把 `dangerous-bash` 折成一个稳定键，命令原文改落 `evidence.signature`），于是常量签名只剩坏处：那张卡里每一条证据都是**逐字相同**的模板拒绝文案，人审时看不出该审哪条命令。现在签名一律用**命令原文**——"一张卡"不变，命令原文如实落进证据；"是否需用户确认"仍由 `evidence.needsUserConfirmation` 承载，两种结论照样可分辨。常量随之删除（留着就是一条测不到的死绑定）。`test/host-contract.test.ts` 的断言同步从常量改成命令原文。
 
-- **预检不再把密钥正文送进模型上下文**。上一轮的写类触发点会按缺项去读目标文件并把正文注入会话，而它挂在 `tools/pre-execute`——官方契约里这道瀑布**跑在同步 guard 之前**（installed dsh-tools `prepareExecution`：只有瀑布给出 `allow` 才走 `guardReason`）。于是编辑 `~/.ssh/id_rsa`、`.env`、`.aws/credentials` 这类目标时，插件在一次它自己马上就要拦下的调用上，先把凭据正文读出来交了出去（注入排在 next pre-step，不随这次拒绝撤回）。现在 B 面先用**与密钥闸同一份入参组装**（新提取的 `secretOptsOf`：扩展词表 + 会话 cwd + realpath 解析形）问一次"这一趟会不会被密钥面拦下"，命中就整趟让路——既不漏正文，也不发生"预检抢在密钥闸前面把拒绝理由换成'请重试'"那种替别人做决定。引用面照旧给：扫描从不读目标自身，而 A 面只读别的文件的命中行。
+- **预检不再把密钥正文送进模型上下文**。上一轮的写类触发点会按缺项去读目标文件并把正文注入会话，而它挂在 `tools/pre-execute`——官方约定里这道瀑布**跑在同步 guard 之前**（installed dsh-tools `prepareExecution`：只有瀑布给出 `allow` 才走 `guardReason`）。于是编辑 `~/.ssh/id_rsa`、`.env`、`.aws/credentials` 这类目标时，插件在一次它自己马上就要拦下的调用上，先把凭据正文读出来交了出去（注入排在 next pre-step，不随这次拒绝撤回）。现在 B 面先用**与密钥闸同一份入参组装**（新提取的 `secretOptsOf`：扩展词表 + 会话 cwd + realpath 解析形）问一次"这一趟会不会被密钥检查拦下"，命中就整趟让路——既不漏正文，也不发生"预检抢在密钥闸前面把拒绝理由换成'请重试'"那种替别人做决定。引用证据照旧给：扫描从不读目标自身，而 A 面只读别的文件的命中行。
 - **目标正文改成定长读**。上一轮 `readTargetContent` 是 `readFile` 整文件进内存再 `subarray(0, 64_000)`，注释写的"吃 64KB 上限"只管得到"投出去多少"、管不到"读进来多少"——而这一枚路径正是模型要改的那份文件，锁文件、导出数据、日志导出都能把它顶到几百 MB，一次预检换一次宿主进程内存尖峰。现在换成 `open` → `handle.stat()` → 一次 `handle.read(缓冲区长 64KB+1)` → `close`：缓冲区长度就是这次读的上界，多读那一枚字节顺便给出"原文更长"的实证（不必再开一次 stat 判）。非普通文件（目录/FIFO/设备）与含 NUL 的二进制都不再递正文。
-- **未扫完的引用扫描不再冒充"探过引用面"**。上一轮只按文件数（256）界住读取，目录展开完全没有预算：大仓里"最多读 256 个文件"实际退化成"列几万层目录直到撞墙钟"，而零命中的文案是「即目标没有任何引用者」——**扫描被预算截断时这句是假的**，模型据此删掉一个仍有引用者的文件比不给证据更糟。现在 `RefScan` 带 `complete` / `hitsCapped` 两枚完成度位（并新增目录预算 `PREFLIGHT_MAX_DIRS = 256`），文案分三档：扫完且零命中才给全称结论；未扫完的零命中改说「已扫范围内零命中，这不等于没有任何引用者」；有命中时按截断种类补一行说明。凭证（投递水位）只在 `complete` 时记——半份扫描可以给模型看，但不顶替探过引用面。
+- **未扫完的引用扫描不再冒充"引用已经查清"**。上一轮只按文件数（256）界住读取，目录展开完全没有预算：大仓里"最多读 256 个文件"实际退化成"列几万层目录直到撞墙钟"，而零命中的文案是「即目标没有任何引用者」——**扫描被预算截断时这句是假的**，模型据此删掉一个仍有引用者的文件比不给证据更糟。现在 `RefScan` 带 `complete` / `hitsCapped` 两枚完成度位（并新增目录预算 `PREFLIGHT_MAX_DIRS = 256`），文案分三档：扫完且零命中才给全称结论；未扫完的零命中改说「已扫范围内零命中，这不等于没有任何引用者」；有命中时按截断种类补一行说明。凭证（发送水位）只在 `complete` 时记——半份扫描可以给模型看，但不顶替一次查完的引用证据。
 - **台账读不到时，预检挣到的凭证终于算数**。`evidenceFor` 在会话日志不可得时回 `undeterminable`，而那份保守输入的缺项清单是**写死的两项**，从不看投递水位——于是"预检当场递过正文、guard 仍按缺 read 拒"在 A/B 面都收不了口（上一轮的注入版本同样收不了，只是它连"递出去"这一件事都没做对）。现在这一支也按水位剔除：插件自己的记录不依赖会话日志，剔除后缺项为空即放行；两项只补上一项时照旧走"不可判定 → 请用户拍板"那条逃生口。
-- **每次 read 不再同步付满墙钟**。上一轮的读触发点是"只为紧接着可能发生的编辑预热缓存、一个字符都不注入"，代价是**每一次**读新目标都在 `tools/pre-execute` 里同步跑一趟项目级扫描：在宿主仓那种体量里它必然吃掉 3 秒后返回 `undefined`（不写缓存），于是预热没省到任何东西，读付 3 秒、随后的编辑再付 3 秒。现在读那一趟做的是**有用的事**（A 面把引用面随读取结果交出去，正是这一步该产出的证据），而扫描的成本由四道预算先收住——大仓里的常态是"截断即返"（毫秒级、`complete:false`、结果照样进缓存复用），墙钟只兜"单枚 syscall 卡住"那种罕见形状，因此也不再需要"负缓存"那格状态（它唯一能测到的分支恰是它自己）。
+- **每次 read 不再同步付满墙钟**。上一轮的读触发点是"只为紧接着可能发生的编辑预热缓存、一个字符都不注入"，代价是**每一次**读新目标都在 `tools/pre-execute` 里同步跑一趟项目级扫描：在宿主仓那种体量里它必然用满 3 秒后返回 `undefined`（不写缓存），于是预热没省到任何东西，读付 3 秒、随后的编辑再付 3 秒。现在读那一趟做的是**有用的事**（A 面把引用证据随读取结果交出去，正是这一步该产出的证据），而扫描的成本由四道预算先收住——大仓里的常态是"截断即返"（毫秒级、`complete:false`、结果照样进缓存复用），墙钟只兜"单枚 syscall 卡住"那种罕见形状，因此也不再需要"负缓存"那格状态（它唯一能测到的分支恰是它自己）。
 
 ## 0.1.2-rc
 
-宿主生态与工具链升到当前发布线，并把判据的目录基准换到宿主 0.2.1-alpha.2 的那枚服务上。**判定规则、拦截面与默认配置未改**，改的是"跟谁对齐"。
+宿主生态与工具链升到当前发布线，并把判据的目录基准换到宿主 0.2.1-alpha.2 的那枚服务上。**判定规则、拦截与默认配置未改**，改的是"跟谁对齐"。
 
 ### Changed
 
 - `@deepseek-ai/dsh-*` 家族与 peer 的 `@deepseek-ai/dsh` 从 `0.2.1-alpha.1` 升到 `0.2.1-alpha.2`（devDependencies、peerDependencies、`pnpm-workspace.yaml` 的 `overrides`、`engines.dsh` 四处同值——`test/publish-manifest.test.ts` 要求它们与 peer 逐项相等）。`@deepseek-ai/cordis` `4.0.5-alpha.1` 与 `@deepseek-ai/schemastery` `3.18.5-alpha.1` **不动**：那是 alpha.2 自己钉的那两枚（`~4.0.5-alpha.1` / `~3.18.5-alpha.1`），registry 上没有更新的 alpha。
-- `@jayyuen66/dsh-plugin-shared` `^0.1.2` → `^0.1.4`。这一枚是本轮升级里唯一改变**发布物形状**的：0.1.2 把 `@deepseek-ai/dsh-tools` / `dsh-session` 等宿主包列在自己的 `dependencies` 里，消费方 profile（`nodeLinker: hoisted` + `autoInstallPeers: false`）于是会物化出第二份宿主类型面——正是 `test/publish-manifest.test.ts` 那条"不进 dependencies"门禁的理由，只是它此前管不到依赖树的下一层。0.1.3 把它们挪进 `peerDependencies`，`dsh-danger-guard@0.1.1` 在真实宿主上装出的 `cosmokit`/`dsh-brand`/`schemastery` 三枚真实目录到此不再出现；0.1.4 再把那几枚 peer 从 `0.2.1-alpha.1` 钉到 `0.2.1-alpha.2`，与本包同版本，依赖树里最后一处 `alpha.1` 需求随之清零（profile 内 `pnpm peers check` 实测：剩下的只有"宿主运行期才提供、本包刻意不安装"的 missing peer 提示，版本一律对得上）。
+- `@jayyuen66/dsh-plugin-shared` `^0.1.2` → `^0.1.4`。这一枚是本轮升级里唯一改变**发布物形状**的：0.1.2 把 `@deepseek-ai/dsh-tools` / `dsh-session` 等宿主包列在自己的 `dependencies` 里，消费方 profile（`nodeLinker: hoisted` + `autoInstallPeers: false`）于是会物化出第二份宿主类型——正是 `test/publish-manifest.test.ts` 那条"不进 dependencies"检查的理由，只是它此前管不到依赖树的下一层。0.1.3 把它们挪进 `peerDependencies`，`dsh-danger-guard@0.1.1` 在真实宿主上装出的 `cosmokit`/`dsh-brand`/`schemastery` 三枚真实目录到此不再出现；0.1.4 再把那几枚 peer 从 `0.2.1-alpha.1` 对齐到 `0.2.1-alpha.2`，与本包同版本，依赖树里最后一处 `alpha.1` 需求随之清零（profile 内 `pnpm peers check` 实测：剩下的只有"宿主运行期才提供、本包刻意不安装"的 missing peer 提示，版本一律对得上）。
   ⇒ 因此 0.1.1 那份"传递引入约 30 枚包，本包改不动"的记录已经过期：改得动，且改的方式就是升级这枚依赖。
 - 工具链（`pnpm-workspace.yaml` 的 `catalog`）跟到发布线：`@types/node` 26.6.3→26.6.5、`@vitest/coverage-v8` 与 `vitest` 5.0.2→5.0.3、`happy-dom` 20.14.5→20.14.6、`jsdom` 30.1.1→30.1.2、`oxfmt` 0.71.0→0.72.0、`oxlint` 1.86.0→1.87.0、`oxlint-tsgolint` 7.0.2003→7.0.2004、`rolldown` 1.2.11→1.2.13、`vite` 8.3.1→8.3.4。`typescript` 7.0.2、`react`/`@types/react*` 19.3.0、`zod` 4.6.5 已是发布线，未动。
 
 ### Fixed
 
-- **相对目标的目录基准跟着宿主走**。`SessionHeader.cwd` 从 alpha.2 起只是创建期快照（官方定性：dsh-session `src/index.ts:533` "detached, deep-frozen creation metadata"），活目录搬到 `ctx.workingDirectory`，宿主 bash 也改读它（tool-bash `src/index.ts:487`）。本包原先五处直接读 `header.cwd`（事实门取证、读时基线、密钥面 realpath、deny/pass 上报），升级后与宿主各用一枚：会话 `cd` 之后 `<当前目录>/.ssh/config` 这类密钥路径会按 `<创建期目录>/.ssh/config` 判——该拦的拦不住。现在五处统一到 `effectiveCwdOf()`：服务在场且交出非空串即用，否则退回 `header.cwd`（没装 `dsh-working-directory` 的 profile 行为不变，闸门不下线）；`GuardRuntime.cwd` 每趟调用算一次，读时基线与评估侧因此共享同一枚值。
+- **相对目标的目录基准跟着宿主走**。`SessionHeader.cwd` 从 alpha.2 起只是创建期快照（官方定性：dsh-session `src/index.ts:533` "detached, deep-frozen creation metadata"），活目录搬到 `ctx.workingDirectory`，宿主 bash 也改读它（tool-bash `src/index.ts:487`）。本包原先五处直接读 `header.cwd`（事实门取证、读时基线、密钥检查 realpath、deny/pass 上报），升级后与宿主各用一枚：会话 `cd` 之后 `<当前目录>/.ssh/config` 这类密钥路径会按 `<创建期目录>/.ssh/config` 判——该拦的拦不住。现在五处统一到 `effectiveCwdOf()`：服务在场且交出非空串即用，否则退回 `header.cwd`（没装 `dsh-working-directory` 的 profile 行为不变，闸门不下线）；`GuardRuntime.cwd` 每趟调用算一次，读时基线与评估侧因此共享同一枚值。
 - 两份 README 里"宿主版本只是记录、尚无门禁"的说法与实测不符：`evaluatePluginCompatibility` 从 0.1.7-rc 就在装插件时比对**每一枚** `@deepseek-ai/dsh*` peer，不符即 `dsh: installation rejected`，出路是 `dsh plugin allow-version … --accept-risk`。已按实测改写，并补上"精确钉 = 高于本下限的宿主同样需要授权"这条推论。
 
 ### Added
 
-- `test/host-contract.test.ts` 六条工作目录契约用例：密钥面吃当前目录（并用"服务缺席即放行"作反向对照）、服务缺席退回 `header.cwd`、四类坏形状（空串 / 非字符串 / 没有 `get` / `get` 不是函数）一律退回且不抛错、会话不可得时不读服务、事实门在当前目录下与绝对路径取证同键、上报载荷的 `cwd` 跟到当前目录。覆盖率仍为四项 100%。
-- 真机回归口径写进两份 README：对 `dsh 0.2.1-alpha.2` 实测 `dsh plugin --profile web add <tarball>` → 3 枚包、profile 下无 `@deepseek-ai/` 目录、`--dump-config` 出现 `danger-guard` 与 `danger-guard-settings` 两条、web profile 启动无 fiber 报错；另以一枚故意把 peer 写成 `@deepseek-ai/dsh: 0.1.0` 的探针包验证门禁真的拒绝安装并回滚。
+- `test/host-contract.test.ts` 六条工作目录契约用例：密钥检查吃当前目录（并用"服务缺席即放行"作反向对照）、服务缺席退回 `header.cwd`、四类坏形状（空串 / 非字符串 / 没有 `get` / `get` 不是函数）一律退回且不抛错、会话不可得时不读服务、事实门在当前目录下与绝对路径取证同键、上报载荷的 `cwd` 跟到当前目录。覆盖率仍为四项 100%。
+- 真机回归规则写进两份 README：对 `dsh 0.2.1-alpha.2` 实测 `dsh plugin --profile web add <tarball>` → 3 枚包、profile 下无 `@deepseek-ai/` 目录、`--dump-config` 出现 `danger-guard` 与 `danger-guard-settings` 两条、web profile 启动无 fiber 报错；另以一枚故意把 peer 写成 `@deepseek-ai/dsh: 0.1.0` 的探测脚本包验证门禁真的拒绝安装并回滚。
 
 ### Not changed, deliberately
 
-- **不给 `working_directory` / `worktree_create` 新增拦截规则**。前者只改目录、不写文件，而判据现在跟着目录走；后者属 experimental bundle，不在 `dsh-base`。它们的参数键 `cd` 也不在 `TARGET_PATH_KEYS` 里，密钥面不会把它误当写目标判。
-- **`inject` 不加 `workingDirectory`**。与 `sessionProjections` 同一条理由：可选读面一旦写进插件级 `inject`，没装那个 bundle 的 profile 会整条闸门下线。
+- **不给 `working_directory` / `worktree_create` 新增拦截规则**。前者只改目录、不写文件，而判据现在跟着目录走；后者属 experimental bundle，不在 `dsh-base`。它们的参数键 `cd` 也不在 `TARGET_PATH_KEYS` 里，密钥检查不会把它误当写目标判。
+- **`inject` 不加 `workingDirectory`**。与 `sessionProjections` 同一条理由：可选读取接口一旦写进插件级 `inject`，没装那个 bundle 的 profile 会整条闸门下线。
 - **`ctx.sessionProjections.register()` 的返回物仍不接**。alpha.2 起它交回一枚 Cordis disposer，可以 yield 进 `ctx.effect()`；本包的注册落在注入子 fiber 上、随其回收，行为未变，不在本轮顺手改形。
 - **台账不做逐条目录定标**。相对取证仍按评估时那枚目录重新归一（新增边界 ⑪），要收掉它得把 `working-directory/change` 折进 `lib/tool-ledger.ts`、给每条记录盖上当时所在目录——那是台账形状的改变，不属于一次依赖升级。
 
 ## 0.1.1
 
-发布形态整改：入口面补齐类型声明、归属声明随包发出、发布流水线加固。**判定逻辑、拦截面与默认配置均未改动**——所有变更都在「装出去之后」那一侧。
+发布形态整改：入口补齐类型声明、归属声明随包发出、发布流水线加固。**判定逻辑、拦截与默认配置均未改动**——所有变更都发生在「装出去之后」。
 
 ### Added
 
 - **TypeScript 声明随包发布。** 新增 `tsconfig.types.json` 与 `build-types.mjs`，产出 `types/host.d.ts`、`types/settings-host.d.ts` 及 `lib/` 下 8 份声明；`package.json` 增加 `types` 字段，包根与 `./settings` 两条导出各带 `types` 条件。此前 `exports` 把这两个入口暴露成运行时可import，却没有任何类型，消费方在 `strict` 下会拿到 TS7016。`build:types` 已接进 `check` 与 `prepack`，漏跑时声明会停在旧源码上。
 - `build-types.mjs` 在出声明前清空 `types/`：`tsc` 自己不清 `outDir`，删掉源文件后旧 `.d.ts` 会留在原地，而 `files` 里的 `types` 是整目录，于是陈旧声明照样发出去。
 - `THIRD_PARTY_NOTICES.md` 随包发出（已列入 `files`——npm 不自动附带 NOTICE 类文件，实测只无条件附带 `package.json`、`README*` 与 `LICENSE`）。`LICENSE` 尾部增加一段指引。内容是**机制来源与致谢**，不是法定声明：本包移植 ECC 的事实门与四类命令拦截的**机制**，未搬运其代码、词表或文案，文件内附逐项比对依据。
-- `test/dist-size.test.ts`：产物体积预算门禁，拦截半 / 设置半 / 客户端半 / 声明入口各一条，预算取实测值上浮约 25%。
-- 发布流水线加固：`concurrency` 防两个 runner 并行发同一版本；三个 action 由 tag 改为钉 commit SHA；`--provenance`（此前 `id-token: write` 是空转的）；`--publish-wait-timeout` 让「发出去了但装不上」在 workflow 里就红；预检补读本包自身（此前只查依赖库，于是「版本号没进 main 就触发 workflow」这个最常见的失败模式预检发现不了）；`NPM_TOKEN` 在预检与发布两步用同一份清洗口径（此前 workflow 自己打印「已剔除后使用」，发布那步却传的是裸 secret）。
+- `test/dist-size.test.ts`：产物体积预算门禁，拦截半 / 设置半 / 客户端半 / 声明入口各一条，预算取实测值上加约 25%。
+- 发布流水线加固：`concurrency` 防两个 runner 并行发同一版本；三个 action 由 tag 改为钉 commit SHA；`--provenance`（此前 `id-token: write` 没有实际作用）；`--publish-wait-timeout` 让「发出去了但装不上」在 workflow 里就红；预检补读本包自身（此前只查依赖库，于是「版本号没进 main 就触发 workflow」这个最常见的失败模式预检发现不了）；`NPM_TOKEN` 在预检与发布两步用同一份清洗规则（此前 workflow 自己打印「已剔除后使用」，发布那步传的却是没清洗过的那一份）。
 - 发布面门禁新增六条：归属声明必须在 `files`、声明入口存在且 `types/` 真的产出、声明不比它派生的源码旧、声明不含本机绝对路径或 `.pnpm` 内部路径、声明里的相对说明符都指向产物后缀，以及包根每一份 `.md` 都在发布面（npm 只自动附带 `README*` 与 `LICENSE`，`THIRD_PARTY_NOTICES.md` / `CHANGELOG.md` 都要自己列）。
 
 ### Fixed
@@ -768,7 +768,7 @@ ask 通道、沙箱读法、两族新规则的用例。
 
 ### Not changed, deliberately
 
-- **产物不压缩。** 实测 minify 之后 `from "@jayyuen66/dsh-plugin-shared/lib/record"` 与 `from "@deepseek-ai/schemastery"` 两个说明符字符串双双消失，于是 `test/build-host.test.ts` 那两条「跨包依赖必须 external、官方函数体不得内联」的断言会从「依赖被内联了也不报」变成**恒绿**——它们防的正是 `isRecord` / `brandNumber` 这类单点被就地复制多份。省下的体积不值得废掉两道真门禁，体积改由 `test/dist-size.test.ts` 盯着。这条理由也写进了该文件的头注释与两份 README，免得日后有人「顺手优化」。
+- **产物不压缩。** 实测 minify 之后 `from "@jayyuen66/dsh-plugin-shared/lib/record"` 与 `from "@deepseek-ai/schemastery"` 两个说明符字符串双双消失，于是 `test/build-host.test.ts` 那两条「跨包依赖必须 external、官方函数体不得内联」的断言会从「依赖被内联了也不报」变成**永远通过**——它们防的正是 `isRecord` / `brandNumber` 这类单点被就地复制多份。省下的体积不值得废掉两道真检查，体积改由 `test/dist-size.test.ts` 盯着。这条理由也写进了该文件的头注释与两份 README，免得日后有人「顺手优化」。
 - **判定节的篇幅不动。** 那 44KB 里 96% 是规则本身（按赛道分档的阈值、旗标拼写形态、例外情形），只有 4% 是机制考据；规则删一条，使用者就少知道一种自己会不会被拦的形态。真正的篇幅浪费在别处：两份 README 各有约一半字符是 markdown 表格的对齐填充空格，已去除且内容逐字符未变。
 - `./client` 与 `./cordis.patch.yml` 仍在 `exports` 里但不提供声明。前者是浏览器 UMD 外壳（Node 侧 import 会撞 `window is not defined`），后者由宿主 loader 当文件读。
 - 运行时依赖仍是四枚。经 `@jayyuen66/dsh-plugin-shared` 传递引入的约 30 个包来自上游的依赖分类，本包改不动。
@@ -781,5 +781,5 @@ ask 通道、沙箱读法、两族新规则的用例。
 
 - **危险命令物理拦截**：git 钩子绕过 / 灾难性删除 / 下载即执行 / 长驻 dev server / 密钥路径编辑，
   判定在 `ctx.tools.guard` 的同步谓词上，拒绝时附理由与出路。
-- **首次编辑事实强制门**（gateguard 机制移植）：没读过目标的编辑、碰高风险面而没有层证据的编辑
+- **首次编辑事实强制门**（gateguard 机制移植）：没读过目标的编辑、碰高风险范围而没有层证据的编辑
   都被拒绝，缺什么证据随拒绝理由附上。

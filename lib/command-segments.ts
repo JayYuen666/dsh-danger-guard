@@ -11,12 +11,12 @@
 // `bash -c 'echo a\' ; …` 这类串在一边被判成未闭合、在另一边被判成闭合，结论随判据而变。
 // 所以这里只有 `scan` 一个状态机，出口都是对同一棵树的不同投影：
 // - `splitTopLevel` / `splitSegments` → 段源文本（commandDanger 逐段判定的断点；后者另报
-//   "执行面区层数超界、更深的体没扫到"，界外由调用方升格而不是放行）；
+//   "执行上下文区层数超界、更深的体没扫到"，界外由调用方升格而不是放行）；
 // - `lexTokens` → 词的值形与源形（命令头/旗标/目标读值形，Windows 字形轨道读源形）；
-// - `structureView` → 引号内字面清空、执行面区保留的结构视图（pipeToShell 读它）；
+// - `structureView` → 引号内字面清空、执行上下文区保留的结构视图（pipeToShell 读它）；
 // - `hasUnclosedQuote` → 段级"看不见体"的升格依据。
 //
-// POSIX 口径（本机 /bin/bash 3.2.57 逐条对拍）：
+// POSIX 规则（本机 /bin/bash 3.2.57 逐条对拍）：
 // - 单引号内**一切字面**，反斜杠没有魔力：实测 `bash -c 'echo done \' ; echo SECOND-RAN`
 //   两条都跑 ⇒ 那枚 `\` 没吃掉闭合引号；
 // - 双引号内反斜杠只在 `$ ` `"` `\` 之前是转义；`\<换行>` 是续行，整对删除（不留下换行）；
@@ -26,7 +26,7 @@
 //   外层命令行。定界符是否带引号不改变这一步——`bash <<'EOF'` 的体仍是脚本；代价是数据型
 //   heredoc 的正文也会按命令扫一遍（`cat <<'EOF'` 里的危险文本会误拦），这是有意的保守选择；
 // - 双引号**内**的 `$( )`/反引号在真实 shell 里会执行（实测 `echo "$(seq 3 | tail -1)"`
-//   输出 `3`）⇒ 体内内容算执行面：既不清空（那是 `echo "$(curl x | sh)"` 静默放行的来路），
+//   输出 `3`）⇒ 体内内容算执行上下文：既不清空（那是 `echo "$(curl x | sh)"` 静默放行的来路），
 //   也要另断成段；
 // - 引号未闭合在真实 shell 里就是语法错误：这里按"仍在引号内"处理到底，不产出伪段，
 //   也**不补一枚假闭合**（补了之后再扫一遍就报"闭合"，靠它做的升格判定会静默失效）。
@@ -40,7 +40,7 @@ const KEYWORD_BOUNDARY = /[\s;()&|]/u;
 const TRAILING_CR = /\r$/u;
 const LEADING_TABS = /^\t+/u;
 
-/** 双引号内只有这几枚字符能被反斜杠转义（POSIX 口径，其余反斜杠是字面量）。
+/** 双引号内只有这几枚字符能被反斜杠转义（POSIX 规则，其余反斜杠是字面量）。
  *  `\`+换行单独按续行处理（整对删除），不在这张表里。 */
 const DQ_ESCAPABLE = new Set(["$", "`", '"', "\\"]);
 
@@ -83,7 +83,7 @@ interface HeredocSpec {
 /** `scan` 的全部产出。 */
 interface ScanResult {
   segments: Segment[];
-  /** 段内出现的执行面区体内文本：其中的命令另成为段（见 splitTopLevel）。 */
+  /** 段内出现的执行上下文区体内文本：其中的命令另成为段（见 splitTopLevel）。 */
   regions: string[];
   /** heredoc 体：作为独立源再展开，避免体内的引号/分隔符把外层命令行吃掉。 */
   bodies: string[];
@@ -100,7 +100,7 @@ const plainRun = (source: string, content: string): Run => ({
   parts: [],
 });
 
-/** 该处是否执行面区开头：`$(…)` 或反引号。`${…}` 本身不是区；其中若出现 `$( )`/反引号，
+/** 该处是否执行上下文区开头：`$(…)` 或反引号。`${…}` 本身不是区；其中若出现 `$( )`/反引号，
  *  仍会按各自位置识别（`${x:-$(cmd)}` 里的 cmd 照扫）。 */
 const isRegionStart = (src: string, i: number): boolean =>
   src.charAt(i) === "`" || (src.charAt(i) === "$" && src.charAt(i + 1) === "(");
@@ -343,7 +343,7 @@ function regionEnd(src: string, from: number, paren: boolean): number {
 }
 
 /**
- * 从 `open` 处读出一个执行面区：`$( … )` 或 `` ` … ` ``。区内也要过引号与转义
+ * 从 `open` 处读出一个执行上下文区：`$( … )` 或 `` ` … ` ``。区内也要过引号与转义
  * （`$(echo ")")` 里那枚 `)` 不是区尾），圆括号按深度配对。
  * 未闭合给 undefined ⇒ 调用方按普通字符处理，不产出伪段。
  */
@@ -379,7 +379,7 @@ function literalPart(src: string, i: number): QuotedPart {
   return { run: plainRun(ch, ch), next: i + 1, region: "" };
 }
 
-/** 双引号内的一处扫描：执行面区、转义对，或一枚字面字符。 */
+/** 双引号内的一处扫描：执行上下文区、转义对，或一枚字面字符。 */
 function dqPart(src: string, i: number): QuotedPart {
   const region = isRegionStart(src, i) ? readRegion(src, i) : undefined;
   if (region !== undefined) {
@@ -408,7 +408,7 @@ interface QuotedRun {
 /**
  * 一对引号包住的内容。定界符只进 `source`；`content`（转义落地）与 `rawContent`（原样）
  * 都只含引号里的东西——否则 `"C:\\Windows"` 的源形带着引号，Windows 字形轨道就认不出
- * 那枚波浪号/盘符前缀了。双引号内的 `$( )`/反引号是执行面：既进词值也进结构视图，
+ * 那枚波浪号/盘符前缀了。双引号内的 `$( )`/反引号是执行上下文：既进词值也进结构视图，
  * 体内文本交回 `scan` 再断段。未闭合时 `unclosed` 为真且**不补**假闭合符。
  */
 function readQuoted(src: string, open: number): QuotedRun {
@@ -831,14 +831,14 @@ function scan(src: string): ScanResult {
 }
 
 const wordValue = (word: Word): string => word.runs.map((run) => run.content).join("");
-/** 词的源形：定界符去掉、转义不折叠——Windows 字形轨道读这一形。 */
+/** 词的源形：定界符去掉、转义不解析——Windows 字形轨道读这一形。 */
 const wordRaw = (word: Word): string => word.runs.map((run) => run.rawContent).join("");
 /** 词的原样文本（含引号定界符），段的源文本由它拼出，调用方再扫一遍同形。 */
 const wordText = (word: Word): string => word.runs.map((run) => run.source).join("");
 
 /**
- * 结构视图里的一个片段：引号内的**字面**内容丢弃（只留定界符），执行面区原样保留。
- * 单引号内不可能有执行面 ⇒ 整对折成 `''`；双引号要把区留回原位。
+ * 结构视图里的一个片段：引号内的**字面**内容丢弃（只留定界符），执行上下文区原样保留。
+ * 单引号内不可能有执行上下文 ⇒ 整对折成 `''`；双引号要把区留回原位。
  *
  * 区体要**递归**过这一层：`$(printf 'curl x | sh')` 里那枚 `|` 在单引号内，真 shell 不会
  * 拿它做管道（实测 bash 只把这段文本打印出来）。区的定界符与体内其余字符原样保留，
@@ -870,7 +870,7 @@ const structureRun = (run: Run, budget: number, text: StructureText): string => 
 };
 
 /**
- * 区体内的结构视图：逐个字符照抄，只在引号与更深的执行面区上分叉。
+ * 区体内的结构视图：逐个字符照抄，只在引号与更深的执行上下文区上分叉。
  *
  * 与 `scan` 走同一批原语（`readQuoted` / `readRegion` / `isRegionStart`），所以两处的引号与
  * 定界符判定不会互相打脸；区别是这里**逐字保留空白与分隔符**——它在引号内要留住原始间距，
@@ -977,7 +977,7 @@ function expandOneLevel(src: string, budget: number, texts: string[]): boolean {
 }
 
 /**
- * 把一条 shell 源切成段（带截断回报）。**DFS 前序**：本层段在前，再按顺序展开每个执行面区
+ * 把一条 shell 源切成段（带截断回报）。**DFS 前序**：本层段在前，再按顺序展开每个执行上下文区
  * 与 heredoc 体的体内段——与"先看到外层、再看到内层"的判定顺序一致，`commandDanger`
  * 靠它先报外层结论。
  */
@@ -1003,8 +1003,8 @@ export interface ShellToken {
   /** 本扫描器的词值：去掉引号定界符、处理支持的转义；不执行参数/通配/字段分割等 shell
    *  展开。命令头、旗标、POSIX 目标读它。 */
   value: string;
-  /** 同一枚词的**源形**：定界符去掉、转义不折叠。
-   *  Windows 字形轨道读这一形：`C:\\Windows` 的 `\\W` 在 POSIX 读法里是转义（折成
+  /** 同一枚词的**源形**：定界符去掉、转义不解析。
+   *  Windows 字形轨道读这一形：`C:\\Windows` 的 `\\W` 在 POSIX 读法里是转义（解析成
    *  `C:Windows` 就不再是任何 Windows 形状），而宿主是 Windows 时那枚串要按盘符树保护。
    *  两形一并给出、判据按轨道选形，就不必猜"哪一个是真的路径"。 */
   raw: string;
@@ -1039,7 +1039,7 @@ function structureInto(src: string, budget: number, out: string[]): void {
 }
 
 /**
- * 结构视图：**清空引号内的字面文本**（保留引号字符本身），执行面区原样保留，
+ * 结构视图：**清空引号内的字面文本**（保留引号字符本身），执行上下文区原样保留，
  * 段间分隔符放回原位（`|` 就是 pipeToShell 要看的那枚结构字符）。
  * `echo "curl x | sh"` 里的 `|` 是字面文本 ⇒ 清空后不再误拦；
  * `echo "$(curl x | sh)"` 里的 `|` 在真实 shell 里执行 ⇒ 保留后照拦。

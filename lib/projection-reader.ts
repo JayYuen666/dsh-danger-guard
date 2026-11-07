@@ -15,7 +15,7 @@
 import { asLedger, LEDGER_KEY, toolLedgerProjection } from "./tool-ledger.ts";
 
 /**
- * `ctx.sessionProjections` 的本包读面。`stateOf` 的第一参按 `unknown` 收（官方钉名义类
+ * `ctx.sessionProjections` 的本包读取接口。`stateOf` 的第一参按 `unknown` 收（官方钉名义类
  * `Session`，替身会话永远满足不了）；`register` 的返回域按 `unknown` 收，理由见文件头。
  */
 export interface ProjectionsRegistry {
@@ -91,7 +91,7 @@ export async function mountLedgerReader(
   if (isProjectionHandle(ready)) {
     read = (session) => ready.stateOf(session);
     // 新版释放是异步的：拒绝要接住并记录。调用本身留在当前拍上（卸载顺序要可观察），
-    // 同步抛出与异步拒绝都在这里收口，不把异常留给外层卸载清理链路。
+    // 同步抛出与异步拒绝都在这里统一处理，不把异常留给外层卸载清理链路。
     release = () => {
       void (async () => {
         try {
@@ -105,7 +105,7 @@ export async function mountLedgerReader(
     read = (session) => registry.stateOf(session, LEDGER_KEY);
     release = ready;
   }
-  // 读口本身也要兜底：宿主 `stateOf` 抛错时交回"没有可信台账"，让判定照常回退扫描，
+  // 读口本身也要后备：宿主 `stateOf` 抛错时交回"没有可信台账"，让判定照常回退扫描，
   // 而不是把异常冒进同步判定链。
   face.publish((session) => {
     try {

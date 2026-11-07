@@ -33,7 +33,7 @@ const FIXTURE_CWD = path.resolve(path.parse(process.cwd()).root, "w", "proj");
 interface MockProjections {
   registered: unknown[];
   reads: { session: unknown; key: string }[];
-  /** 新版协议下 `handle.stateOf` 收到的会话面。 */
+  /** 新版协议下 `handle.stateOf` 收到的会话类型。 */
   handleReads: unknown[];
   /** 这一次注册被释放的次数（卸载判据）。 */
   released: number;
@@ -218,7 +218,7 @@ describe("w5 投影注册与回退", () => {
     assert.equal(ctx.projections.reads.length, 0, "读口从未装上 ⇒ 从不走 stateOf");
     // 判定形态只有两种：字符串 = 拒绝理由，undefined = 放行。这串证据是齐备的（read 目标 +
     // 项目级 grep），回退读法下必须放行——旧写法是 `typeof first === "string" || first === undefined`
-    // 的恒真式（类型面上也 exhaustive，`no-unnecessary-condition` 报的就是它），等于什么都没钉。
+    // 的永远成立式（类型上也 exhaustive，`no-unnecessary-condition` 报的就是它），等于什么都没钉。
     assert.equal(first, undefined, "注册表缺席时取证齐备照样放行（回退扫描的结论）");
   });
 });
@@ -436,7 +436,7 @@ describe("w5 注册的两种协议与卸载", () => {
     await settle();
     denyOf(ctx, guardExec("s-pre", log, { value: 0 }));
     assert.equal(ctx.projections.handleReads.length, 1, "卸载前走 handle");
-    // 只撤这一条读面的 effect：整包卸载会把 guard 一起摘掉，那样"回到扫描"就无从观察。
+    // 只撤这一条读取接口的 effect：整包卸载会把 guard 一起摘掉，那样"回到扫描"就无从观察。
     // 按标签定位，不靠"最后一个 effect 恰好是它"——新增一条 effect 就会撤错对象。
     const readFaceIndex = ctx.effectLabels.indexOf("danger-guard: tool-ledger reader");
     assert.ok(readFaceIndex !== -1, "读面必须挂了一条带标签的 effect 才有卸载可言");

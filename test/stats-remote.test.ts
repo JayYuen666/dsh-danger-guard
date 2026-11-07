@@ -1,6 +1,6 @@
-// test/stats-remote.test.ts —— 判定统计读面（官方 Typert Remote）的**两侧契约**与注册路径。
+// test/stats-remote.test.ts —— 判定统计读取接口（官方 Typert Remote）的**两侧契约**与注册路径。
 //
-// 为什么单列一份：这条读面横跨两个产物 —— 宿主侧 `lib/stats-remote.ts` 用**标准装饰器**声明
+// 为什么单列一份：这条读取接口横跨两个产物 —— 宿主侧 `lib/stats-remote.ts` 用**标准装饰器**声明
 // 端点，客户端 `src/stats-reader.ts` **手写**同一枚 descriptor（不跑生成器，理由见那枚模块的
 // 文件头）。两处一旦分叉，卡片不会报错，只会"读不到"或拿到未知命名空间 —— 所以这里把两侧拉到
 // 一起对：用官方 `remoteMethods()` 读宿主真件写下的标记，再逐字段比对手写 descriptor。
@@ -20,14 +20,14 @@ import { loggedText } from "./setup-logs.ts";
 import { STATS_DESCRIPTORS } from "../src/stats-reader.ts";
 import { BUNDLE_PKG } from "../src/bundle-pkg.ts";
 
-/** 从真 Context 上取回读面：缺席与形状不符都在取回这一刻点名，不留到调用 `stats()` 时才炸成 `is not a function`。 */
+/** 从真 Context 上取回读取接口：缺席与形状不符都在取回这一刻点名，不留到调用 `stats()` 时才炸成 `is not a function`。 */
 function statsServiceOf(ctx: Context): { stats: () => StatsSnapshot } {
   const raw: unknown = ctx.get(STATS_SERVICE_KEY, false);
   assert.ok(
     typeof raw === "object" &&
       raw !== null &&
       typeof (raw as { stats?: unknown }).stats === "function",
-    "读面没注册到 STATS_SERVICE_KEY 上，或注册的对象没有 stats() 方法",
+    "读取接口没注册到 STATS_SERVICE_KEY 上，或注册的对象没有 stats() 方法",
   );
   return raw as { stats: () => StatsSnapshot };
 }
@@ -35,7 +35,7 @@ function statsServiceOf(ctx: Context): { stats: () => StatsSnapshot } {
 /** 次数取值（缺席即 0）：读数表的语义就是"没有那一格 = 0 次"。 */
 const countOf = (table: Readonly<Record<string, number>>, key: string): number => table[key] ?? 0;
 
-describe("判定统计读面（官方 Typert Remote）", () => {
+describe("判定统计读取接口（官方 Typert Remote）", () => {
   it("真 Context：服务键注册上，且官方标记与**手写** descriptor 逐字段同值", () => {
     const ctx = new Context();
     assert.equal(installStatsRemote(ctx), true, "有注册口的上下文必须装得上");
@@ -89,10 +89,10 @@ describe("判定统计读面（官方 Typert Remote）", () => {
     assert.equal(after.quotaReleases, before.quotaReleases + 1);
     assert.equal(countOf(after.calls, "bash"), countOf(before.calls, "bash") + 1);
     assert.equal(countOf(after.slow, "bash"), countOf(before.slow, "bash") + 1);
-    // 阈值与窗口随快照出去：卡片要能把"慢"这个字说成具体数字。期望值写死对外口径，
+    // 阈值与窗口随快照出去：卡片要能把"慢"这个字说成具体数字。期望值写死对外规则，
     // 不引用常量（从实现派生等于自我复读）。
     assert.equal(after.slowMs, 100, "对外宣称的慢判定线是 100ms");
-    assert.equal(after.window, 200, "滚动窗口对外口径是 200 次");
+    assert.equal(after.window, 200, "对外给出的滚动窗口是 200 次");
   });
 
   it("表外档位只丢这一格：统计旁路不抛错，也不污染读数", () => {
@@ -106,10 +106,10 @@ describe("判定统计读面（官方 Typert Remote）", () => {
     assert.deepEqual(after.asks, before.asks);
   });
 
-  it("注册口在、但 provide 抛错 ⇒ 收口成 false 并说明少了哪一栏，不把闸门带下去", () => {
+  it("注册口在、但 provide 抛错 ⇒ 统一处理成 false 并说明少了哪一栏，不把闸门带下去", () => {
     // 真实形态：服务键已被别的插件占了，宿主在 `reflect.provide` 里直接抛。
-    // host.ts 的 apply 是裸调用，这一抛若不在这里收口，会把整条拦截链一起打掉——
-    // 而这条读面只是给设置卡多一栏。
+    // host.ts 的 apply 是裸调用，这一抛若不在这里统一处理，会把整条拦截链一起打掉——
+    // 而这条读取接口只是给设置卡多一栏。
     const boom = new Error("service already registered: dangerGuardStats");
     const ctx = {
       reflect: {
@@ -125,7 +125,7 @@ describe("判定统计读面（官方 Typert Remote）", () => {
     assert.match(logged, /service already registered/u, "要把宿主那句原因带出来");
   });
 
-  it("注册口缺席或畸形：四种形状都返回 false（可选读面只该少一栏展示，绝不让闸门下线）", () => {
+  it("注册口缺席或畸形：四种形状都返回 false（可选读取接口只该少一栏展示，绝不让闸门下线）", () => {
     for (const bogus of [undefined, {}, { reflect: {} }, { reflect: { provide: 1 } }]) {
       assert.equal(
         installStatsRemote(bogus as never),

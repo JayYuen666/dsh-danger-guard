@@ -63,7 +63,7 @@ export const RUN_PREFIX_WORDS = new Set([
  *  当成取值吃掉，反手造出新的逃逸口。
  *  sudo 那一行按本机 /usr/bin/sudo 实测补全：`sudo -p xrm rm -rf /` 与 `sudo -C 3 rm -rf /`
  *  都真的把下一词当取值并继续执行 `rm`（实测走到密码提示 ⇒ 命令词已就位），此前这两形放行。
- *  表**不声称完备**（`-h` 这类"报错退出"的旗标列进来反而会把命令词吃掉）：漏一枚的兜底是
+ *  表**不声称完备**（`-h` 这类"报错退出"的旗标列进来反而会把命令词吃掉）：漏一枚的后备是
  *  `wrapperHeadStarts` 的多点位扫描，不是这张表。 */
 export const PREFIX_VALUE_FLAGS: Readonly<Record<string, readonly string[]>> = {
   env: ["-u", "--unset", "--unset-var"],

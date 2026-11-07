@@ -1,4 +1,4 @@
-// src/bundle-pkg.ts —— 本包 bundle 的 npm 包名（**单源**）。
+// src/bundle-pkg.ts —— 本包 bundle 的 npm 包名（**唯一来源**）。
 //
 // 两个产物侧的键都逐字等于它：`plugins.bundle.config` 槽位的 key（client-entry.ts）与
 // 统计读数 `$mount` 贡献对象里的 `package` 字段（stats-reader.ts；descriptor 侧只把它

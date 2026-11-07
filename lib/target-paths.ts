@@ -39,7 +39,7 @@ export const resolveTarget = (value: string, cwd: string | undefined): string =>
 /** **官方通道**交出的目标真实路径（`归一后的目标 → 该执行世界里的绝对路径`）。
  *  两处写、一处读：
  *   - `fs/observed`（后端每观察一枚目标就报一次，`FsTarget` 是它自己的解析结果 ⇒ 零额外 I/O）；
- *   - 预检 B 面（async 的一站：`fs.resolve` + `fs.processPath`，写在密钥面让路判定之前，
+ *   - 预检 B 面（async 的一站：`fs.resolve` + `fs.processPath`，写在密钥检查让路判定之前，
  *     于是**同一次调用**随后同步跑的 guard 就吃得到）。
  *  读口是同步的（本模块的 `resolvedFormsOf`）——`tools.guard` 是同步谓词而官方 `resolve`
  *  是 async，miss 就只剩本机 `realpathSync` 那一形（照旧并列参与）。
@@ -48,8 +48,8 @@ export const resolveTarget = (value: string, cwd: string | undefined): string =>
 const officialPaths = new Map<string, string>();
 
 /** 这张表的容量，单独给而不共用 `LEDGER_CAP`：它的写入由**外部事件**决定——`fs/observed`
- *  对会话碰到的每一枚文件都发一次，200 条在大会话里会被冲成一件摆设（而写类调用那一侧
- *  本来有 Layer 2 兜着，这张表的价值恰恰在"上一次调用碰过的路径这次被改"）。
+ *  对会话碰到的每一枚文件都发一次，200 条在大会话里会被冲成一件摆设（而写类调用本来有
+ *  Layer 2 兜着，这张表的价值恰恰在"上一次调用碰过的路径这次被改"）。
  *  放大到 1000 的代价是定长的：一条 = 两枚路径串，最坏几百 KB，且仍由 LRU 硬界住。 */
 const OFFICIAL_PATH_CAP = 1000;
 
@@ -76,8 +76,8 @@ export function rememberOfficialPath(
   }
 }
 
-/** `fs.processPath` 的"给不出就没有这一形"包装：官方那一面是同步的，但后端可以拒绝
- *  （远端/沙箱面本就未必能交出进程路径），拒绝只表示少一形，不是放行。 */
+/** `fs.processPath` 的"给不出就没有这一形"包装：官方定义的是同步接口，但后端可以拒绝
+ *  （远端/沙箱那一边本就未必能交出进程路径），拒绝只表示少一形，不是放行。 */
 function processPathOf(fs: PreflightFs, target: FsTarget): string | undefined {
   let real: string | undefined;
   try {
@@ -92,7 +92,7 @@ function processPathOf(fs: PreflightFs, target: FsTarget): string | undefined {
  *  ⚠ 这是 **emit** 模式的事件，官方明说监听器必须同步、**抛错会让那次工具调用失败**
  *  （dsh-fs 的 `fs/observed` 注释："throws fail the tool call"）——本包绝不能成为别人
  *  写盘失败的原因，所以整趟包在 try 里：载荷不像官方 `FsTarget` 时什么都不记就是了，
- *  少一形从来不是放行。（`processPathOf` 自己那道 try 服务的是 async 那一侧：那里抛出去
+ *  少一形从来不是放行。（`processPathOf` 自己那道 try 服务的是 async 那条调用路径：那里抛出去
  *  会让整趟预检退化成"没有证据"，而不只是"少一形"。）
  *  只记**绝对**的 `displayPath`：相对形与远端 URI 没有 cwd 就归一不了，而键形必须与读侧
  *  逐字同源（见 officialPaths 的注释），猜一种归一等于造一枚永远读不到的键。 */
@@ -106,9 +106,9 @@ export function rememberObservedPath(fs: PreflightFs | undefined, target: FsTarg
   }
 }
 
-/** 问一次官方通道：`resolve` 定身份（按后端口径归一、跟软链）。任何失败（目标不存在 /
- *  越界被拒 / 后端 IO / 取消）都塌成 undefined——与本机那一形同一个口径：缺席一形只是少看到
- *  一面，声明形与本机形照判。
+/** 问一次官方通道：`resolve` 定身份（按后端规则归一、跟软链）。任何失败（目标不存在 /
+ *  越界被拒 / 后端 IO / 取消）都塌成 undefined——与本机那一形同一个规则：缺席一形只是少看到
+ *  一个角度，声明形与本机形照判。
  *  ⚠ 交回的是**已 resolve 的 target**而不是一个字符串：同一次调用随后还要读正文、探版本，
  *  本地后端下那是几个 syscall，而远端/沙箱后端下是**几次往返**——一枚目标只问一次是这个
  *  函数存在的理由（`PreflightFs` 那边因此都收可选的 pre-resolved target）。 */
@@ -120,7 +120,7 @@ export async function officialTargetOf(
 ): Promise<FsTarget | undefined> {
   let resolved: FsTarget | undefined;
   try {
-    // 条件展开而不是 `{ cwd, signal }`：官方那一位是 `cwd?: string`，而本包的读法面允许
+    // 条件展开而不是 `{ cwd, signal }`：官方那一位是 `cwd?: string`，而本包的读法允许
     // "会话目录不可得"（undefined）——`exactOptionalPropertyTypes` 下送 undefined 是类型错，
     // 语义上也不该送：缺席时让后端按它自己的默认基准归一，比替它猜一个目录诚实。
     resolved = await fs.resolve(target, { ...(cwd === undefined ? {} : { cwd }), signal });
@@ -131,7 +131,7 @@ export async function officialTargetOf(
 }
 
 /** 一次调用最多向官方通道问多少枚目标。声明目标来自模型可写的参数，条数没有上界；
- *  逐枚并发时整批会同时打到后端（远端/沙箱面每枚是一次往返）。超出上限的部分按"官方
+ *  逐枚并发时整批会同时打到后端（远端/沙箱那一边每枚是一次往返）。超出上限的部分按"官方
  *  那一形缺席"处理——它仍会走本机形与声明形，只是不额外挣这一形。 */
 const MAX_OFFICIAL_RESOLVE_TARGETS = 64;
 
@@ -160,7 +160,7 @@ export async function rememberOfficialTargetsOf(
 }
 
 /** 卸载兜底：插件换代时作废全部官方形——换代之间软链可能被重新指向、后端可能整个换掉，
- *  留着旧形等于拿上一代的盘判这一代（这一枚喂的是**密钥面判定**，不与纯路径映射同列）。 */
+ *  留着旧形等于拿上一代的盘判这一代（这一枚喂的是**密钥检查判定**，不与纯路径映射同列）。 */
 export function clearOfficialPaths(): void {
   officialPaths.clear();
 }
@@ -216,7 +216,7 @@ export function resolvedFormsOf(
 /** `path` 是否就是 `root` 或落在它之下（照官方 `workspace-changes/src/paths.ts` 的 `isInside`）。
  *
  * 为什么不拼前缀再 `startsWith`：那要自己判"末尾有没有分隔符"，而分隔符在 Windows 上是
- * `\\\\`、混形还合法——每漏一种写法就多一条恒假的判据。`path.relative` 由平台实现同时解决
+ * `\\\\`、混形还合法——每漏一种写法就多一条永远不成立的判据。`path.relative` 由平台实现同时解决
  * 分隔符与 `..` 归一：结果是空串（同一路径）或以 `..` 开头（在外面）都不是"在内部"。
  *
  * ⚠ 判"是否上跳出根"必须比**路径组件边界**，不能只看 `rel.startsWith("..")`：

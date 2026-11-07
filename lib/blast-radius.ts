@@ -12,7 +12,7 @@
 //   1. 只在 **`ask` 档**跑（`deny` 档不跑：那时结论已定，量它不是用户要看的东西）；
 //   2. 只在 **`ctx.shell` 在位**时跑（没装执行器的 profile 退化成盲问，不静默换命令）；
 //   3. 预演命令是**写死的常量**，**不插值任何模型输入** —— 插值模型给的路径就是拿命令
-//      原文拼 shell 串，那是注入面。所以 `gitRestoreDiscard` 量的是整个工作区
+//      原文拼 shell 串，那是注入。所以 `gitRestoreDiscard` 量的是整个工作区
 //      （`git status --porcelain`）而不是那条命令点名的那几个文件。原命令只用于三项
 //      **跳过**判据（仓库覆盖选项、策略是否可取、`git clean -x/-X` 时预演清单会偏小），
 //      绝不参与命令拼接。
@@ -120,8 +120,8 @@ export function renderBlast(reading: BlastReading, messages: DangerGuardMessages
   return fillTemplate(messages.blastHead, { command, body });
 }
 
-/** `ctx.shell` 的**执行面**（预演专用）：本包只调 `resolve` 与 `execute` 两位。
- *  与 `lib/sandbox-scope.ts` 里那个只探 `sandboxMode` 的面**刻意分开**：两处读的是同一个
+/** `ctx.shell` 的**执行上下文**（预演专用）：本包只调 `resolve` 与 `execute` 两位。
+ *  与 `lib/sandbox-scope.ts` 里那个只探 `sandboxMode` 的类型**刻意分开**：两处读的是同一个
  *  服务的两位，但关心的东西无关（缺 `sandboxMode` 不该让预演停摆，反之亦然）。 */
 interface ShellRunFace {
   /** 执行器自报的沙箱模式；`undefined` = 这个执行器不沙箱。 */
@@ -132,7 +132,7 @@ interface ShellRunFace {
   execute: (spec: unknown) => unknown;
 }
 
-/** 执行面形状守卫。**只探两位是不是函数** —— `execute` 交回的形状在读取处再验一次
+/** 执行上下文形状守卫。**只探两位是不是函数** —— `execute` 交回的形状在读取处再验一次
  *（见 `isShellHandle` 与 `readingOf`），因为"守卫比它声称的松"正是漂移的入口。 */
 const isShellRunFace = (value: unknown): value is ShellRunFace =>
   isRecord(value) &&
@@ -174,7 +174,7 @@ function readingOf(result: unknown, command: string): BlastReading | undefined {
   return reading;
 }
 
-/** `ctx.sandboxPolicy` 的读取面：与 `lib/sandbox-scope.ts` 同一形状。 */
+/** `ctx.sandboxPolicy` 的读取：与 `lib/sandbox-scope.ts` 同一形状。 */
 interface PolicyFace {
   resolve: (request?: { session?: unknown }) => unknown;
 }
@@ -228,7 +228,7 @@ function sandboxRequestOf(
     // ——那可能比会话当前档位宽松，甚至就是 `danger-full-access`。于是"带上策略"这件事本身
     // 会变成一句空话：命令照跑，沙箱却退了一档。同仓 `lib/sandbox-scope.ts` 的
     // `scopeOfResolvedPolicy` / `sandboxModeOf` 都是从 `resolved` 里解出 `mode` 再判字符串，
-    // 这里照同一口径收口。
+    // 这里照同一种做法统一处理。
     return isResolvedPolicy(sandboxPolicy)
       ? { ok: true, request: { sandboxPolicy } }
       : { ok: false };
@@ -321,7 +321,7 @@ function segmentEscapesCwd(segment: string): boolean {
     const token = lexed[index];
     if (token !== undefined && DIRECTORY_COMMANDS.has(token.value)) {
       const target = lexed[directoryTargetIndex(tokens, index + 1)]?.raw;
-      // `cd` / `pushd` / `popd` 无目标时分别回 HOME、交换栈顶、回栈内上一项，落点都不由 cwd 决定。
+      // `cd` / `pushd` / `popd` 无目标时分别回 HOME、交换栈顶、回栈内上一项，位置都不由 cwd 决定。
       if (target === undefined || directoryTargetEscapes(target)) {
         return true;
       }
@@ -351,7 +351,7 @@ export function blastTargetUncertainOf(command: string): boolean {
 }
 
 /** 读 `aborted` 的显式函数：TypeScript 会把前面 `!signal.aborted` 的判断带进闭包，
- *  把这里窄化成恒假；取消是异步发生的，必须在读取点重新取。 */
+ *  把这里窄化成永远不成立；取消是异步发生的，必须在读取点重新取。 */
 const abortedOf = (signal: AbortSignal): boolean => signal.aborted;
 
 /**
@@ -407,7 +407,7 @@ export interface MeasureBlastOptions {
 
 /** 执行一趟已通过前置判据的预演。入参形状照官方 `ShellExecRequest` 给：
  *  `onExpiry: "kill"` + `timeoutMs` 让执行器到点杀进程；`sandboxPolicy` 与 `runGate`
- *  那条路同口径，避免回落到部署级默认。 */
+ *  那条路同规则，避免回落到部署级默认。 */
 async function runBlast(
   shellRaw: ShellRunFace,
   request: { readonly sandboxPolicy?: unknown },
@@ -515,7 +515,7 @@ const IGNORED_FLAG_CHAR = /x/iu;
 /** 原命令里能不能看见「连 `.gitignore` 忽略的文件一起删」这一位的短旗标族。
  *  `-x` 与 `-X` 可与其他短旗标合写（`-fdx`、`-fdX`），所以按字符集匹配而不是整词匹配。
  *  逐词判而不是一条正则：`[A-Za-z]*[xX][A-Za-z]*` 两段可交换，正则引擎会因此被
- *  `regexp/no-super-linear-backtracking` 判成多项式回溯面。 */
+ *  `regexp/no-super-linear-backtracking` 判成多多项式回溯。 */
 const hasIgnoredFlag = (word: string): boolean =>
   SHORT_FLAG_WORD.test(word) && IGNORED_FLAG_CHAR.test(word);
 

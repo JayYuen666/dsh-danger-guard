@@ -22,7 +22,7 @@ const TO_STRING_KEY = "toString";
 const ORDINARY_KEY = "普通路径";
 const KEY_PATH = ".ssh/id_rsa";
 
-/** 工作区根：按平台根拼，不写死 POSIX 形（Windows 上 `/w` 是「当前盘相对」，落点会漂）。 */
+/** 工作区根：按平台根拼，不写死 POSIX 形（Windows 上 `/w` 是「当前盘相对」，写到哪儿会变）。 */
 const W_ROOT = path.resolve(path.parse(process.cwd()).root, "w");
 /** 官方缓存里那一形（与 W_ROOT 无关，任何绝对路径都行）。 */
 const REAL_PATH = path.resolve(path.parse(process.cwd()).root, "real", "id_rsa");
@@ -62,7 +62,7 @@ describe("resolveTarget：绝对形也折成规范形（它同时是缓存的键
     assert.equal(resolveTarget(withDot, undefined), resolveTarget(withDot, "/other"));
   });
 
-  it("解析形表按**声明形**建键（读侧也按声明形查，两侧同源；归一发生在缓存键那一侧）", () => {
+  it("解析形表按**声明形**建键（读的时候也按声明形查，两边同源；归一只发生在算缓存键那一步）", () => {
     const declared = [`${W_ROOT}/./${KEY_PATH}`, `${W_ROOT}/${KEY_PATH}`];
     const forms = resolvedFormsOf(declared, W_ROOT, identityRealpath);
     assert.deepEqual(Object.keys(forms), declared);
@@ -91,7 +91,7 @@ describe("resolveTarget：绝对形也折成规范形（它同时是缓存的键
 
   it("cwd 缺席时相对路径原样交回（那时 cwd 是插件进程的目录，拿它归一是猜）", () => {
     // 契约由共用的归一入口 `resolveTarget` 承担：`officialPathKeyOf` 只是它的一层薄壳，
-    // 只断言薄壳会让「入口自己走错分支」没有任何观察面。
+    // 只断言薄壳会让「入口自己走错分支」没有任何观察接口。
     assert.equal(resolveTarget("a/.env", undefined), "a/.env");
     assert.equal(officialPathKeyOf("a/.env", undefined), "a/.env");
     // 绝对形与 cwd 无关，仍然归一。

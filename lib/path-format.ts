@@ -5,7 +5,7 @@
 //   · **shell 命令文本里的路径**（永远是 POSIX 语义，因为 shell 源码就是那样写的）
 // 这轮就因此出过事：`disasterTargetPathOf` 用 `path.posix.resolve` 处理宿主路径，
 // 在 Windows 上把 `D:\w\proj` 拼成 `/a/.../D:\w\proj/build`；而 `sandbox-scope` 里
-// 手拼 `${candidate}/` 做前缀比较，在 Windows 上恒假 —— 方向恰是**放行一次灾难删除**。
+// 手拼 `${candidate}/` 做前缀比较，在 Windows 上永远不成立 —— 方向恰是**放行一次灾难删除**。
 // 两种混用的共同点是：在 POSIX 上一切正常，只有到了 Windows 才炸。靠读代码抓不住。
 //
 // 做法照 `typesafe-path` 的 branded type（`string & { __brand }`）：
@@ -27,7 +27,7 @@ declare const win32PathBrand: unique symbol;
 export type OsPath = string & { readonly [osPathBrand]: true };
 
 /** **shell 文本里的 POSIX 路径**：`/etc`、`~/x` 这类，语义永远按 POSIX 读。
- *  它标的是命令字符串里的词面世界，与宿主路径是两个世界——混用正是上面那两起事故的根源。 */
+ *  它标的是命令字符串里写出来的路径，与宿主真实路径是两套东西——混用正是上面那两起事故的根源。 */
 export type PosixPath = string & { readonly [posixPathBrand]: true };
 
 /** **Windows 字形路径**：`C:\x`、`\\server\share` 这类，只在 Windows 轨道上产生。 */
@@ -49,7 +49,7 @@ export const asOsPath = (value: string): OsPath => value as OsPath;
 /**
  * 把一枚普通字符串标成 **shell 文本里的 POSIX 路径**。
  *
- * @param value 命令文本里的 POSIX 路径词面。
+ * @param value 命令文本里的 POSIX 路径用词。
  * @returns 带 brand 的同一枚字符串（运行期完全不变）。
  */
 // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- brand 构造器必然是断言，见文件头

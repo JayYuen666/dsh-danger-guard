@@ -10,7 +10,7 @@
 // （src/** + lib/**）实际绑定的字段名，断言后者 ⊇ 前者。漏项必须显式列入 allowUnbound 并给
 // 理由——测试同时校验 allowUnbound 里的每一项确实未被绑定（防止"挂名豁免"绕过门禁）。
 //
-// ⚠ schema 住在哪儿：bulkhead（隔舱）把设置面拆成独立条目的包，严格 schema 不在 host.ts
+// ⚠ schema 定义在哪个文件：bulkhead（隔舱）把设置界面拆成独立条目的包，严格 schema 不在 host.ts
 //   而在 lib/settings-schema.ts（danger-guard 即如此）。旧实现只读 host.ts，读不到就把字段
 //   集当空集 → 门禁**静默失效**（"0 个字段需要覆盖"永远绿）。现在按 SCHEMA_SOURCES 逐个找，
 //   一个都找不到即判红：宁可误报也不开无门禁的口子。
@@ -23,7 +23,7 @@
 //
 // 注意：绑定识别是「出现即算绑定」的宽松启发式（见 boundFieldsIn）。误认（把非 UI 的
 // 同名字面量当成绑定）会让门禁变宽，是这条启发式的已知代价；漏认（真实绑定没认出来）
-// 会立刻报错，所以匹配面宁可宽不可严。注释与多词字符串先被抹掉，已知的非 UI 接收者
+// 会立刻报错，所以匹配宁可宽不可严。注释与多词字符串先被抹掉，已知的非 UI 接收者
 //（localStorage / Map / Set / cache 等）不计入绑定。
 
 import { test } from "vitest";
@@ -37,7 +37,7 @@ export interface AllowUnbound {
   reason: string;
 }
 
-/** schema 可能的栖身处（按序找第一个含 `Schema.object(` 的文件）：
+/** schema 可能位于哪份文件（按序取第一个含 `Schema.object(` 的）：
  *  单条目包 = host.ts；bulkhead 包 = lib/settings-schema.ts（或 settings-host.ts）。 */
 const SCHEMA_SOURCES = ["host.ts", "settings-host.ts", "lib/settings-schema.ts"];
 
@@ -45,7 +45,7 @@ const SCHEMA_SOURCES = ["host.ts", "settings-host.ts", "lib/settings-schema.ts"]
 const SCHEMA_MARKER = "Schema.object(";
 
 /** 从 `open` 处的左括号做深度匹配，返回配对右括号的下标；不闭合则 -1。
- *  字符串与注释整段跳过：默认值里的 `)`（`.default("a)")`）不能提前收口。 */
+ *  字符串与注释整段跳过：默认值里的 `)`（`.default("a)")`）不能提前统一处理。 */
 
 /** 引号字符集与括号字符集（Set 判定，避免一长串 `||` 把函数复杂度推爆）。 */
 const QUOTES = new Set(['"', "'", "`"]);
@@ -125,7 +125,7 @@ function stepStructure(
 }
 
 /** 从 `open` 处的左括号做深度匹配，返回配对右括号的下标；不闭合则 -1。
- *  字符串与注释整段跳过：默认值里的 `)`（`.default("a)")`）不能提前收口。 */
+ *  字符串与注释整段跳过：默认值里的 `)`（`.default("a)")`）不能提前统一处理。 */
 function matchingClose(source: string, open: number): number {
   const cursor: Cursor = { depth: 0, quote: "" };
   let i = open;
@@ -238,7 +238,7 @@ export type SchemaParse =
 
 /** 从持有 schema 的源文件文本里抽取 `Schema.object({...})` 块内的字段名。
  *  注释与字符串里的 marker / 括号不参与结构；同一文件里有多段 `Schema.object` 时合并字段
- *  （漏计一个块就是假绿，多计只会多要求一张控件，方向保守）。
+ *  （漏计一个块就是误判通过，多计只会多要求一张控件，方向保守）。
  *
  *  ⚠ 字段名按**结构**取（见 topLevelFieldNames），不按值形态取。旧写法用一条按值形态的正则
  *  （`field: Schema.` / `field: volatile(Schema.`），于是链式换行的
@@ -481,7 +481,7 @@ async function walk(dir: string): Promise<string[]> {
   return out;
 }
 
-/** client 侧实际绑定的字段名集合。扫描面就是那两棵树：`src/**` 与 `lib/**`。
+/** client 侧实际绑定的字段名集合。扫描范围就是那两棵树：`src/**` 与 `lib/**`。
  *  入口不在两棵树里（例如包根的 `client.ts` / `index.ts`）时不做静默处理 —— 下面的守卫
  *  会把「布局不在扫描范围内」与「卡片漏了控件」分成两条不同的红。 */
 export async function clientBoundFields(pkgDir: string): Promise<Set<string>> {

@@ -1,18 +1,18 @@
-// lib/policy-facts.ts —— 把宿主的三个只读服务面折成一张**档位事实**（`PolicyFacts`）。
+// lib/policy-facts.ts —— 把宿主的三个只读服务汇总成一张**档位事实**（`PolicyFacts`）。
 //
 // 为什么单列：`host.ts` 顶着 `max-lines` 的预算，而这段是**一个自成一体的读取**——
-// 读宿主的能力面、折成 `lib/mode-policy.ts` 要的那四位事实。它不碰 fs、不碰写路径，
+// 读宿主的能力清单、汇总成 `lib/mode-policy.ts` 要的那四位事实。它不碰 fs、不碰写路径，
 // 只做形状守卫与默认值，因此可以脱离宿主单测。
 //
 // 读法一律走**可选服务读法**（`get(name)` 返回 `undefined` 不抛错）：本包读的四家宿主服务
 // （`shell` / `sandboxPolicy` / `approval` / `permissionPresets`）里只有前两家有沙箱时必在，
 // 后两家随部署而变。把任何一家写进插件级 `inject` 都会让缺它的 profile 上**整个闸门不再激活**，
-// 而闸门绝不能因为一条可选读面缺席而下线（本仓 bulkhead 口径）。
+// 而闸门绝不能因为一条可选读取接口缺席而下线（本仓 bulkhead 规则）。
 
 import { guardModeOf } from "./mode-policy.ts";
 import type { GuardMode, PolicyFacts } from "./mode-policy.ts";
 
-/** `ctx.approval` 的读取面：本包只读"当前策略"这一位。`config` 按未知形状收：
+/** `ctx.approval` 的读取：本包只读"当前策略"这一位。`config` 按未知形状收：
  *  宿主自带的 schema 会校验，但替身服务与未来形状仍可能交回非对象值。 */
 interface ApprovalFace {
   readonly config?: unknown;
@@ -28,7 +28,7 @@ const isPolicyConfig = (value: unknown): value is { readonly policy?: unknown } 
 const isOverrideOf = (value: unknown): value is (session: unknown) => unknown =>
   typeof value === "function";
 
-/** `ctx.permissionPresets` 的读取面：本包只读"当前预设名"这一位。 */
+/** `ctx.permissionPresets` 的读取：本包只读"当前预设名"这一位。 */
 interface PermissionPresetsFace {
   current: (session: unknown) => unknown;
 }
@@ -60,7 +60,7 @@ const isPermissionPresetsFace = (value: unknown): value is PermissionPresetsFace
 /**
  * 折一张档位事实。
  *
- * 三个事实各自的来源与缺席口径：
+ * 三个事实各自的来源与缺席规则：
  *  - **模式**：执行器自报在拦 + 策略解析出的 `mode`。读不到 ⇒ `unknown`（保守列）。
  *  - **能否询问**：会话日志里最后一条 `approval/policy` 覆盖，回落到服务配置的默认值。
  *    **不调用** `approval.request()`——那会追加一对 `approval/asked` + `approval/decided`
@@ -69,7 +69,7 @@ const isPermissionPresetsFace = (value: unknown): value is PermissionPresetsFace
  *    只有策略确实是 `never` 才算"问不了"：那是宿主在**任何应答者之前**确定性返回
  *    `rejected` 并用自己的固定文案覆写理由的唯一一格。审批服务整个缺席是另一回事——那条
  *    降级路径是 fail-closed 拒绝但**保留我们交的 reason**，于是文案仍是我们那张带出路的说明。
- *    所以服务缺席按 `askable: true` 处理：判定与文案都不变，只是最终结论由宿主收口成拒绝。
+ *    所以服务缺席按 `askable: true` 处理：判定与文案都不变，只是最终结论由宿主统一处理成拒绝。
  *  - **自动审查**：`permissionPresets.current(session) === "auto"`。这一位只影响
  *    "完全权限那一列要不要留两条硬拦"；读不到就是没装那个预设服务，也就不可能有 auto 档。
  *
@@ -82,13 +82,13 @@ export function policyFactsOf(input: PolicyFactsInput): PolicyFacts {
   const mode: GuardMode = guardModeOf(modeRaw);
   const approvalRaw: unknown = get?.("approval");
   // 默认"能问"：宿主 `ApprovalService` 的配置默认就是 `ask`，而服务缺席那条 fail-closed
-  // 路径同样会带我们的 reason（见上面的口径）。
+  // 路径同样会带我们的 reason（见上面的规则）。
   let askable = true;
   if (isApprovalFace(approvalRaw)) {
     const { overrideOf } = approvalRaw;
     // `.call` 不是风格：真实 `ApprovalService.overrideOf` 的第一句是
     // `this.approvalStateOf(session)`。拆下来当裸函数调，`this` 就是 undefined，
-    // 于是每一次工具判定的策略面都会抛 "Cannot read properties of undefined
+    // 于是每一次工具判定的重试策略都会抛 "Cannot read properties of undefined
     // (reading 'approvalStateOf')" —— 宿主里表现为所有工具全线失败。
     const overridden =
       session === undefined || session === null || !isOverrideOf(overrideOf)
