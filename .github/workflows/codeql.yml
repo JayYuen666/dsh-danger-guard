@@ -52,7 +52,7 @@ jobs:
           # 步骤或将来新增的步骤读到。
           persist-credentials: false
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           languages: ${{ matrix.language }}
       - name: Perform CodeQL Analysis
@@ -62,6 +62,6 @@ jobs:
         # 与代码质量无关的红。只对 fork PR 容错，其余事件仍判红；跳过整步更糟——
         # 被跳过的必检在分支保护里记作通过，等于「未扫描即绿」。
         continue-on-error: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
-        uses: github/codeql-action/analyze@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           category: /language:${{ matrix.language }}
