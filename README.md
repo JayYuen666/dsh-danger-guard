@@ -118,7 +118,7 @@ Worth knowing before you look for them:
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Enabling it in dsh
 
 - Bundle form: `dsh.bundle.patch` in `package.json` points at `cordis.patch.yml`, and `dsh plugin add/remove` maintains the assembly layer.
-- The patch carries **three entries**: `- name: "@jayyuen66/dsh-plugin-shared"` (the supplier of the card components, deliberately **without an `id`** so the plugin page does not list it as a switchable component), then the **bulkhead pair** — `- id: danger-guard` (the guard half, **no `Config`**, name points at the package root) and `- id: danger-guard-settings` (the settings half, strict schema, name points at the `./settings` subpath).
+- The patch carries the **bulkhead pair** — `- id: danger-guard` (the guard half, **no `Config`**, name points at the package root) and `- id: danger-guard-settings` (the settings half, strict schema, name points at the `./settings` subpath). The card components are bundled into `client.js` (only `react` / `zod` stay external to the host's module table), so the card does not depend on a second package being loaded.
   - Only the guard line brings up the card: the host scans `dsh.client` on **bare package-name** entries only, so the settings line's subpath name is deliberate rather than an oversight.
   - The card loads on the web platform only, as "danger-guard danger block" in the settings plugin list.
 - Deployment defaults sit on the **settings row's** `config:`; precedence is settings-card runtime value > row config > the built-in base (`BUILTIN_BASE` in `lib/settings-schema.ts`).

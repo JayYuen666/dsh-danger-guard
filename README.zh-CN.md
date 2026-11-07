@@ -122,7 +122,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 在 dsh 里启用
 
 - 组合包形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，由 `dsh plugin add/remove` 维护装配层。
-- 补丁带**三条条目**：`- name: "@jayyuen66/dsh-plugin-shared"`（卡片组件的供应行，**刻意不写 `id`**，所以插件页不会把它列成可停用组件），其后是**隔舱那两行（bulkhead）**：`- id: danger-guard`（拦截半，**没有 `Config`**，name 指向包本体）与 `- id: danger-guard-settings`（设置半，严格 schema，name 指向 `./settings` 子路径）。
+- 补丁带**隔舱那两行（bulkhead）**：`- id: danger-guard`（拦截半，**没有 `Config`**，name 指向包本体）与 `- id: danger-guard-settings`（设置半，严格 schema，name 指向 `./settings` 子路径）。设置卡组件直接打进 `client.js`（只有 `react` / `zod` 外置给宿主模块表），卡片不依赖第二份包被装载。
   - 卡片只由拦截那一行带出：宿主只对**裸包名**条目扫 `dsh.client`，所以设置行写成子路径是有意的，不是漏改。
   - 卡片只在 web 平台装载，位置是设置页插件列表里的「danger-guard 危险拦截」。
 - 部署默认值写在**设置那一行**的 `config:` 上；优先级是 设置卡运行时值 > 行 config > 内置底座（`lib/settings-schema.ts` 的 `BUILTIN_BASE`）。

@@ -22,9 +22,6 @@
 #   · danger-guard-settings  —— 设置半，持有那份严格 schema（= 设置卡的命名空间）。
 # 设置半 FAILED 时拦截半读不到它的投影，回落内置默认底座并告警（host.ts settingsConfig）。
 - insert:
-    # 故意不写 id：shared 是本包 patch 启用的内部组件行，不是用户可停用的独立组件；
-    # 写 id 会让插件页出现一个可关闭的组件，关闭后本包设置卡会失去组件供应。
-    - name: "@jayyuen66/dsh-plugin-shared"
     - id: danger-guard
       name: "@jayyuen66/dsh-danger-guard"
     - id: danger-guard-settings
