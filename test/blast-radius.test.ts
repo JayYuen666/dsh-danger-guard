@@ -61,7 +61,7 @@ interface SpecView {
   onExpiry?: unknown;
   timeoutMs?: unknown;
   workdir?: unknown;
-  /** 预演必须带的沙箱策略（与 runGate 同口径，见 measureBlastOf 的注释）。 */
+  /** 预演必须带的沙箱策略（与 runGate 同一种做法，见 measureBlastOf 的注释）。 */
   sandboxPolicy?: unknown;
   /** 取消信号必须原样交给执行器：`boundedOf` 只结束等待，杀子进程靠执行器拿到同一枚 signal。 */
   signal?: unknown;
@@ -155,7 +155,7 @@ describe("blast-radius：预演命令表", () => {
     }
   });
 
-  it("**不插值模型输入**：表里的命令是常量，逐条都不含占位/变量/串接（那是注入面）", () => {
+  it("**不插值模型输入**：表里的命令是常量，逐条都不含占位/变量/串接（那是注入）", () => {
     for (const command of Object.values(BLAST_COMMANDS)) {
       // `;` 之外还挡住 `&&`、管道、重定向、后台与换行：片段匹配挡不住的第二条命令
       //（`git branch -vv -D main` 含白名单片段，但 `&& git clean -fd` 不含任何合法片段）。
@@ -359,7 +359,7 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
   it("预演带上 sandboxPolicy：只读预演不许回落到部署级宽松策略", async () => {
     // `git status` 会刷 `.git/index`，那是一次**写**。不传策略时执行器按部署默认走，
     // 而部署默认可能是 `danger-full-access` —— 那这条"只读预演"就是唯一绕过沙箱写盘的路。
-    // 与 runGate 那条路同口径：两处读同一个服务，只一处传就是两条纪律。
+    // 与 runGate 那条路同一种做法：两处读同一个服务，只一处传就是两条纪律。
     const { shell, calls } = fakeShell(" M a.ts");
     const policy = {
       resolve: (request: { session?: unknown }) => ({ mode: WS_MODE, request }),
@@ -398,7 +398,7 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
     assert.deepEqual(seen, [{}], "session 缺席时 resolve 收到空对象");
   });
 
-  it("执行器自报不沙箱时策略面缺席 ⇒ 不传这一位照跑", async () => {
+  it("执行器自报不沙箱时策略缺席 ⇒ 不传这一位照跑", async () => {
     const { shell, calls } = fakeShell(" M a.ts");
     await measure({
       shellRaw: shell,
@@ -412,7 +412,7 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
     assert.equal("sandboxPolicy" in specOf(calls), false);
   });
 
-  it("执行器自报会沙箱时策略面缺席 ⇒ 盲问，不回落部署默认", async () => {
+  it("执行器自报会沙箱时策略缺席 ⇒ 盲问，不回落部署默认", async () => {
     const { shell, calls } = sandboxingShell();
     assert.equal(
       await measure({
@@ -544,7 +544,7 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
     assert.equal(calls.length, 0);
   });
 
-  it("执行面形状守卫读取属性抛错 ⇒ 盲问，不让异常逃出", async () => {
+  it("执行过程形状守卫读取属性抛错 ⇒ 盲问，不让异常逃出", async () => {
     const throwingShell = {
       get resolve(): unknown {
         throw new Error("boom");
@@ -687,7 +687,7 @@ describe("blast-radius：跑预演（**任何失败都退回盲问**）", () => 
     );
   });
 
-  it("执行器缺席 / 形状不符 ⇒ 盲问（不静默换一条命令，也不抛）", async () => {
+  it("执行器缺席 / 形状不符 ⇒ 盲问（不会静默换一条命令，也不抛）", async () => {
     const readings = await Promise.all(
       [undefined, {}, { resolve: 1 }, { resolve: () => ({}), execute: 1 }].map((shellRaw) =>
         measure({

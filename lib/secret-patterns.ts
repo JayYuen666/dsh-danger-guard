@@ -1,6 +1,6 @@
 // lib/secret-patterns.ts —— 用户扩展密钥模式的**校验与编译**（零宿主依赖、零词表依赖）。
 //
-// 为什么单列一枚模块：这一层有两个读者，而它们住在不同的产物里——设置条目要在**装配时**
+// 为什么单列一枚模块：这一层有两个读者，而它们位于不同的产物里——设置条目要在**装配时**
 // 校验并点名非法片段（`lib/secret-pattern-report.ts`），拦截半要在匹配前拿到编译好的正则
 // （`lib/danger-rules.ts` 的 `secretRegexes`）。留在词表模块里就等于让设置条目去 import
 // 整份拦截规则，产物里多出一棵它从不读的子树（实测 `settings.js` 从 3.5 KB 预算涨到 6.5 KB，
@@ -15,7 +15,7 @@ export interface SecretPatternPartition {
 }
 
 /** 单条扩展模式的长度上限：正则本身的病（灾难回溯）没法静态判定，但"超长"是配置写错的
- *  最强信号，先按长度收一道，剩下的口径写在 README 的「扩展模式由配置者自负」。 */
+ *  最强信号，先按长度收一道，剩下的规则写在 README 的「扩展模式由配置者自负」。 */
 const MAX_SECRET_PATTERN_LENGTH = 512;
 
 /**
@@ -60,7 +60,7 @@ function buildCompiledSecretPatterns(patterns: readonly string[]): CompiledSecre
     } else if (looksLikeRegexLiteral(pattern)) {
       // 写成 `/…/i` 的形状**编得过**（首尾的斜杠只是普通字符、尾部 `i` 也是普通字符），
       // 于是它不会进 rejected、界面上看不到「本条未生效」，却永远匹配不到任何路径 ——
-      // 用户以为开了保护，密钥面静默失效。这类输入必须点名拒掉，不能靠编译期抛错。
+      // 用户以为开了保护，密钥检查静默失效。这类输入必须点名拒掉，不能靠编译期抛错。
       rejected.push(pattern);
     } else {
       try {

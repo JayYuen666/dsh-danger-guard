@@ -1,14 +1,14 @@
 // 派生台账的生命周期：会话销毁按会话键回收、插件卸载整表清空（**真实 cordis 运行时**）。
 //
 // 命题：模块级台账里按**会话键**（host.ts 的 `sessionTargetKeyOf`，形如 `会话id|目标`）记的那几张
-// 不随会话销毁回收时，长跑进程的记账按会话堆积（LEDGER_CAP=200 只是兜底，不是策略）；按**路径键**
+// 不随会话销毁回收时，长跑进程的记录下来按会话堆积（LEDGER_CAP=200 只是兜底，不是策略）；按**路径键**
 // 记的那几张 —— 层探查缓存 `${start}|${root}|${extraTestDirs}`、项目根缓存 `cwd|目标` —— 不随卸载
 // 清空时，新一代插件会读到上一代的结论，可插件换代时工作树已经变了。层探查那一张的键里 `root`
 // 是必需的：上溯的终点由它决定，而同一枚目标在不同会话 cwd 下可以落到不同包根 —— 少这一位，
 // 包根里开的会话与仓库根里开的会话会互相复用对方的层集合。
 // 键形以 host.ts 的构造处为准，这里不复数有几张表。
 //
-// 夹具用真实 Context（不是手写 mock）：卸载兜底挂在 ctx.effect 上，只有真的 dispose
+// 夹具用真实 Context（不是手写 mock）：卸载后备挂在 ctx.effect 上，只有真的 dispose
 // 一条 fiber 才会跑到 disposer，手写 mock 的 effects 数组验不了这条链。
 import { describe, it, beforeAll, afterAll, afterEach } from "vitest";
 import assert from "node:assert/strict";
@@ -64,7 +64,7 @@ describe("派生台账的生命周期", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  /** 组装一个「像 dsh 那样」的 root ctx：tools + settings，设置读数口给 strictMode。
+  /** 组装一个「像 dsh 那样」的 root ctx：tools + settings，设置取值接口给 strictMode。
    *  返回前已 await 装载，装配完成即谓词在册。
    *  strictMode 让 tierOf 升到 high → collectLayerVerdicts 才跑，层缺口才会出现在
    *  文案里——那正是本文件观察层缓存的窗口。 */
@@ -135,7 +135,7 @@ describe("派生台账的生命周期", () => {
 
   describe("会话销毁按会话键回收", () => {
     it("只清掉本会话的分片：s1 销毁不连坐 s10 的会话键基线", async () => {
-      // 黑盒判别：s10 的 seenLen/mtime 基线是否被 s1 的销毁连坐清掉，唯一可观察面是
+      // 黑盒判别：s10 的 seenLen/mtime 基线是否被 s1 的销毁连坐清掉，唯一可观察接口是
       // 「外部改动基准取哪一位」。首评日志 4 位（基线=4）；复评日志 7 位、新 read 的
       // 调用位在 5（结果位 6）——基线在位时 5 > 4，read 仍算数 → 放行；基线被清（前缀少
       // `|` 的连坐）时基准退到当前日志末尾 7，5 > 7 不成立 → 判"被会话外改过" → 拒绝。

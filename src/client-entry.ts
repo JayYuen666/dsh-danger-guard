@@ -1,8 +1,8 @@
-// danger-guard client 半：设置卡（总开关 + 事实门开关/放行次数/严格模式/写面阈值 + 检索工具
-// 名单与词表类设置项；名单按 lib/settings-schema.ts 现量，本文件不复数）。
+// danger-guard client 半：设置卡（总开关 + 事实门开关/放行次数/严格模式/写入阈值 + 检索工具
+// 名单与词表类设置项；名单按 lib/settings-schema.ts 当场实测，本文件不复数）。
 // 参照 session-rescue / ctx-observe / quality-gate 的卡片模式：keyed plugins.bundle.config
-// 槽（key = bundle 包名，单源在 src/bundle-pkg.ts 的 BUNDLE_PKG；本包刻意有三个串：locale
-// 命名空间 / settings 命名空间 / slot key，slot key 的派发证据链随那份单源住在一起）
+// 槽（key = bundle 包名，唯一来源在 src/bundle-pkg.ts 的 BUNDLE_PKG；本包刻意有三个串：locale
+// 命名空间 / settings 命名空间 / slot key，slot key 的派发证据链与那份唯一来源定义在同一处）
 // + 0.1.7 的
 // ctx.configForms.get(条目 id) 表单（id = 设置条目 `danger-guard-settings`），React 由模块
 // 系统提供（rolldown external），只用 createElement。
@@ -31,10 +31,10 @@ import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-
 // （installed `dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:95-104`，
 // 文件头明写「A registrant merges this contract with `import type` and registers through
 // `ctx.slots`; it never imports this package at runtime」）。本包原先没有把那份 merge
-// 载入 program，槽位名只是 `ClientCtx.slots` 手抄签名里的一枚 `string`——拼错 key 编译期
+// 载入 program，槽位名只是 `ClientCtx.slots` 自己抄的签名里的一枚 `string`——拼错 key 编译期
 // 不红，而宿主按包名逐字相等匹配（见下面 BUNDLE_PKG 的证据链），症状是**整张卡不渲染**。
 // 这里取 `ConfigPageForm` 是**一举两得**：既是把官方 merge 载入 program 的入口（TS 顺着
-// `./client` 的再导出走到 slot-contract.ts），也是本卡渲染视模型两个状态位的真源
+// `./client` 的再导出走到 slot-contract.ts），也是本卡渲染视模型两个状态位的唯一来源
 // （见下面 CardSnapshot）。lint 的 `require-module-specifiers` 禁空 import specifier，
 // 正合本意——载入官方契约就该同时*用上*它。
 import type { ConfigPageForm } from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
@@ -43,15 +43,15 @@ import {
   DEFAULT_SMALL_EDIT_CHARS,
   DEFAULT_BIG_EDIT_CHARS,
 } from "../lib/fact-gate.ts";
-// 名单默认值与 host 的取证判据、指令文案兜底同源（lib/ref-search-policy.ts），卡片只是回退显示它。
+// 名单默认值与 host 的取证判据、指令文案后备同源（lib/ref-search-policy.ts），卡片只是回退显示它。
 import {
   DEFAULT_REF_SEARCH_STRICT_TOOLS,
   DEFAULT_REF_SEARCH_TOOLS,
 } from "../lib/ref-search-policy.ts";
 import { createStatsReader, topLines } from "./stats-reader.ts";
 import type { StatsLine } from "./stats-reader.ts";
-// 槽位键 = bundle 包名，单源在 src/bundle-pkg.ts（本包刻意有三个串：locale 命名空间 /
-// settings 命名空间 / slot key；slot key 的派发证据链也随那份单源住在一起）。
+// 槽位键 = bundle 包名，唯一来源在 src/bundle-pkg.ts（本包刻意有三个串：locale 命名空间 /
+// settings 命名空间 / slot key；slot key 的派发证据链也与那份唯一来源定义在同一处）。
 import { BUNDLE_PKG } from "./bundle-pkg.ts";
 // 形状从**叶子**模块取（见 src/stats-reader.ts 的说明：judge-stats 带 node:os/node:path）。
 import type { StatsSnapshot } from "../lib/stats-shape.ts";
@@ -84,22 +84,22 @@ const STATS_CSS = [
 const ERROR_CLASS = "dgc-saveerr";
 
 /**
- * 客户端配置面直接取官方声明：`@deepseek-ai/dsh-client-ui-settings/client` 交出的
+ * 客户端配置表直接取官方声明：`@deepseek-ai/dsh-client-ui-settings/client` 交出的
  * `ConfigForm<T>` 与其快照 `ConfigFormSnapshot<T>`（installed
  * `lib/types/client/config-form-types.d.ts:6-74`：`getSnapshot:38` / `subscribe:44` /
  * `mutate:55` / `set:65` / `unset:73`，快照 `status:12` / `value:14` / `writable:29`）。
- * 原先这里手抄了一份 `getSnapshot: () => unknown`，快照字段全靠 `snapshotOf` 逐位再解析
+ * 原先这里自己抄了一份 `getSnapshot: () => unknown`，快照字段全靠 `snapshotOf` 逐位再解析
  * 一遍——那个解析器只是丢失类型的补救，不是宿主契约（provider 侧已 decode/derive 过这层）。
  * ⚠ 入口仍是 `ctx.configForms.get(entryId)`（installed `.../client/config-form.d.ts:142`，
  * 服务本身由同文件 :94-98 的 `Context.configForms` 增强交出；`get()` 的入参就是命名空间
  * ——installed lib/client.js:1309-1313 把它原样交给
  * `new ConfigFormController(owner, { namespace: entryId }, …)`）。
  * 两处与旧 `settingsScope` 不同：
- *  - `set`/`unset` 多了**受理位**：`true` 宿主受理，`false` = 拒绝或写入被跳过，且
+ *  - `set`/`unset` 多了**受理结果**：`true` 宿主受理，`false` = 拒绝或写入被跳过，且
  *    **只有传输失败才 reject**（声明 installed `config-form-types.d.ts:62-64`、`:70-72`；
  *    实现 installed `lib/client.js:1183-1186` `!response.ok → false`、`:1213`
- *    memory/disposed 早退 `false`）。本卡维持 0.1.6 的行为：失败面只认 rejection，
- *    受理位 await 后即弃（见 apply 里的 payload 注释）——消费它要新增文案键与判定，
+ *    memory/disposed 早退 `false`）。本卡维持 0.1.6 的行为：失败只认 rejection，
+ *    受理结果 await 后即弃（见 apply 里的 payload 注释）——消费它要新增文案键与判定，
  *    属改行为而不是迁移（session-rescue / ctx-observe / quality-gate 同一条纪律）。
  *  - **没有 `dispose()`**：`get()` 交回的是 provider 自己持有的那张共享表单（installed
  *    `config-form.d.ts:138-142` "The entry's form, owned by this provider"），消费者无权
@@ -129,7 +129,7 @@ const MAX_DENIES_SCHEMA = z.int().min(1).max(5);
 const SMALL_EDIT_CHARS_SCHEMA = z.int().min(1);
 const BIG_EDIT_CHARS_SCHEMA = z.int().min(2);
 
-/** zod 4.6 的 `.minValue`/`.maxValue` 是折叠后的边界；null 表示该方向没声明。 */
+/** zod 4.6 的 `.minValue`/`.maxValue` 是 `.min()/.max()` 归并后的边界；null 表示该方向没声明。 */
 function boundsOf(schema: z.ZodNumber): { readonly min?: number; readonly max?: number } {
   const bounds: { min?: number; max?: number } = {};
   if (schema.minValue !== null) {
@@ -227,7 +227,7 @@ function buildJudgeSection(props: SectionInputs): ReactNode {
   return createElement(Section, { title: t("judgeSection") }, judgeStats, maxDenies, strict);
 }
 
-/** 分级规则小节：两份写面阈值 + 六份名单/词表。 */
+/** 分级规则小节：两份写入阈值 + 六份名单/词表。 */
 function buildRulesSection(props: SectionInputs): ReactNode {
   const { t, writable, eff, setField } = props;
   const disabled = !writable;
@@ -406,7 +406,7 @@ function statsValueLines(t: Translate, snap: StatsSnapshot): ReactNode[] {
   return lines;
 }
 
-/** 读数块的四种"非正常"面 + 正常面（纯函数：组件只负责把它的结果摆出来）。 */
+/** 读数块的四种"非正常"面 + 正常情况（纯函数：组件只负责把它的结果摆出来）。 */
 function statsLinesOf(
   t: Translate,
   read: unknown,
@@ -599,35 +599,35 @@ function DgCard(props: DgCardProps): ReactNode {
 }
 
 /**
- * 本卡用到的 ctx 面：三位里两位直接投影官方服务面，不再手抄签名。
+ * 本卡用到的 ctx 面：三位里两位直接投影官方宿主服务，不再自己抄的签名。
  *
  * - `effect`：cordis 官方效应面（installed `@deepseek-ai/cordis/lib/types/fiber.d.ts:8`
  *   的 `interface Context extends Pick<Fiber, 'effect'>`，:157/:159 两个重载）。原先这里
- *   手抄的是 `(factory, label?) => void`：官方返回的是 `Disposable`/`AsyncDisposable`，
+ *   自己抄的是 `(factory, label?) => void`：官方返回的是 `Disposable`/`AsyncDisposable`，
  *   抄成 void 就把「效应可以 await 回收」这条真实契约藏掉了。
- * - `slots`：官方 `SlotRegistry`（renderer 把它增强进 cordis `Context`）的**方法面投影**。
+ * - `slots`：官方 `SlotRegistry`（renderer 把它增强进 cordis `Context`）的**方法子集投影**。
  *   取 `Pick` 而不是 `Context["slots"]` 整个类型：`SlotRegistry` 是带 private 字段的 cordis
  *   `Service` 类（installed `dsh-client-ui-renderer/lib/types/client/registry.d.ts:46`），
- *   TS 对它做名义比较，测试桩件无法满足。`register` 逐字复用 `SlotCore['register']`
+ *   TS 对它做名义比较，测试替身无法满足。`register` 逐字复用 `SlotCore['register']`
  *   （`registry.d.ts:85` 声明、实现在 slots 包的两个重载），`inject` 是
  *   `registry.d.ts:111` 的「按槽位声明生命周期装 effect」那一位（disposer 随 collapse
  *   重跑工厂的语义就写在 :100）。合并进 `SlotMap` 的槽位键在这里是**编译期受检**的：
  *   `inject`/`register` 的 key 参数域就是 `keyof SlotMap & string`，而
  *   `plugins.bundle.config` 那一枚由文件头那条 `import type` 从属主包载入。
- *   ⚠ 与手抄版的差异都在**类型面**，本卡行为不变，但值得记下来：
- *    ① 官方 `inject` 回一枚 idempotent disposer（手抄版写的是 `void`，等于把「注册可以
+ *   ⚠ 与自己抄的那一份的差异都在**类型上**，本卡行为不变，但值得记下来：
+ *    ① 官方 `inject` 回一枚 idempotent disposer（自己抄的那一份写的是 `void`，等于把「注册可以
  *      被撤销」这条真实契约藏掉）；
- *    ② 官方工厂的返回面是 `SlotInjectionEffect`（`registry.d.ts:44`，那个联合没从 dts
- *      导出：`(() => void) | Iterable<() => void, void, void>`），手抄版只认「一枚函数或
+ *    ② 官方工厂的返回类型是 `SlotInjectionEffect`（`registry.d.ts:44`，那个联合没从 dts
+ *      导出：`(() => void) | Iterable<() => void, void, void>`），自己抄的那一份只认「一枚函数或
  *      `undefined`」——**没有** undefined 那一支，所以「工厂什么都不回收」从今天起编译期
  *      就红；本卡交回的恰是 `unregister` 这一枚函数，形状不变。
- *    ③ `register` 的第二个实参在官方是**受检的组件面**（`SlotCore['register']` 把组件
- *      props 对上 owner + inject + 标准席位合成出的 `ComposedProps`），手抄版是
+ *    ③ `register` 的第二个实参在官方是**受检的组件类型**（`SlotCore['register']` 把组件
+ *      props 对上 owner + inject + 标准席位合成出的 `ComposedProps`），自己抄的那一份是
  *      `view: unknown` = 什么都不查。
  * - `configForms`：只投影用到的 `get`。官方 `ConfigForms.get` 是泛型
  *   （`<T>(entryId) => ConfigForm<T>`，installed `config-form.d.ts:142`），且
- *   `ConfigForms` 同样是 Service 类 → 既不能整类型用，也不能把 `Pick` 交给桩件；
- *   这里把 `T` 钉在本卡唯一取的那张表单上，返回面仍是官方 `ConfigForm`。
+ *   `ConfigForms` 同样是 Service 类 → 既不能整类型用，也不能把 `Pick` 交给测试替身；
+ *   这里把 `T` 钉在本卡唯一取的那张表单上，返回类型仍是官方 `ConfigForm`。
  * - `locale`：官方 `@deepseek-ai/dsh-client-locale` 的 client 面（`LocaleRuntime`，
  *   installed `lib/types/client/index.d.ts`）在本卡实际用到的那两条**类型化**重载上的
  *   投影，取在本包命名空间 `typeof NS` 上：
@@ -656,8 +656,8 @@ export interface ClientCtx {
    *  设置卡静默消失）。注入只需 `configForms` 本身——写侧的 `remote.settings` 由 provider
    *  自己的 fiber 承担（同文件 :113-118 明写「letting a shared form write through the
    *  caller's context would make every caller declare `remote.settings`」，故此处不必声明）。 */
-  /** 只用 `get` 这一位，故按方法面投影 —— 官方 `ConfigForms` 是带 private 字段的
-   *  Service 类，TS 对其做名义比较，测试桩件无法满足。返回类型仍绑官方
+  /** 只用 `get` 这一位，故按方法子集投影 —— 官方 `ConfigForms` 是带 private 字段的
+   *  Service 类，TS 对其做名义比较，测试替身无法满足。返回类型仍绑官方
    *  `ConfigForm<Record<string, unknown>>`（本卡只按设置条目取这一张表单，故不必
    *  带泛型），快照字段一名一改，这里就会编译失败。 */
   configForms: {
@@ -667,9 +667,9 @@ export interface ClientCtx {
     register: (ns: typeof NS, dicts: LocaleCatalog) => () => void;
     bind: (ns: typeof NS) => Translate;
   };
-  /** 显式读一个**可选**服务（`ctx.get`，不受 cordis 的 inject 门禁约束）。本卡只用它读远程面：
-   *  **不能**把 `remote` 写进 `inject` —— 那会把整条 client 入口绑死在远程面上，而它是一枚
-   *  可选读面（没装它的部署里卡片仍要照常渲染）。为什么与怎么读，见 src/stats-reader.ts 文件头。 */
+  /** 显式读一个**可选**服务（`ctx.get`，不受 cordis 的 inject门禁约束）。本卡只用它读远程通道：
+   *  **不能**把 `remote` 写进 `inject` —— 那会把整条 client 入口绑死在远程通道上，而它是一枚
+   *  可选读取接口（没装它的部署里卡片仍要照常渲染）。为什么与怎么读，见 src/stats-reader.ts 文件头。 */
   get?: (name: string, strict?: boolean) => unknown;
 }
 
@@ -731,7 +731,7 @@ function apply(ctx: ClientCtx): void {
   // 故注册项数与回收范围都不变，只是由一枚效应承载（旧写法要自己拼两个 disposer）。
   ctx.effect(() => ctx.locale.register(NS, UI_MESSAGES), "danger-guard-card: locale dictionaries");
   const t = ctx.locale.bind(NS);
-  // 读取器自己判"当前部署有没有远程面"（没有就交 undefined ⇒ 卡片那段显示「读不到」）。
+  // 读取器自己判"当前部署有没有远程通道"（没有就交 undefined ⇒ 卡片那段显示「读不到」）。
   const readStats = createStatsReader(ctx);
   ctx.slots.inject("plugins.bundle.config", () => {
     const unregister = ctx.slots.register(
@@ -751,7 +751,7 @@ function apply(ctx: ClientCtx): void {
           // 交 undefined，卡片那一段显示"读不到"而不是让整张卡挂不上。
           ...(readStats === undefined ? {} : { readStats }),
           // 0.1.7 的 set/unset 回 `Promise<boolean>`：false = 宿主拒绝 / 表单已销毁 /
-          // 写入被跳过。翻成 rejection 交给卡片既有的失败面（saveFailed + 留住草稿）：
+          // 写入被跳过。翻成 rejection 交给卡片既有的失败（saveFailed + 留住草稿）：
           // 吞掉它只会让卡片显示"已保存"而实际一个字节都没写。
           set: async (field: string, value: unknown): Promise<void> => {
             if (!(await scope.set(field, value))) {
@@ -774,7 +774,7 @@ function apply(ctx: ClientCtx): void {
     // fiber 上统一回收（installed lib/client.js:1289-1293）。slot collapse 会调用本 disposer
     // 并在再次声明时**重跑工厂**（installed dsh-client-ui-renderer/lib/types/client/
     // registry.d.ts:100 "Collapse disposes the effect and a later declaration runs it
-    // again"）——表单共享且长活，所以重跑后写入依然落盘；旧 `settingsScope` 那种「离开插件页
+    // again"）——表单共享且长活，所以重跑后写入依然写到磁盘；旧 `settingsScope` 那种「离开插件页
     // 一次之后 scope 永久 disposed、之后每次保存被静默丢弃」的坑（0.1.6 的 fiber 级 dispose，
     // 现由 installed lib/client.js:1213 的 disposed 早退返回 false 承接）随该服务一起消失。
     return unregister;

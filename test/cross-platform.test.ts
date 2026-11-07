@@ -2,7 +2,7 @@
 //
 // 为什么单列一份：本仓的路径判据（沙箱让路、检索作用域、项目根回落、层级链）都在**宿主真实
 // 路径**上做前缀包含比较。写死 `/` 时这些判据在 POSIX 上照常绿、在 Windows 上**静默失效**——
-// 而它们失效的方向是不安全的那个（`isAncestorDirOf` 恒假 ⇒ 把本该拦的灾难删除让给沙箱）。
+// 而它们失效的方向是不安全的那个（`isAncestorDirOf` 永远不成立 ⇒ 把本该拦的灾难删除让给沙箱）。
 //
 // 本文件在**两种语义**下各跑一遍同一份判据：`path.win32` 的语义本机可用，于是不必等 Windows
 // runner 就能证明"用平台分隔符的写法对、写死 `/` 的写法错"。
@@ -32,7 +32,7 @@ const isAncestorWith = (candidate: string, target: string, sep: string): boolean
 };
 
 describe("前缀包含判据：平台分隔符 vs 写死 '/'", () => {
-  it("posix 语义：两种写法都得 true（本机跑的就是这一侧）", () => {
+  it("posix 语义：两种写法都得 true（本机跑的就是这一条）", () => {
     const root = posixPath("/", "w");
     const child = posixPath("/", "w", "proj");
     assert.equal(isAncestorWith(root, child, path.posix.sep), true);
@@ -96,7 +96,7 @@ describe("层级链：dirname 逐级上溯到文件系统根", () => {
   });
 });
 
-describe("家目录子路径拼接：词面的 '/' 不改变宿主的分隔符形状", () => {
+describe("家目录子路径拼接：用词的 '/' 不改变宿主的分隔符形状", () => {
   it("win32 家目录 + 子段 ⇒ 全反斜杠（`path.posix.join` 会拼出混分隔符）", () => {
     const home = winPath("C:", "Users", "runneradmin");
     assert.equal(path.win32.join(home, "Documents"), `${home}${BS}Documents`);
@@ -113,7 +113,7 @@ describe("防回归：仓库里不许再出现写死分隔符的前缀比较", (
   // 解析 shell 命令文本，不是宿主路径判据）；其余位置出现 `startsWith(..."/")` 形式就是漏改。
   // ⚠ 这是一份硬编码清单：新增带前缀比较的产品文件时必须评估是否入单。
   // `lib/target-paths.ts` 必须入单：`isInside` / `isAncestorDirOf` / `toPosixRelative` / `underLayer`
-  // 这四个跨平台判据已从 host.ts 搬到那里，清单不跟着走就等于把最该扫的四个函数漏在扫描面之外。
+  // 这四个跨平台判据已从 host.ts 搬到那里，清单不跟着走就等于把最该扫的四个函数漏在扫描范围之外。
   const PRODUCT = [
     "host.ts",
     "lib/confirm.ts",
@@ -166,9 +166,9 @@ const offencesOf = (name: string): string[] => {
     .map((trimmed) => `${name}: ${trimmed}`);
 };
 
-describe("防回归：测试夹具不许把 POSIX 字面路径当宿主真实路径", () => {
+describe("防回归：夹具不许把 POSIX 字面路径当宿主真实路径", () => {
   // 这一条防的正是"本机绿、Windows 红"那一整类：夹具写死 `/w/proj` 时，在 Windows 上它
-  // 是「当前盘相对」（`isAbsolute` 判真但 root 只有分隔符），落点取决于进程当前盘，
+  // 是「当前盘相对」（`isAbsolute` 判真但 root 只有分隔符），写到哪儿取决于进程当前盘，
   // 于是同一份断言在两种平台上测的不是同一个东西。
   //
   // 判据是**源码扫描**：`lib/danger-rules.ts` 这类纯字符串判据允许（它判的是 shell 命令
@@ -202,8 +202,8 @@ describe("路径工具本身：isAbsolute 与平台一致性", () => {
   it("windows 的 `/w/proj` 虽被 isAbsolute 认作绝对，却没有盘符（是「当前盘」相对形）", () => {
     assert.equal(path.win32.isAbsolute(winPath("C:", "w")), true);
     // ⚠ `path.win32.isAbsolute("/w/proj")` 实测是 **true**：win32 认「根相对」形态。
-    // 但它解析出来没有盘符（root 是 `\`），落点取决于进程当前盘 ⇒ 不能当"宿主绝对路径"用。
-    // 这正是测试夹具不能写死 `/w/proj` 的原因——判据得看 root 有没有盘符，不是只看 isAbsolute。
+    // 但它解析出来没有盘符（root 是 `\`），写到哪儿取决于进程当前盘 ⇒ 不能当"宿主绝对路径"用。
+    // 这正是夹具不能写死 `/w/proj` 的原因——判据得看 root 有没有盘符，不是只看 isAbsolute。
     assert.equal(path.win32.isAbsolute("/w/proj"), true, "win32 认根相对形态");
     // ⚠ 这里**不能**断言 `resolve("/w/proj")` 以反斜杠开头：它依赖宿主当前盘 ——
     // 在 macOS 上得 `\w\proj`，在 Windows 上得 `D:\w\proj`（补上 cwd 所在盘）。
@@ -218,7 +218,7 @@ describe("路径工具本身：isAbsolute 与平台一致性", () => {
     assert.equal(path.posix.isAbsolute("/w/proj"), true, "同一串在 POSIX 上是绝对形");
   });
 
-  it("测试夹具必须按平台根构造绝对路径，不能写死 `/w/proj`", () => {
+  it("夹具必须按平台根构造绝对路径，不能写死 `/w/proj`", () => {
     const fixture = path.resolve(path.parse(process.cwd()).root, "w", "proj");
     assert.equal(path.isAbsolute(fixture), true, `夹具根必须是宿主绝对路径：${fixture}`);
   });

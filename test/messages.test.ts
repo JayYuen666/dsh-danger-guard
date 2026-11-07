@@ -1,7 +1,7 @@
 // test/messages.test.ts —— 逐语言展示文案的**全语言映射**（lib/messages.ts）。
 //
 // 为什么单独一份：`displayReasonOf` 的唯一进程内调用方已并入 lib/confirm.ts 的
-// displayReasonWithNote（那里要"规则本文 + 档位说明"两段拼接）；这一枚仍是**发布面**
+// displayReasonWithNote（那里要"规则本文 + 档位说明"两段拼接）；这一枚仍是**发布名单**
 // 的导出（官方 `displayReason` 的形状铸造器），它"逐 locale 取、语言集扩宽时自动跟上"
 // 的契约由这里钉住——按 Locale 泛化的写法不被退化成写死 `{ zh, en }`。
 import { describe, it } from "vitest";

@@ -1,7 +1,7 @@
 /** build-client.mjs 的声明（供 test/build-client.test.ts 等 TS 侧类型化导入）。 */
 export function buildClient(): Promise<string>;
 /**
- * rolldown 外部化判据：登记过的精确说明符外置，react 家族里没登记的说明符抛错。
+ * rolldown 外部化判据：登记过的精确模块说明符外置，react 家族里没登记的说明符抛错。
  *
  * @param id rolldown 交来的说明符
  * @returns 是否外置

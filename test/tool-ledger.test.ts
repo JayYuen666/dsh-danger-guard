@@ -1,5 +1,5 @@
 /**
- * 等价用例（投影的验收面，danger-guard 侧）：同一个事件数组分别喂
+ * 等价用例（投影的验收内容，danger-guard 侧）：同一个事件数组分别喂
  *   - 旧读法：shared `scanToolEvents`（host.ts 迁移前唯一的取数口），与
  *   - 新读法：投影折叠（test/ledger-fold.ts 沿单元的 `init`/`apply` 驱动，与官方 drive
  *     同一条路）+ 读侧换算（callsOf / resultsOf）。
@@ -42,7 +42,7 @@ const callRowAt = (seq: number): LedgerCallRow => ({
   seq,
 });
 
-// 事件先攒进本模块的数组，再由用例一次喂两条读法（夹具负责 seq/品牌位）。
+// 事件先攒进本模块的数组，再由用例一次喂两条读法（seq 递增与 `brand` 标记都由夹具补）。
 const collected: SessionEvent[] = [];
 
 /** 与 fixtures/events.ts 的 seq 归零同一条纪律：残留事件会和新事件撞事件位，
@@ -146,7 +146,7 @@ describe("投影台账 ≡ scanToolEvents", () => {
     );
   });
 
-  it("检索三形态（pattern 口径与 strict-relative 口径的 args 形状都进表）", () => {
+  it("检索三形态（pattern 规则与 strict-relative 规则的 args 形状都进表）", () => {
     push(
       call("g1", "grep", '{"pattern":"b","path":"/a","include":"*.ts"}'),
       result("g1"),
@@ -154,7 +154,7 @@ describe("投影台账 ≡ scanToolEvents", () => {
       result("z1", true),
     );
     const ledger = assertSameLedger();
-    // 两种口径的 args 形状各自原样进表（判据在 host 侧现读，台账不改写参数）。
+    // 两种规则的 args 形状各自原样进表（判据在 host 侧现读，台账不改写参数）。
     assert.deepEqual(ledger.calls, [
       {
         name: "grep",
@@ -303,7 +303,7 @@ describe("投影台账 ≡ scanToolEvents", () => {
       badEvent({ type: "tool/result", data: { message: { source: {}, content: [] } } }),
     );
     const ledger = assertSameLedger();
-    // 状态面把"没有 callId"写成 null（JSON 往返友好），读回 shared 记录时还原成 undefined，
+    // 状态把"没有 callId"写成 null（JSON 往返友好），读回 shared 记录时还原成 undefined，
     // 由调用方按 seq 造保守键——两头都钉住，免得某侧悄悄把 null 当真实串联键。
     assert.deepEqual(ledger.calls, [
       {
@@ -414,7 +414,7 @@ describe("stateOf 回填与单元形状", () => {
   it("json 往返后的状态仍被采信（持久缓存那条路）", () => {
     push(call("c1", "read", READ_ARGUMENTS_JSON), result("c1"));
     const state = foldLedger(pendingEvents());
-    // 持久缓存那一层按 JSON 落盘，这条用例钉的就是那条路。
+    // 持久缓存那一层按 JSON 写到磁盘，这条用例钉的就是那条路。
     // oxlint-disable-next-line unicorn/prefer-structured-clone -- 判据要的正是 JSON 语义：undefined 键在 stringify 时整枚消失、structuredClone 会留着它 ⇒ 换成后者即测不到那一位，用例失去对象
     const restored = asLedger(JSON.parse(JSON.stringify(state)));
     assert.ok(restored !== undefined, "状态里没有 undefined 键可被 stringify 丢掉");
@@ -500,7 +500,7 @@ describe("stateOf 回填与单元形状", () => {
     );
   });
 
-  it("重投递幂等：seq 已折过的同一事件再投一遍，行不重复追加（不提前撞窗口作废）", () => {
+  it("重发送幂等：seq 已折过的同一事件再投一遍，行不重复追加（不提前撞窗口作废）", () => {
     const first = call("c1", "read", READ_ARGUMENTS_JSON);
     const settled = result("c1");
     const state = foldLedger([first, settled]);
@@ -537,7 +537,7 @@ describe("stateOf 回填与单元形状", () => {
   });
 
   it("持久行的 name 为 null 或缺失 ⇒ 判为不可采信，回退全量扫描", () => {
-    // 升级兼容面：老用户磁盘上躺着 name: null 的行。判据交给 zod（name 现在必填串），
+    // 升级兼容：老用户磁盘上躺着 name: null 的行。判据交给 zod（name 现在必填串），
     // 整份台账作废、读侧交回 undefined，host 回退全量扫描 = 迁移前的行为——宁可多扫一次，
     // 也不能让一份形状对不上的旧表参与新鲜度判定。
     assert.equal(
@@ -558,7 +558,7 @@ describe("stateOf 回填与单元形状", () => {
       dropped: false,
     };
     assert.equal(asLedger(missingKey), undefined);
-    // 非字符串的 name（数字/对象）同样判不过——类型面被绕过时 zod 才是最后一道闸。
+    // 非字符串的 name（数字/对象）同样判不过——类型上被绕过时 zod 才是最后一道闸。
     for (const name of [7, {}, [], true]) {
       assert.equal(
         asLedger({

@@ -16,7 +16,7 @@
 //   3) 对照支：会话 cwd 确实是祖先时，起点仍取 cwd（范围更大），不回退成目标父目录。
 //   起点从文案的反引号路径里取（与语言无关）：文案改版只会让用例红，不会静默失效。
 //   唯一的例外是 TEST_LAYER_REQUIREMENT：「这一层有没有被算进缺项」在 guard 的返回值里
-//   没有非文案的可观察面（那一面只有 allow/deny 与路径），所以它只能比对文案里的那枚标记，
+//   没有非文案的可观察接口（那里只有 allow/deny 与路径），所以它只能比对文案里的那枚标记，
 //   收成具名常量是为了改版时只有一处要改、且红的是「判据没了」而不是散在各用例里的字符串。
 import { describe, it, afterAll, beforeAll } from "vitest";
 import assert from "node:assert/strict";
@@ -26,11 +26,11 @@ import path from "node:path";
 import plugin, { BUILTIN_BASE } from "../host.ts";
 import type { Config } from "../host.ts";
 import { SETTINGS_READER } from "../lib/settings-schema.ts";
-// 会话日志出自官方 SessionEvent 夹具构造器（信封必填位与品牌都在夹具里补一次）。
+// 会话日志出自官方 SessionEvent夹具构造器（信封必填位与 `brand` 标记都在夹具里补一次）。
 import { call as fxCall, result as fxResult } from "./fixtures/events.ts";
 import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 
-// ── 轻量宿主替身（同 test/host-tier-settings.test.ts 契约，只实现本用例用到的面）──
+// ── 轻量宿主替身（同 test/host-tier-settings.test.ts契约，只实现本用例用到的类型）──
 interface MockCtx {
   tools: {
     guard: (fn: (exec: { name?: string; arguments?: unknown }) => string | undefined) => () => void;
@@ -73,7 +73,7 @@ function createMockCtx(): MockCtx {
 }
 
 /**
- * 一次 guard 调用，工具面固定为 `write`：三处用例测的都是「新建文件」那条路
+ * 一次 guard 调用，工具这一层固定为 `write`：三处用例测的都是「新建文件」那条路
  * （新建免 read 由 `creatable` 决定，正是本次修复要覆盖的档位）。
  * `cwd` 走 `session.header.cwd` —— 本替身不挂 workingDirectory 服务，于是
  * `effectiveCwdOf` 正好落到 header 这条回退读上，会话在哪儿办公由用例指定。
@@ -103,13 +103,13 @@ function searchEvents(searchPath: string, pattern: string): SessionEvent[] {
 /** 与生产侧同一条不变式（此处独立重述：生产侧改语义时这里必须红，不能跟着一起漂）。
  *
  *  补的必须是**平台分隔符**：两枚入参都是宿主真实路径，Windows 上是 `\` 分隔。
- *  重述不等于可以抄错——写死 `/` 时这条断言在 Windows 上恒假，红的是测量而不是被测对象。 */
+ *  重述不等于可以抄错——写死 `/` 时这条断言在 Windows 上永远不成立，红的是测量而不是被测对象。 */
 const isAncestorDir = (candidate: string, target: string): boolean =>
   candidate !== target &&
   target.startsWith(candidate.endsWith(path.sep) ? candidate : `${candidate}${path.sep}`);
 
 /**
- * 「test 层被算进缺项」在拒绝文案里的标记（同 test/ledger-lifecycle.test.ts 的 TEST_LAYER_GAP 一处口径）。
+ * 「test 层被算进缺项」在拒绝文案里的标记（同 test/ledger-lifecycle.test.ts 的 TEST_LAYER_GAP 一处规则）。
  * 默认语言文案，替身不给 locale 描述符（见上面 createMockCtx 那条注释）。
  */
 const TEST_LAYER_REQUIREMENT = /test 层触达/u;
@@ -202,7 +202,7 @@ describe("项目根回落与引用取证起点必须同源（提示可照做）"
     );
   });
 
-  it("真实项目内：检索起点仍是最近的工程标记目录（回落修复不影响既有口径）", async () => {
+  it("真实项目内：检索起点仍是最近的工程标记目录（回落修复不影响既有规则）", async () => {
     const ctx = createMockCtx();
     plugin.apply(ctx as never);
     const target = path.join(projectRoot, "src", "mod.ts");
@@ -271,7 +271,7 @@ describe("项目根回落与引用取证起点必须同源（提示可照做）"
     const narrowDenial = fire(ctx, { target, sessionId: "layer-scope", cwd: narrow });
     assert.ok(
       typeof narrowDenial === "string" && narrowDenial.length > 0,
-      "窄根会话必须先给拒绝理由（否则下面的负向断言是空转）",
+      "窄根会话必须先给拒绝理由（否则下面的负向断言没有实际校验作用）",
     );
     assert.ok(
       !TEST_LAYER_REQUIREMENT.test(narrowDenial),

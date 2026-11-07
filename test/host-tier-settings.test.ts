@@ -22,21 +22,21 @@ import type { Config } from "../host.ts";
 import { SETTINGS_READER } from "../lib/settings-schema.ts";
 import { DEFAULT_BIG_EDIT_CHARS, DEFAULT_SMALL_EDIT_CHARS } from "../lib/fact-gate.ts";
 // 会话日志一律出自官方 SessionEvent 夹具构造器（信封必填位与 ToolCallId/MessageId/
-// SessionSeq 品牌都在夹具里补一次）；fx 前缀避开与 makeEvents() 交出的局部 `call` 遮蔽。
+// SessionSeq 的 `brand` 标记都在夹具里补一次）；fx 前缀避开与 makeEvents() 交出的局部 `call` 遮蔽。
 import { call as fxCall, result as fxResult } from "./fixtures/events.ts";
-// 事件类型与生产面（host.ts）同源：官方判别联合由 shared 具名 re-export。
+// 事件类型与生产代码（host.ts）同源：官方判别联合由 shared 具名 re-export。
 import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 
-// ── 轻量宿主替身（同 test/host.test.ts 契约，只实现本用例用到的面）──────────
+// ── 轻量宿主替身（同 test/host.test.ts契约，只实现本用例用到的类型）──────────
 interface MockCtx {
   tools: {
     guard: (fn: (exec: { name?: string; arguments?: unknown }) => string | undefined) => () => void;
   };
-  /** 0.1.7 的 settings 面：拦截半只调 describe()（locale 偏好读面）。 */
+  /** 0.1.7 的 settings 面：拦截半只调 describe()（locale 偏好读取接口）。 */
   settings: {
     describe: () => { ns: string; value: unknown; revision: number }[];
   };
-  /** cordis 可选服务读法：只给设置条目挂出的值面读数口。 */
+  /** cordis 可选服务读法：只给设置条目挂出的值取值接口。 */
   get: (name: string) => unknown;
   guardInstalled: {
     fn: (exec: { name?: string; arguments?: unknown }) => string | undefined;
@@ -50,7 +50,7 @@ function createMockCtx(): MockCtx {
   const ctx: MockCtx = {
     guardInstalled: null,
     effects: [],
-    // 内置默认底座 + 本文件关心的开关（与迁移前 register 的 base 同一份单源）
+    // 内置默认底座 + 本文件关心的开关（与迁移前 register 的 base 同一份唯一来源）
     value: { ...BUILTIN_BASE },
     tools: {
       guard(fn) {
@@ -155,7 +155,7 @@ const TARGET_MOD_NAME = "target-mod.ts";
 /** 大改：合计 3000 字符 > 默认 big(2000) → 默认升 high。 */
 const LARGE = { old_string: "x".repeat(1500), new_string: "y".repeat(1500) };
 
-// ── fs 事实面：存在性三态 / 外部改动归因 / 内容自证 ──────────────────────────
+// ── fs 事实：存在性三态 / 外部改动归因 / 内容自证 ──────────────────────────
 /** 显式的时间点（不依赖 fs 时间戳粒度：clone/touch 下 mtime 不稳定）。 */
 const T0 = new Date("2026-01-01T00:00:00.000Z");
 const T1 = new Date("2026-02-01T00:00:00.000Z");
@@ -199,7 +199,7 @@ const fireWith = (
  *
  *  ⚠ 为什么不能直接用 `mkdtemp` 的返回值：Windows 上它可能是 **8.3 短名**
  *（`RUNNER~1`），而产品的层判定用 `realpath` 后的**长名**报给模型 —— 拿短名当期望值时
- *  `denied.includes(期望)` 恒假（实测 Windows runner 上因这一条红）。
+ *  `denied.includes(期望)` 永远不成立（实测 Windows runner 上因这一条红）。
  *  派生之后，夹具里所有路径字符串与产品内部看到的同一形。
  *
  *  @param prefix 临时目录前缀。
@@ -213,7 +213,7 @@ const makeFixtureRoot = async (prefix: string): Promise<string> => {
 describe("host 运行路径接线（三档分级、层要求与外部改动归因）", () => {
   beforeAll(async () => {
     // ⚠ `mkdtemp` 交回的可能是 **8.3 短名**（Windows 上是 `RUNNER~1`），而产品的层判定用
-    // `realpath` 后的**长名**报给模型 —— 拿短名当期望值时 `denied.includes(期望)` 恒假
+    // `realpath` 后的**长名**报给模型 —— 拿短名当期望值时 `denied.includes(期望)` 永远不成立
     //（实测 Windows runner 上这条红：文案里是 `...\\runneradmin\\...`，期望是 `...\\RUNNER~1\\...`）。
     // 所以夹具根一律从 `realpath` 结果派生：后续所有路径字符串与产品内部看到的同一形。
     root = await makeFixtureRoot("dg-tier-");
@@ -257,7 +257,7 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
     it("常量 builtin_base 四个新字段存在，且阈值默认值来自 lib 单源（防三处漂移）", () => {
       const ctx = createMockCtx();
       apply(ctx);
-      // 0.1.7 不再有 register 的 base 参数：底座就是拦截半读不到设置值面时回落的那一份
+      // 0.1.7 不再有 register 的 base 参数：底座就是拦截半读不到设置值时回落的那一份
       // （BUILTIN_BASE 与 ConfigSchema 的 .default(...) 同源，见 lib/settings-schema.ts）。
       assert.equal(BUILTIN_BASE.strictMode, false, "strictMode 默认关");
       assert.equal(BUILTIN_BASE.smallEditChars, DEFAULT_SMALL_EDIT_CHARS, "small 默认取 lib 常量");
@@ -307,7 +307,7 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
       assert.ok(denied !== undefined, "3000 字符 > 默认 big(2000) → high，仍要求层探查");
       assert.match(denied, /层目录/u, "拒绝文案点名缺失的层目录（不是泛泛模板）");
       // 点名的必须是真实存在的 test 层目录本身——第二个析取（含 "test" 字样）会把
-      // 文案模板里的字面 "test" 也算命中，恒真、失去判别力，故只认目录路径。
+      // 文案模板里的字面 "test" 也算命中，永远成立、失去判别力，故只认目录路径。
       assert.ok(denied.includes(stdTestDir), "点名的正是真实存在的 test 层");
 
       ctx.value.bigEditChars = 100_000;

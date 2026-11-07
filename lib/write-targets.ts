@@ -1,12 +1,12 @@
 // lib/write-targets.ts —— 写调用的目标清单、风险事实与档位。
 //
-// 从 host.ts 抽出：`apply_patch` 是多目标补丁，目标解析与逐目标口径已经自成一体；
+// 从 host.ts 抽出：`apply_patch` 是多目标补丁，目标解析与逐目标规则已经自成一体；
 // 把它们和 `riskFactsOf`/`tierOf` 放在同一处，host 只保留调用与判定接线。
 
 import { applyPatchTargetsOf } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 import { editTargetPath } from "./danger-rules.ts";
 
-/** 触及导出面/签名的关键字：改动文本含这些词 → 波及面大概率超出文件自身，升档。 */
+/** 触及导出名单/签名的关键字：改动文本含这些词 → 影响范围大概率超出文件自身，升档。 */
 const SIG_KEYWORD_RE =
   /\b(?:export|default|declare|pub|fn|func|def|class|interface|type|enum|struct|trait|impl|public|protected)\b/u;
 
@@ -14,7 +14,7 @@ const SIG_KEYWORD_RE =
 const RISKY_PATH_RE =
   /(?:^|[/\\])(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|npm-shrinkwrap\.json|bun\.lockb?|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|pyproject\.toml|poetry\.lock|uv\.lock|requirements\.txt|setup\.py|tsconfig[^/]*\.json|vite\.config\.[cm]?[jt]s|webpack\.config\.[cm]?js|cordis\.(?:ya?ml|json)|Makefile|Dockerfile|docker-compose\.ya?ml|\.env(?:\.[\w-]+)?|schema\.sql)$/u;
 
-/** 取证档位（定稿：按写面风险分档，配 strictMode 回到"每文件全探查"）。 */
+/** 取证档位（定稿：按写入风险分档，配 strictMode 回到"每文件全探查"）。 */
 export type FactTier = "low" | "mid" | "high";
 
 interface RiskFacts {
@@ -22,9 +22,9 @@ interface RiskFacts {
   creatable: boolean;
   /** 高风险路径（manifest/lockfile/CI/装配）。 */
   riskyPath: boolean;
-  /** 改动文本是否触及导出面/签名关键字。 */
+  /** 改动文本是否触及导出名单/签名关键字。 */
   sigChanged: boolean;
-  /** 写面字符数；**取不到**（write 整文件覆盖、str_replace_editor edits 数组、apply_patch）。 */
+  /** 写入字符数；**取不到**（write 整文件覆盖、str_replace_editor edits 数组、apply_patch）。 */
   contentChars: number | undefined;
   strictMode: boolean;
   smallChars: number;
@@ -44,7 +44,7 @@ export function tierOf(facts: RiskFacts): FactTier {
   if (facts.sigChanged) {
     return "high";
   }
-  // 取不到写面大小 → 保守升档
+  // 取不到写入大小 → 保守升档
   if (facts.contentChars === undefined) {
     return "high";
   }
@@ -106,7 +106,7 @@ export interface WriteTargetScan {
   readonly overflow: boolean;
 }
 
-/** 同一路径在补丁里出现多次时按最保守的一侧收口：只要有一次是更新/删除，就不是新文件。 */
+/** 同一路径在补丁里出现多次时按最保守的一侧统一处理：只要有一次是更新/删除，就不是新文件。 */
 export function dedupeWriteTargets(targets: readonly WriteTarget[]): readonly WriteTarget[] {
   const byPath = new Map<string, boolean>();
   for (const target of targets) {

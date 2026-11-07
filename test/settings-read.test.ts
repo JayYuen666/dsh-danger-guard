@@ -1,6 +1,6 @@
-// test/settings-read.test.ts —— 设置值面的防御性读取：数值与数组字段的降级口径。
+// test/settings-read.test.ts —— 设置值的防御性读取：数值与数组字段的降级规则。
 //
-// 这一层兜的是未经设置 schema 校验的值面（降级注册后的持久段、旧版本残留、手改 profile）。
+// 这一层兜的是未经设置 schema 校验的值（降级注册后的持久段、旧版本残留、手改 profile）。
 // 判据只有一条：读不懂就回落内置默认，绝不把脏值读成"更宽松"的阈值。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { DEFAULT_BIG_EDIT_CHARS, DEFAULT_SMALL_EDIT_CHARS } from "../lib/fact-gate.ts";
 import { editThresholdsOf, numOf, strArray } from "../lib/settings-read.ts";
 
-/** 一份最小可用的设置值面（其余键由默认底座补齐）。 */
+/** 一份最小可用的设置值（其余键由默认底座补齐）。 */
 function builtin(): Parameters<typeof editThresholdsOf>[0] {
   return {
     enabled: true,

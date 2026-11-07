@@ -1,16 +1,16 @@
 // 设置卡契约测试（happy-dom + react-dom/act）。
 // 真实契约（0.1.7 的 dsh-client-ui-settings ConfigForm，installed
 // lib/types/client/config-form-types.d.ts 的 ConfigForm + ConfigFormSnapshot，两份接口都在那一份 d.ts 里）——本文件的
-// 表单桩件**直接 import 官方那两个类型**（type-only，不引运行时代码），所以宿主改字段名
-// 或取值域时桩件这里先编译失败，而不是像原先的本地 mirror 一样静默漂移：
+// 表单测试替身**直接 import 官方那两个类型**（type-only，不引运行时代码），所以宿主改字段名
+// 或取值域时测试替身这里先编译失败，而不是像原先的本地 mirror 一样静默漂移：
 //   snapshot 6 位全必选：status: 'loading' | 'ready' | 'unavailable'（:12）、
 //   value: T | undefined（:14，首个快照受理前才是 undefined）、base/user/revision
 //   snapshot.writable: boolean（恒存在，独立于 status 的可写位，:29）
 //   表单五位在位：getSnapshot/subscribe/**mutate**/set/unset；后两者回
-//   Promise<boolean>（:65/:73 受理位：false = 宿主拒绝/跳过，传输失败才 reject）
+//   Promise<boolean>（:65/:73 受理结果：false = 宿主拒绝/跳过，传输失败才 reject）
 //   契约里**没有** dispose —— 表单归 provider 持有（config-form.d.ts:138-142）
 // 卡片侧本地 iface 仍是 Promise<void>（apply 的 payload 把 false 翻成 rejection，走卡片
-// 既有的失败面），入口从 ctx.settingsScope.bind({namespace}) 换成
+// 既有的失败），入口从 ctx.settingsScope.bind({namespace}) 换成
 // ctx.configForms.get(条目 id)。
 // 要求：
 //   1) status!=='ready' 或 writable=false 时开关 disabled（两者都满足才让写）；
@@ -32,7 +32,7 @@ import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-
 import type { Context } from "@deepseek-ai/cordis";
 import type { BuiltInLocaleId } from "@deepseek-ai/dsh-client-locale/client";
 import type { LocaleDictOf } from "@deepseek-ai/dsh-client-ui-slots";
-// 假件的入参面按 `apply` 的官方 ClientCtx 投影来 checked（`Parameters<typeof …>[0]`）：
+// 假件的入参按 `apply` 的官方 ClientCtx 投影来 checked（`Parameters<typeof …>[0]`）：
 // type-only，不给本文件加运行时依赖（卡片仍是下面按需 dynamic import 的，happy-dom 全局
 // 得先就位）。
 import type { apply as clientApply } from "../src/client-entry.ts";
@@ -171,8 +171,8 @@ function fillTemplate(text: string, params: Record<string, unknown>): string {
  * `Element implicitly has an 'any' type because expression of type
  *  'LocaleKeysOf<"danger-guard">' can't be used to index type 'UiMessages'.
  *   Property 'back' does not exist on type 'UiMessages'`
- * ——`back` 属于官方 `common` 词表，说明原先手抄的 `(key: keyof UiMessages, …) => string`
- * 比官方面**窄**：卡面上的 `t` 其实受理那枚并集，只是本包字典不认领其中的 common 键。
+ * ——`back` 属于官方 `common` 词表，说明原先自己抄的 `(key: keyof UiMessages, …) => string`
+ * 比官方面**窄**：卡片上的 `t` 其实受理那枚并集，只是本包字典不认领其中的 common 键。
  */
 function localeText(
   dict: Record<string, string>,
@@ -196,7 +196,7 @@ function placeholders(template: string): Set<string> {
 
 /** 官方表单快照（installed config-form-types.d.ts:6-32）：**6 位全必选**
  *  （status 恒为三态之一、value 在首个快照受理前才是 undefined、base/user/revision
- *  恒在位）。桩件交得出这个面，宿主改字段名/取值域时这里先编译失败。 */
+ *  恒在位）。测试替身交得出这一类，宿主改字段名/取值域时这里先编译失败。 */
 type Snap = ConfigFormSnapshot<Record<string, unknown>>;
 
 /** 造一份合法快照：只写要变的位，其余取官方允许的真实默认（ready / 可写 / host 模式）。 */
@@ -212,7 +212,7 @@ function snap(over: Partial<Snap> = {}): Snap {
   };
 }
 
-/** 卡片自己的渲染视模型（= src 的 CardSnapshot，官方快照的三面 + value 兜底）：
+/** 卡片自己的渲染视模型（= src 的 CardSnapshot，官方快照的三处 + value 兜底）：
  *  status/writable 在官方快照上是**必选**位，故这里也不留可选。 */
 interface CardView {
   status: Snap["status"];
@@ -220,9 +220,9 @@ interface CardView {
   value: Record<string, unknown>;
 }
 
-/** 0.1.7 的表单消费面：**直接绑官方 `ConfigForm<Record<string, unknown>>`**
+/** 0.1.7 的表单消费方：**直接绑官方 `ConfigForm<Record<string, unknown>>`**
  *  （installed config-form-types.d.ts 的 ConfigForm：getSnapshot/subscribe/mutate/set/unset），
- *  set/unset 回**受理位** boolean（true 宿主受理 / false 拒绝或写入被跳过，只有传输失败
+ *  set/unset 回**受理结果** boolean（true 宿主受理 / false 拒绝或写入被跳过，只有传输失败
  *  才 reject）。契约里**没有 dispose**——本 mock 额外挂一个会抛的 dispose 纯作绊线
  *  （见 disposeTripwire）。 */
 type ConfigFormMock = ConfigForm<Record<string, unknown>> & { dispose: () => never };
@@ -288,7 +288,7 @@ const PROVIDED_SERVICES = new Set([
   "settingsScope",
 ]);
 
-/** 给 ctx 桩件套上 cordis 的 inject 门禁（见调用点那段说明）。 */
+/** 给 ctx测试替身套上 cordis 的 inject门禁（见调用点那段说明）。 */
 function guardUndeclaredServices<Shape extends object>(target: Shape): Shape {
   return new Proxy(target, {
     get(source, prop, receiver) {
@@ -312,9 +312,9 @@ async function loadCard(): Promise<{
   ) => ConfigFormMock & { push: (value: Snap) => void };
   /** apply 期间注册进官方 locale 的字典（命名空间 + 语言 + 该语字典），供双语断言。
    *  官方 `register` 的类型化重载是**一次交齐两语**的（installed
-   *  `dsh-client-locale/lib/types/client/index.d.ts:199`），桩件在这里按语言摊平成逐语
-   *  记录，好让下面的断言与「两语各注册一次」的旧形状逐字同形。字典面直接绑官方
-   *  `LocaleDictOf<本包命名空间>`：本包少一个键、多一个键都先在桩件这里编译失败。 */
+   *  `dsh-client-locale/lib/types/client/index.d.ts:199`），测试替身在这里按语言摊平成逐语
+   *  记录，好让下面的断言与「两语各注册一次」的旧形状逐字同形。字典内容直接绑官方
+   *  `LocaleDictOf<本包命名空间>`：本包少一个键、多一个键都先在测试替身这里编译失败。 */
   locales: { ns: string; localeId: string; dict: LocaleDictOf<LocaleNs> }[];
   /** ctx.effect 的回收函数（样式 + locale 字典各一个）。 */
   effectDisposers: (() => void)[];
@@ -326,7 +326,7 @@ async function loadCard(): Promise<{
   slotDescs: { name: string; key: string | undefined }[];
   /** 最后一次 register 的 payload（slots.inject 工厂产出，含 set/unset/hooks.card）。 */
   payload: Record<string, unknown> | null;
-  /** 改宿主受理位：false = 传输成功但宿主拒绝/跳过这次写入。 */
+  /** 改宿主受理结果：false = 传输成功但宿主拒绝/跳过这次写入。 */
   setWriteAccepted: (accepted: boolean) => void;
   /** slots.inject 工厂返回的 disposer 清单（loadCard 只记录，由用例决定何时调用）。 */
   slotCleanups: (() => void)[];
@@ -352,7 +352,7 @@ async function loadCard(): Promise<{
   const formWrites: { field: string; value: unknown }[] = [];
   const slotDescs: { name: string; key: string | undefined }[] = [];
   const slotCleanups: (() => void)[] = [];
-  /** 宿主对 `set`/`unset` 的受理位。用例可改成 false 模拟"拒绝受理"（传输仍成功）。 */
+  /** 宿主对 `set`/`unset` 的受理结果。用例可改成 false 模拟"拒绝受理"（传输仍成功）。 */
   let writeAccepted = true;
   const fakeForm: ConfigFormMock = {
     getSnapshot: () => snap(),
@@ -365,12 +365,12 @@ async function loadCard(): Promise<{
       formWrites.push({ field, value: undefined });
       return Promise.resolve(writeAccepted);
     },
-    // 官方 ConfigForm 的第五位（路径级原子写入）：本卡不走它，但类型面要求它在位。
+    // 官方 ConfigForm 的第五位（路径级原子写入）：本卡不走它，但类型上要求它在位。
     mutate: async () => true,
     dispose: disposeTripwire,
   };
   /**
-   * 假件按 `apply` 的入参面构造：`effect` / `slots` 在 ClientCtx 里已是**官方**服务投影
+   * 假件按 `apply` 的入参构造：`effect` / `slots` 在 ClientCtx 里已是**官方**服务投影
    * （cordis `Context["effect"]` 与 `Pick<SlotRegistry, "inject" | "register">`），故签名
    * 一漂移就红在编译期，而不是跑到一半才崩。两处不得已的显式标注：
    *  - `effect`：官方是**两**个重载（`execute: () => SyncEffect` 回 `Disposable`，
@@ -378,7 +378,7 @@ async function loadCard(): Promise<{
    *    `@deepseek-ai/cordis/lib/types/fiber.d.ts:157-159`），单个箭头签名满足不了两条
    *    （实测 TS2345：`Type 'SyncEffect<any>' is not assignable to type
    *    '(() => void) | undefined'` — 官方那一支还允许工厂交 `Iterable<Disposable>`），
-   *    故一次性投影到官方面：假件只回收同步 disposer，那个返回面没人消费；
+   *    故一次性投影到官方面：假件只回收同步 disposer，那个返回类型没人消费；
    *  - `register`：官方是**双重载**（`inject?: undefined` 与 `inject: (…) => I`），
    *    重载目标推不出上下文参数类型（TS7006），故按 `unknown` 收、在桩内一次性投影回
    *    本卡实际传的那一重载。
@@ -395,11 +395,11 @@ async function loadCard(): Promise<{
     slots: {
       // 官方 `SlotRegistry.inject(key, …)`：key 的取值域就是合并后的 `SlotMap`，本卡的
       // `plugins.bundle.config` 能出现在这里靠的是 src 侧从属主包载入的那份 merge；它回的
-      // 是一枚 idempotent disposer（旧手抄面写的是 `void`，把这一步藏掉了）。参数不叫
+      // 是一枚 idempotent disposer（旧的自己抄类型写的是 `void`，把这一步藏掉了）。参数不叫
       // `callback`（那会撞 eslint `callback-return` / `prefer-await-to-callbacks`）。
       inject: (_key, install) => {
         // 官方 `SlotInjectionEffect` = 一枚 disposer 或一组 disposer（本卡是前者）。
-        // 真实槽位在 collapse 时才调用它，桩件只记录，注册保持到用例显式回收。
+        // 真实槽位在 collapse 时才调用它，测试替身只记录，注册保持到用例显式回收。
         const cleanup = install();
         if (typeof cleanup === "function") {
           slotCleanups.push(cleanup);
@@ -444,7 +444,7 @@ async function loadCard(): Promise<{
           registered.push(row);
         }
         // 官方 disposer 只注销本次注册（installed `register` 回一枚 disposer）；
-        // 桩件照此从记录里摘掉本次条目，好让「回收后已注销」可断言。
+        // 测试替身照此从记录里摘掉本次条目，好让「回收后已注销」可断言。
         return () => {
           for (const row of registered) {
             const index = locales.indexOf(row);
@@ -458,12 +458,12 @@ async function loadCard(): Promise<{
       bind: () => tZh,
     },
   };
-  // ⚠ 桩件外套一层 **cordis 的 inject 门禁**：真宿主里"别人 provide 的服务"若不在本条目的
+  // ⚠测试替身外套一层 **cordis 的 inject门禁**：真宿主里"别人 provide 的服务"若不在本条目的
   // `inject` 清单里，读它就是**抛错**（`cannot get property "x" without inject`，见 cordis 的
-  // `reflect` 服务面）。普通对象桩件不套这层，就会让"未 inject 就取服务"这类错误一路绿 ——
+  // `reflect` 宿主服务）。普通对象测试替身不套这层，就会让"未 inject 就取服务"这类错误一路绿 ——
   // 0.1.3 正是这么发出去的：`ctx.remote` 一读就抛，web boot 直接失败（页面卡在错误页），
-  // 而当时的产物与全部用例都是绿的。这层只拦 `PROVIDED_SERVICES` 名单内的名字：桩件还要收
-  // 测试框架与本包自己塞的普通属性，一律抛会让桩件本身先炸。
+  // 而当时的产物与全部用例都是绿的。这层只拦 `PROVIDED_SERVICES` 名单内的名字：测试替身还要收
+  // 测试框架与本包自己塞的普通属性，一律抛会让测试替身本身先炸。
   const guardedCtx = guardUndeclaredServices(fakeCtx);
   (exported["apply"] as (ctx: unknown) => void)(guardedCtx);
   assert.ok(capturedView !== null, "slots.register 捕获到卡片 view");
@@ -645,7 +645,7 @@ describe("b11：danger-guard 设置卡", () => {
         t: tZh,
         useCard: useCardOf(view),
         set: (field: string, value: unknown) => {
-          // 0.1.7 的表单回 Promise<boolean>（受理位），卡片 iface 收成 Promise<void>
+          // 0.1.7 的表单回 Promise<boolean>（受理结果），卡片 iface 收成 Promise<void>
           //（cardWrites 与 client-entry 里 payload 的包装同形）——这里记下的正是 iface 那条。
           setResult = cardWrites(scope).set(field, value);
           return setResult as Promise<void>;
@@ -722,7 +722,7 @@ describe("b11：danger-guard 设置卡", () => {
     assert.equal(
       calls.some((call) => call.field === "strictMode"),
       true,
-      "A 已落盘",
+      "A 已写到磁盘",
     );
     // 再点保存：只写 B，且 A 不重复写。
     await act(async () => {
@@ -736,7 +736,7 @@ describe("b11：danger-guard 设置卡", () => {
     assert.equal(
       calls.filter((call) => call.field === "strictMode").length,
       1,
-      "已落盘的 A 不重复写",
+      "已写到磁盘的 A 不重复写",
     );
   });
 
@@ -776,7 +776,7 @@ describe("b11：danger-guard 设置卡", () => {
     external = { extraDevServerWords: ["remix"] };
     await rerender();
     assert.match(at()!.value, /remix/u, "外部值变化回同步");
-    // 连续输入只入草稿、不直写（保存条模式）：多次 onChange 后「保存」一次性落盘。
+    // 连续输入只入草稿、不直写（保存条模式）：多次 onChange 后「保存」一次性写到磁盘。
     // happy-dom 的合成 change 事件到不了 React 19 的受控 input（已实证；按钮 click
     // 是通的，见本文件各 click() 用例）——经 __reactProps 直调真实 onChange：
     // state、草稿、写通道全是真实链路，只绕过 DOM 事件传输层（那是 React/happy-dom
@@ -906,7 +906,7 @@ describe("b11：danger-guard 设置卡", () => {
     await act(async () => {
       record[propsKey]!.onChange({ target: { value: String.raw`/id_dsa$|\.p12$/i` } });
     });
-    // 点「保存」落盘
+    // 点「保存」写到磁盘
     let save = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR);
     assert.ok(save, "保存按钮存在");
     await act(async () => {
@@ -1148,18 +1148,18 @@ describe("b11：danger-guard 设置卡", () => {
       await loadCard();
     // 负向对照：这层 inject 门禁**真的会抛**（否则"apply 不抛"那条判据等于没判）。
     // 0.1.3 就是在这一条上发出去的：`ctx.remote` 未 inject ⇒ 读即抛 ⇒ web boot 失败、页面卡死。
-    // 逐个名字验，不抽查一个：名单是这道桩件的全部射程，某一枚其实拦不住时，
+    // 逐个名字验，不抽查一个：名单是这道测试替身的全部射程，某一枚其实拦不住时，
     // 「源码回退去读它」仍然一路绿。
     const guarded = guardedCtx as Record<string, unknown>;
     for (const name of PROVIDED_SERVICES) {
       assert.throws(
         () => guarded[name],
         /without inject/u,
-        `门禁桩件必须能复现真宿主对 "${name}" 的 inject 拒绝`,
+        `门禁测试替身必须能复现真宿主对 "${name}" 的 inject 拒绝`,
       );
     }
     // inject 清单就是装配契约：`settingsScope` 在 installed 0.1.7 全树零命中，留着它整条
-    // client 入口挂不上（症状正是"设置卡静默消失"）。替代面 = configForms（installed
+    // client 入口挂不上（症状正是"设置卡静默消失"）。替代入口 = configForms（installed
     // dsh-client-ui-settings/lib/types/client/config-form.d.ts:94-98 的 Context 增强、
     // :142 的 get<T>(entryId): ConfigForm<T>）。精确全等，不放宽为包含判定。
     assert.deepEqual(injectList, ["slots", "configForms", "locale"]);
@@ -1221,7 +1221,7 @@ describe("b11：danger-guard 设置卡", () => {
     const setResult = write.set("maxDenies", 4);
     const unsetResult = write.unset("strictMode");
     assert.ok(setResult instanceof Promise && unsetResult instanceof Promise, "iface 交出 Promise");
-    // 0.1.7 的受理位（Promise<boolean>）在 payload 处被 await 掉、**不外泄**给卡片：
+    // 0.1.7 的受理结果（Promise<boolean>）在 payload 处被 await 掉、**不外泄**给卡片：
     // 卡片沿用 0.1.6 的 Promise<void> 形状，此次迁移只换入口不改行为。
     assert.equal(await setResult, undefined, "payload.set 不外泄受理位");
     assert.equal(await unsetResult, undefined, "payload.unset 不外泄受理位");
@@ -1233,7 +1233,7 @@ describe("b11：danger-guard 设置卡", () => {
       ],
       "payload 的写入必须落到 configForms.get() 交回的那张表单",
     );
-    // slot disposer：只注销登记。`form.dispose` 是抛错绊线——桩件在 loadCard 期间只记录
+    // slot disposer：只注销登记。`form.dispose` 是抛错绊线——测试替身在 loadCard 期间只记录
     // 不调用（真实槽位 collapse 时才卸载），这里连续调用两次，既证明 disposer 不销毁
     // provider 持有的共享表单，也证明重复回收幂等。
     assert.equal(slotCleanups.length, 1, "slots.inject 工厂产出一个 disposer");
@@ -1260,7 +1260,7 @@ describe("b11：danger-guard 设置卡", () => {
     );
   });
 
-  it("表单写入因传输失败 reject → 卡片显示保存失败并留住草稿（受理位之外的唯一失败面）", async () => {
+  it("表单写入因传输失败 reject → 卡片显示保存失败并留住草稿（受理结果之外的唯一失败）", async () => {
     const { DgCardForTest, makeScope } = await loadCard();
     const scope = makeScope(snap({ value: { enabled: true } }), []);
     await renderCard(
@@ -1313,7 +1313,7 @@ describe("b11：danger-guard 设置卡", () => {
           value: { enabled: true, strictMode: false },
         }),
         ...cardWrites(scope),
-        // strictMode 那一笔第一次传输失败（其余照常受理）：部分失败时已落盘的字段
+        // strictMode 那一笔第一次传输失败（其余照常受理）：部分失败时已写到磁盘的字段
         // 不得再写一遍，重试只补失败的。
         set: async (field: string, value: unknown): Promise<void> => {
           if (field === "strictMode" && strictModeFailsOnce) {
@@ -1352,17 +1352,17 @@ describe("b11：danger-guard 设置卡", () => {
     assert.equal(
       calls.filter((call) => call.field === "enabled").length,
       afterFirst,
-      "已落盘的字段不重复写",
+      "已写到磁盘的字段不重复写",
     );
     assert.equal(
       calls.filter((call) => call.field === "strictMode").length,
       1,
-      "失败的那一笔重试补上（第一次失败没有落盘，第二次成功才记录）",
+      "失败的那一笔重试补上（第一次失败没有写到磁盘，第二次成功才记录）",
     );
     assert.equal(
       container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)?.disabled,
       true,
-      "全部落盘后草稿清空、保存键回灰",
+      "全部写到磁盘后草稿清空、保存键回灰",
     );
   });
 });

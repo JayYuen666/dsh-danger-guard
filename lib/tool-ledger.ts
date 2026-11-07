@@ -5,14 +5,14 @@
  * 为什么必须是投影而不是别的：`ToolGuard` 官方签名是同步的
  * （installed @deepseek-ai/dsh-tools/lib/types/index.d.ts:522
  * `(execution: Readonly<ToolExecution>) => string | undefined`），而 `ctx.sessionQuery`
- * 的每条读面都是 `Promise` ⇒ 异步读法在这道闸门上根本不成立；`Session` 上未弃用的同步
- * 成员只有 `seq` / `isOwnSeq`，交不出事件。三条同步读面（`snapshotEvents` / `eventAt` /
+ * 的每条读取接口都是 `Promise` ⇒ 异步读法在这道闸门上根本不成立；`Session` 上未弃用的同步
+ * 成员只有 `seq` / `isOwnSeq`，交不出事件。三条同步读取接口（`snapshotEvents` / `eventAt` /
  * `ownEvents`）官方全标了 `@deprecated`（"new calls are prohibited"）。
  *
  * 折什么：只折台账所需的行（`calls` / `results` + 日志长度），逐字段实现**复用 shared 的
- * `toolEventRowsOf`**（同一份代码，不是第二份抄本）——折叠路径与回退扫描路径若各写一遍
+ * `toolEventRowsOf`**（同一份代码，不是第二份抄本）——折叠路径（`applyEvent`）与回退扫描路径若各写一遍
  * 字段读取，就会在同一串事件上给出不同的证据链，那是这道闸门的 fail-open。
- * 策略面（哪些工具算检索、判据口径、文案）**不进**状态：那些值每次判定现读 settings，
+ * 策略（哪些工具算检索、判据规则、文案）**不进**状态：那些值每次判定现读 settings，
  * 折进状态会让"用户改了名单"不再生效。
  *
  * 什么时候不采信（⇒ 读侧交回 `undefined`，host 回退全量扫描 = 迁移前行为）：
@@ -49,11 +49,11 @@ const intSchema = z.int().nonnegative();
  * 回填时必然解析失败（官方 `restore` 随即丢行，本包就永久只剩回退扫描）。
  *
  * `name` 是唯一一个**不留** `null` 哨兵的字段：它在 shared 侧已经是必填串——少一个可用 name
- * 的 tool/call 由 shared 的扫描层整条滤掉、不出行（`callRecordOf` 两臂都过 `usableName`）。
+ * 的 tool/call 由 shared 的扫描层整条滤掉、不出行（`callRecordOf` 两条分支都过 `usableName`）。
  * 官方拦不住这种事件（`validateSessionEventData` 自述不校验完整载荷，见
  * packages/core/session/src/surface.ts），所以那道闸门只能由 shared 兜；这里再写
  * `string | null` 等于把同一份不变量抄第二遍，两边迟早漂移，本表只负责如实搬运。
- * 依赖面：要求解析到的 shared ≥ 0.1.2（0.1.1 的扫描层不过滤，运行时会给出 undefined，
+ * 依赖：要求解析到的 shared ≥ 0.1.2（0.1.1 的扫描层不过滤，运行时会给出 undefined，
  * 而这里的类型已经是 string）。升 shared 后本表不必再动。
  */
 export interface LedgerCallRow {
@@ -70,7 +70,7 @@ export interface LedgerResultRow {
   seq: number;
 }
 
-/** 投影态：全平面 JSON 值（官方单元契约），`stateSchema` 校验每一份回填。 */
+/** 投影态：整份 JSON 值（官方单元契约），`stateSchema` 校验每一份回填。 */
 export interface ToolLedger {
   /** tool/call（含 PTC 子调用开始）台账，按 `seq` 升序——内容与 `scanToolEvents` 同源。 */
   calls: LedgerCallRow[];
@@ -186,20 +186,20 @@ function resultRecordOf(row: LedgerResultRow): ToolResultRecord {
  * 判据与 shared 的 `usableName` 同形：非串、或空串都算没有。
  *
  * 与 shared 的分工：那边在**读侧**滤（扫描层整条不出行），本表在**写侧**再兜一道。装着的
- * 0.1.2 里 `ToolCallRecord.name` 的类型已经是 `string`，所以这一臂从 `applyEvent` 走不到
+ * 0.1.2 里 `ToolCallRecord.name` 的类型已经是 `string`，所以这一分支从 `applyEvent` 走不到
  * （见下面的 v8 ignore）。留着它的理由是失效代价不对称：多写一行坏行 = 整份台账永久作废，
- * 少折一行 = 对一条本就无名的事件不做记账；而编译期管不到真实载荷——宿主漂移与持久缓存
+ * 少折一行 = 对一条本就无名的事件不做记录；而编译期管不到真实载荷——宿主漂移与持久缓存
  * 回填都能送来类型声明之外的东西。
  *
- * v8 ignore next -- 装着的 shared 在读侧就滤掉了这类记录 ⇒ 本臂从 applyEvent 不可达
+ * v8 ignore next -- 装着的 shared 在读侧就滤掉了这类记录 ⇒ 本分支从 applyEvent 不可达
  * （`callRowOf` 未导出，没有直接单测入口）；它是上面那条不变量本身，不是留着的冗余分支。
  */
 function callRowOf(record: ToolCallRecord): LedgerCallRow | undefined {
   const { name } = record;
   // 单一 return：本仓 lint 开了 consistent-return 且 treatUndefinedAsUnspecified，
-  // 与带值 return 混写的裸 undefined 会被判红（同 lib/record.ts 的 ownMessage）。
+  // 带回值的 return 与不落值的那一种（`return;`、`return undefined;`）混写会被判红（同 lib/record.ts 的 ownMessage）。
   const usable = typeof name === "string" && name.length > 0;
-  /* v8 ignore next -- 装着的 shared 在读侧就滤掉了这类记录，本臂从 applyEvent 不可达；
+  /* v8 ignore next -- 装着的 shared 在读侧就滤掉了这类记录，本分支从 applyEvent 不可达；
      它守的是「本表自己不写坏行」这条不变量，代价只有一次 typeof，见函数头注释。 */
   return usable
     ? {
@@ -228,8 +228,8 @@ function applyEvent(state: ToolLedger, event: SessionEvent): ToolLedger {
     // 已作废：只跟长度（回退路径自己读全量日志，这份表没人再读）。
     return { ...state, length };
   }
-  // 幂等自卫：`seq < state.length` = 该事件位已折过（持久缓存回填后重放、宿主重投递、
-  // 非严格递增的投递）。再折一遍会在表尾追加同一事件的第二份拷贝——既让证据链重复，
+  // 幂等自卫：`seq < state.length` = 该事件位已折过（持久缓存回填后重放、宿主重发送、
+  // 非严格递增的发送）。再折一遍会在表尾追加同一事件的第二份拷贝——既让证据链重复，
   // 也会提前撞上窗口作废（之后每次判定都退回全量扫描）。与其余越界情况一样，这里
   // 不信"官方保证只投新事件"的口头契约。
   if (seq < state.length) {
@@ -241,7 +241,7 @@ function applyEvent(state: ToolLedger, event: SessionEvent): ToolLedger {
   }
   const { call, result } = toolEventRowsOf(event, seq);
   if (call === undefined && result === undefined) {
-    // 非记账事件：只有长度跟着走（无 wire ⇒ 不产视图、不通知监听）。
+    // 非记录事件：只有长度跟着走（无 wire ⇒ 不产视图、不通知监听）。
     return { ...state, length };
   }
   // callRowOf 可能因为 name 不可用而交回 undefined（见它的注释）：那一行不折进来，但
@@ -282,7 +282,7 @@ export function asLedger(value: unknown): ToolLedger | undefined {
   if (typeof value !== "object" || value === null) {
     const parsed = toolLedgerSchema.safeParse(value);
     /* v8 ignore next -- 原始值必然过不了对象 schema（数组的 typeof 是 object，走缓存分支），
-       "解析成功"那一臂在这个入口不可达；仍走 safeParse 是为了不把采信判据抄第二份。 */
+       `parsed.success` 为 true 的那一条分支在这个入口不可达；仍走 safeParse 是为了不自己再抄一份采信判据。 */
     return parsed.success && !parsed.data.dropped ? parsed.data : undefined;
   }
   if (!ledgerCache.has(value)) {

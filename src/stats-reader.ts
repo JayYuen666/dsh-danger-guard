@@ -1,4 +1,4 @@
-// src/stats-reader.ts —— 设置卡读**宿主侧判定统计**的那一面（官方 Typert Remote 的消费侧）。
+// src/stats-reader.ts —— 设置卡里读取**宿主侧判定统计**的那一段（官方 Typert Remote 的调用方）。
 //
 // 为什么需要它：设置卡跑在浏览器里，而统计是宿主进程的内存 —— 设置面没有"宿主计算值"的口子
 // （`ctx.settings` 只有 configure/describe/update/replace/mutate），所以唯一的官方通道就是
@@ -11,17 +11,17 @@
 //
 // ⚠ **为什么走 `ctx.get("remote")` 而不是把 `remote` 写进 `inject`**：cordis 对**未 inject 的
 // 服务**读取是**抛错**（`cannot get property "remote" without inject`，
-// vendor/cordis/src/reflect.ts:144）。而本包的卡片在"没装远程面"的部署里也必须照常渲染（那是
-// 一枚可选读面），`inject: ["remote", …]` 却会把整条 client 入口绑死在远程面上 —— 缺它就不激活。
+// vendor/cordis/src/reflect.ts:144）。而本包的卡片在"没装远程通道"的部署里也必须照常渲染（那是
+// 一枚可选读取接口），`inject: ["remote", …]` 却会把整条 client 入口绑死在远程通道上 —— 缺它就不激活。
 // 本轮实测踩过这一脚：web boot 报 `1 entry did not activate: @jayyue66/dsh-danger-guard: failed`，
 // 而产物本身完全正常（语法、导出、`apply` 都跑得通），抛的就是上面那条 inject 错误。
 // `ctx.get` 是**显式读取**，不受 inject 门禁约束 —— 官方网关自己也是这么读可选服务的
 // （packages/api/gateway/src/client/index.ts 的 `this.ownerCtx.get('connection')`）。
 //
-// ⚠ 类型一律 `import type`（产物里零新说明符）：发布面那条纪律要求 `@deepseek-ai/*` 只作
-// 类型消费，值导入面只有四枚（schemastery / shared / dsh-brand / zod）。
+// ⚠ 类型一律 `import type`（产物里零新增说明符）：发布名单那条纪律要求 `@deepseek-ai/*` 只作
+// 类型消费，值导入只有四枚（schemastery / shared / dsh-brand / zod）。
 import type { InvocationDescriptor, RemoteResult } from "@deepseek-ai/dsh-typert-protocol";
-// 槽位键与 descriptor 的 package 位共用一枚单源（src/bundle-pkg.ts）：两处各写一遍时，
+// 槽位键与 descriptor 的 package 位共用一枚唯一来源（src/bundle-pkg.ts）：两处各写一遍时，
 // 改名漏一处没有任何编译期信号，表现是"读不到"而不是报错。
 import { BUNDLE_PKG } from "./bundle-pkg.ts";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/client";
@@ -41,7 +41,7 @@ const STATS_NAMESPACE = "dangerGuardStats";
  *  在挂载后按这个键去读，而不是提前 inject。 */
 const STATS_SERVICE_KEY = `remote.${STATS_NAMESPACE}`;
 
-/** 把宿主那枚方法挂到客户端远程面上的描述符（`id` 的形状照生成器：`<包>#<命名空间>/<方法>`）。
+/** 把宿主那枚方法挂到客户端远程通道上的描述符（`id` 的形状照生成器：`<包>#<命名空间>/<方法>`）。
  *  导出它只为一件事：`test/stats-remote.test.ts` 拿它与宿主侧 `remoteMethods()` 的标记对质
  *  —— 两侧分叉时卡片不会报错，只会"读不到"，所以那条比较必须在门禁里。 */
 export const STATS_DESCRIPTORS: readonly InvocationDescriptor[] = [
@@ -61,7 +61,7 @@ export interface RemoteHost {
   get?: (name: string, strict?: boolean) => unknown;
 }
 
-/** 官方网关的客户端服务面：本卡只用 `$mount` 一位（挂载一枚手写贡献）。 */
+/** 官方网关的客户端宿主服务：本卡只用 `$mount` 一位（挂载一枚手写贡献）。 */
 interface RemoteMounter {
   $mount: (contribution: {
     package: string;
@@ -69,12 +69,12 @@ interface RemoteMounter {
   }) => Promise<unknown>;
 }
 
-/** 挂载后由网关提供的命名空间服务面。 */
+/** 挂载后由网关提供的命名空间宿主服务。 */
 interface StatsNamespace {
   stats: () => Promise<RemoteResult<StatsSnapshot>>;
 }
 
-/** 这个值能当远程面用吗（只核我们要调的那一位；服务来自别的实现或版本时保守当作没有）。 */
+/** 这个值能当远程通道用吗（只核我们要调的那一位；服务来自别的实现或版本时保守当作没有）。 */
 const isRemoteMounter = (value: unknown): value is RemoteMounter =>
   isRecord(value) && typeof value["$mount"] === "function";
 
@@ -109,7 +109,7 @@ const isStatsSnapshot = (value: unknown): value is StatsSnapshot =>
 /**
  * 造出真正的读取器（挂载一次 + 每次读命名空间服务）。
  * @param ctx - 客户端上下文
- * @param remote - 已核过形状的远程面
+ * @param remote - 已核过形状的远程通道
  * @returns 读取器
  */
 function buildStatsReader(ctx: RemoteHost, remote: RemoteMounter): () => Promise<StatsSnapshot> {
@@ -155,8 +155,8 @@ function buildStatsReader(ctx: RemoteHost, remote: RemoteMounter): () => Promise
 }
 
 /**
- * 造一个"读一次宿主侧判定统计"的读取器；**当前部署没有远程面时返回 `undefined`**（卡片那一段
- * 显示「读不到」，其余照常 —— 与 host 侧可选读面同一条口径）。
+ * 造一个"读一次宿主侧判定统计"的读取器；**当前部署没有远程通道时返回 `undefined`**（卡片那一段
+ * 显示「读不到」，其余照常 —— 与 host 侧可选读取接口同一条规则）。
  *
  * **读取策略：按需拉取，不订阅、不缓存跨连接的旧值。** 官方那套（`ui-permission-presets`
  * 的 catalog）要处理连接代际失效，是因为它**缓存**一份进程级目录并在 UI 上长期显示；本卡这份
@@ -168,14 +168,14 @@ function buildStatsReader(ctx: RemoteHost, remote: RemoteMounter): () => Promise
  * 同一次会话里刷新多次只挂一次。
  *
  * @param ctx - 客户端上下文（只用 `get` 一位）
- * @returns 读取器；没有远程面时 `undefined`
+ * @returns 读取器；没有远程通道时 `undefined`
  */
 export function createStatsReader(ctx: RemoteHost): (() => Promise<StatsSnapshot>) | undefined {
-  // strict 显式给 false：本读面是**可选读**——"没装远程面"要交回 undefined 降级，而不是抛。
+  // strict 显式给 false：本读取接口是**可选读**——"没装远程通道"要交回 undefined 降级，而不是抛。
   // 与 buildStatsReader 里那一次读取同形，"可选读"在代码上自证。
   const remote = ctx.get?.("remote", false);
   // 单 return（三元的另一支是 `undefined`）：`consistent-return` 不接受"早退 undefined + 晚退函数"
-  // 这种混合形状，而这里两种结果本来就是同一件事的两面。
+  // 这种混合形状，而这里两种结果本来就是同一件事的两头。
   return isRemoteMounter(remote) ? buildStatsReader(ctx, remote) : undefined;
 }
 

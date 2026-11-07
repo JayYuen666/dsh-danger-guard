@@ -2,7 +2,7 @@
 //
 // 为什么单列：`presenceOf` 用它决定"文件到底存不存在"，而那一格决定"新建文件免 read"
 // 这道豁免给不给。方向不对称：把"不可知"读成"不存在"是**放宽**（免掉 read），
-// 而那正是这道豁免最不该失守的一侧。所以这条判据要有自己的用例，而它只有抽出来才测得动
+// 而那正是这道豁免最不该失守的方向。所以这条判据要有自己的用例，而它只有抽出来才测得动
 //（`host.ts` 里的调用点绑着真实的 `statSync`）。
 /** libuv 的 message 前缀：`ENOENT: …`，`ENOENTX` 一类拼接串不算。 */
 const ENOENT_MESSAGE_PREFIX = /^ENOENT(?::|$|\s)/u;
@@ -13,11 +13,11 @@ const ENOENT_MESSAGE_PREFIX = /^ENOENT(?::|$|\s)/u;
  * **先读 `code`，再回落到 message 前缀**：`code` 是 Node 在**所有平台**都保证的稳定字段
  *（`ENOENT` / `EACCES` / `ENOTDIR` / `ELOOP` …），而 message 的措辞与是否以 errno 名开头
  * 随平台/libuv 版本变化。只认 message 前缀时，Windows 上 `ENOTDIR`（路径中间是文件）
- * 可能被读成"不存在"，于是新建豁免把 read 免掉 —— 方向正是这道豁免最不该失守的那一侧。
+ * 可能被读成"不存在"，于是新建豁免把 read 免掉 —— 而这道豁免最不该在这个方向上失守。
  *
  * @param error `statSync` 抛出的东西（未知名）。
  * @returns 仅当 errno 明确是 ENOENT 时为 true。`code` 缺席时回落到 message 前缀——
- *          那时并没有 errno 可依据，判据比"有 code"那一支松，只作为旧宿主/自定义 fs 的兜底。
+ *          那时并没有 errno 可依据，判据比"有 code"那一支松，只作为旧宿主/自定义 fs 的后备。
  */
 export function isNotFoundError(error: unknown): boolean {
   try {
@@ -41,7 +41,7 @@ export function isNotFoundError(error: unknown): boolean {
  *  独立成类型是为了让调用方在"不可知"上必须显式选择方向（本包一律保守）。 */
 export type Presence = "absent" | "present" | "unknown";
 
-/** 一次 stat 尝试的结果形状（三态结论 + mtime）。单源导出：host.ts 的调用点复用同一份，
+/** 一次 stat 尝试的结果形状（三态结论 + mtime）。唯一来源导出：host.ts 的调用点复用同一份，
  *  哨兵语义改起来只动一处。 */
 export interface StatAttempt {
   readonly presence: Presence;
@@ -68,7 +68,7 @@ export function presenceOfAttempt(attempt: () => number): StatAttempt {
   try {
     const mtimeMs = attempt();
     // 非有限值（注入的假 stat / 上游封装的异常返回）不得以 present 向外传播：下游拿它做
-    // `mtimeMs > seenMtime` 的跳变判定，NaN 恒假会让外部改动检测**静默失效**。
+    // `mtimeMs > seenMtime` 的跳变判定，NaN 永远不成立会让外部改动检测**静默失效**。
     return Number.isFinite(mtimeMs)
       ? { presence: "present", mtimeMs }
       : { presence: "unknown", mtimeMs: MTIME_UNKNOWN };

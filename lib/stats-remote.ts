@@ -1,4 +1,4 @@
-// lib/stats-remote.ts —— 判定统计的**客户端读面**（官方 Typert Remote）。
+// lib/stats-remote.ts —— 判定统计的**客户端读取接口**（官方 Typert Remote）。
 //
 // 为什么需要一条 Remote：设置卡跑在**浏览器**里，而统计是宿主进程的内存。设置面**没有**
 // "宿主计算值"的口子（`ctx.settings` 只有 configure/describe/update/replace/mutate，没有
@@ -10,7 +10,7 @@
 // 本服务只有一个**无参、一元、JSON 结果**的方法，手写它的 descriptor 比引入一条构建期
 // 代码生成链（外加生成物随包发布）便宜得多。
 //
-// ⚠ 值导入面：`TypertRemoteService` 是个**类**（要 `extends`），没有 type-only 的造法 ——
+// ⚠ 值导入：`TypertRemoteService` 是个**类**（要 `extends`），没有 type-only 的造法 ——
 // 与 `dsh-brand` 的 `brandNumber` 同族。它因此落 `peerDependencies`（`dependencies` 是
 // 禁区，由 `test/publish-manifest.test.ts` 钉着），产物里保持**裸说明符**（`build-host.mjs`
 // 的外部化名单读 dependencies ∪ peerDependencies）。
@@ -32,7 +32,7 @@ import type { StatsSnapshot } from "./judge-stats.ts";
 export const STATS_SERVICE_KEY = "dangerGuardStats";
 
 /**
- * 判定统计的读面。挂在**拦截半**（`host.ts`）上而不是设置半：统计是模块级状态，而
+ * 判定统计的读取接口。挂在**拦截半**（`host.ts`）上而不是设置半：统计是模块级状态，而
  * `host.js` 与 `settings.js` 是两个**各自内联一份 `lib/`** 的产物 —— 挂在设置半上，
  * 它读到的是那个产物里**另一份**、永远是空的表。
  *
@@ -69,20 +69,20 @@ const hasServiceRegistry = (value: unknown): boolean => {
 };
 
 /**
- * 把读面装到这个上下文上（构造即注册，见类文档；host 侧唯一该调的口）。
+ * 把读取接口装到这个上下文上（构造即注册，见类文档；host 侧唯一该调的口）。
  *
  * 为什么是一枚函数而不是让调用方直接 `new`：这枚 `new` 的**全部意义在构造期的注册副作用**
  * 上 —— 实例由 cordis 的 fiber 持有（`Service` 基类把 `reflect.provide` 的 disposer 挂给
  * fiber），调用方拿到它没有任何用处。所以这里就地说明这一点，而不是在 `host.ts` 的 `apply`
  * 里留一枚"看起来漏了赋值"的 `new`。
  *
- * ⚠ 它是**可选读面**，所以本函数自己先探注册口（`ctx.reflect.provide`）：真宿主里 `reflect`
+ * ⚠ 它是**可选读取接口**，所以本函数自己先探注册口（`ctx.reflect.provide`）：真宿主里 `reflect`
  * 恒在（cordis `Context` 的核心成员，context.d.ts:29），而替身/畸形上下文未必给 —— 少了它
  * 只该少一栏统计展示，绝不该让闸门下线。这与 `fs` / `sessionProjections` / `workingDirectory`
- * 那四处同一条口径：**拦截面绝不因读数面缺失而下线**（多探一项 = 多给闸门一条失败路径）。
+ * 那四处同一条规则：**拦截绝不因读数缺失而下线**（多探一项 = 多给闸门一条失败路径）。
  *
  * @param ctx - 宿主上下文
- * @returns 装上了没有（调用方不需要它 —— 返回它只是让这条路可断言；本包只作**可选**读面用）
+ * @returns 装上了没有（调用方不需要它 —— 返回它只是让这条路可断言；本包只作**可选**读取接口用）
  */
 export function installStatsRemote(ctx: Context): boolean {
   try {
@@ -96,8 +96,8 @@ export function installStatsRemote(ctx: Context): boolean {
   } catch (error) {
     // 构造会在 `super(ctx, …)` 里真跑 `ctx.reflect.provide`：服务键被别的插件占了、
     // 或者注册口本身坏了，异常就从这里穿出去。而调用点（host.ts 的 apply）是裸调用，
-    // 穿出去等于把整条门禁一起打掉 —— 可这条读面只是给设置卡多一栏。
-    // 所以在这里收口：说清楚少了哪一栏，然后把闸门交回调用方。
+    // 穿出去等于把整条门禁一起打掉 —— 可这条读取接口只是给设置卡多一栏。
+    // 所以在这里统一处理：说清楚少了哪一栏，然后把闸门交回调用方。
     console.warn(
       `[danger-guard] 判定统计读面没能注册（${STATS_SERVICE_KEY}）：${errorText(error)}。` +
         "设置卡会少一栏判定统计，门禁本身不受影响。",

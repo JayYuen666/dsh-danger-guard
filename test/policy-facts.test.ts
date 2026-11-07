@@ -1,8 +1,8 @@
-// test/policy-facts.test.ts —— 档位事实的折法：三个宿主事实各自的来源与**缺席口径**。
+// test/policy-facts.test.ts —— 档位事实的折法：三个宿主事实各自的来源与**缺席规则**。
 //
-// 这一份单独钉 `lib/policy-facts.ts`：它把宿主的只读服务面折成 `PolicyFacts`。
+// 这一份单独钉 `lib/policy-facts.ts`：它把宿主的只读服务汇总成 `PolicyFacts`。
 // 判定表（`lib/mode-policy.ts`）由另一份逐格钉住，这里钉的是"喂进去的四位事实对不对"——
-// 尤其是三处缺席口径，它们决定了某一档会被按哪一列处置：
+// 尤其是三处缺席规则，它们决定了某一档会被按哪一列处置：
 //   · 读不到沙箱模式 ⇒ `unknown`（保守列）；
 //   · 审批服务缺席 ⇒ **仍然能问**（宿主那条降级路径会保留我们的 reason）；
 //   · 预设服务缺席 ⇒ 不是自动审查（也就不可能有 auto 这一档）。
@@ -41,10 +41,10 @@ const factsFrom = (
     },
   });
 
-/** 一套"执行器报在拦 + 策略服务在位"的最小服务面。 */
+/** 一套"执行器报在拦 + 策略服务在位"的最小宿主服务。 */
 const SANDBOX = { shell: { sandboxMode: WORKSPACE_MODE }, sandboxPolicy: {} };
 
-describe("policyFactsOf：模式的三种取值与缺席口径", () => {
+describe("policyFactsOf：模式的三种取值与缺席规则", () => {
   it("三种模式各自原样折进来", () => {
     for (const mode of ["read-only", WORKSPACE_MODE, "danger-full-access"]) {
       assert.equal(factsFrom(SANDBOX, { mode }).mode, mode);
@@ -66,7 +66,7 @@ describe("policyFactsOf：模式的三种取值与缺席口径", () => {
     assert.deepEqual(seen, [[SANDBOX.shell, SANDBOX.sandboxPolicy, SESSION]]);
   });
 
-  it("`get` 整个缺席（宿主没提供可选读数口）⇒ 四位事实都走缺席口径，不抛错", () => {
+  it("`get` 整个缺席（宿主没提供可选取值接口）⇒ 四位事实都走缺席规则，不抛错", () => {
     const facts = policyFactsOf({
       get: undefined,
       session: undefined,
@@ -232,7 +232,7 @@ describe("policyFactsOf：会话形状与覆盖读法的边界", () => {
   it("覆盖函数抛错时判定抛出（宿主服务的失败不吞：吞掉就等于换了一档）", () => {
     // 抛的那一枚要先拿到手：只写 assert.throws 的话，同一条路径上任何一处读数出错
     // （shell.sandboxMode 的 getter、presets.current、配置形状检查）都能让它绿，
-    // 而本用例的口径是「overrideOf 的失败原样冒出来」。比身份，不比消息文本。
+    // 而本用例的规则是「overrideOf 的失败原样冒出来」。比身份，不比消息文本。
     const boom = new Error("session unreadable");
     const services = {
       shell: { sandboxMode: WORKSPACE_MODE },

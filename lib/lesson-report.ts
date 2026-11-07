@@ -1,15 +1,15 @@
-// lib/lesson-report.ts —— lesson-loop 总线的**上报面**：deny / pass 两条信号与代价采样。
+// lib/lesson-report.ts —— lesson-loop 总线的**上报接口**：deny / pass 两条信号与代价采样。
 //
-// 为什么单列：这一族（类型守卫、两条 fire-and-forget 上报、采样出口）自成一个面——它只读
+// 为什么单列：这一族（类型守卫、两条 fire-and-forget 上报、采样出口）自成一族——它只读
 // 一个可选服务（`lessonLoop`）与三枚上下文值（会话、cwd、代价样本），判定链一个字都不依赖
 // 它的返回值。抽出来之后，判定链的模块不必为"怎么上报"让出篇幅。
 //
 // 三条不变式（每一条都曾是实际故障）：
 //  1. **可选读**：总线未装 / 未就绪 / 形状不符 ⇒ 静默跳过；拦截照常生效，
-//     绝不能因为度量面缺席而让闸门下线。
+//     绝不能因为度量缺席而让闸门下线。
 //  2. **返回域按 `unknown` 收**：`(input) => void` 的函数类型恰好允许调用方丢弃返回的
 //     Promise，TS 与 `no-floating-promises` 都看不见 —— 那正是"失败被静默吞掉并留下
-//     一枚未处理拒绝"的根因。`unknown` 保留真实形状，逼调用点经 `settleLessonCall` 收口。
+//     一枚未处理拒绝"的真正的原因。`unknown` 保留真实形状，逼调用点经 `settleLessonCall`统一处理。
 //  3. **`pass` 的方法接收方**：`?.` 不是第二道守卫（上面已判过），写成方法调用才保住
 //     接收方（不借 `.call` / `.bind` 改 `this`）。
 
@@ -42,7 +42,7 @@ export interface LessonLoopReporter {
   }) => unknown;
 }
 
-/** 总线最小面类型守卫：只判 deny 通道要用的 `report`。`pass` 是度量增强，由 `reportPass`
+/** 总线最小类型守卫：只判 deny 通道要用的 `report`。`pass` 是度量增强，由 `reportPass`
  *  自己判——两件能力绑在同一个判定里时，pass 面的形状漂移（`pass: null` 一类的部分装配）
  *  会连带关掉 deny 上报，而 deny 才是拦截信号的主要出口。 */
 export function isLessonLoopReporter(value: unknown): value is LessonLoopReporter {
@@ -52,7 +52,7 @@ export function isLessonLoopReporter(value: unknown): value is LessonLoopReporte
 /** 总线服务名（`ctx.get` 的键）。 */
 const LESSON_LOOP_SERVICE = "lessonLoop";
 
-/** 取教训总线：可选读 + 形状守卫收成一处，两条上报吃同一个口径，服务名字面量只此一份。 */
+/** 取教训总线：可选读 + 形状守卫收成一处，两条上报吃同一个规则，服务名字面量只此一份。 */
 function lessonLoopOf(context: ReportContext): LessonLoopReporter | undefined {
   // `ctx.get` 与形状守卫都读宿主对象的属性：抛错 getter 或畸形替身不能把异常带进
   // 守卫热路径（本模块的定位是"总线缺席就跳过"，不得反过来让闸门下线）。
@@ -68,9 +68,9 @@ function lessonLoopOf(context: ReportContext): LessonLoopReporter | undefined {
   return bus;
 }
 
-/** 一条上报要的三枚上下文字段（与判定链同源：可选读数口、会话 cwd、会话 id）。 */
+/** 一条上报要的三枚上下文字段（与判定链同源：可选取值接口、会话 cwd、会话 id）。 */
 export interface ReportContext {
-  /** 可选服务读数口（`ctx.get` 的投影）。 */
+  /** 可选服务取值接口（`ctx.get` 的投影）。 */
   readonly get: ((name: string) => unknown) | undefined;
   /** 会话**当前**工作目录（与取证同一个基准）。 */
   readonly cwd: string | undefined;
@@ -135,7 +135,7 @@ export function reportPass(
         cwd: context.cwd,
         sessionId: context.sessionId,
         signature,
-        // 成本样本只带三枚数值（哪个面、多久、多长输入）——不带命令原文、不带路径。
+        // 成本样本只带三枚数值（哪一处、多久、多长输入）——不带命令原文、不带路径。
         ...(cost === undefined
           ? {}
           : { face: cost.face, judgeMs: Math.round(cost.ms), judgeLength: cost.length }),
@@ -171,7 +171,7 @@ export function sampleJudge(
       } catch {
         return;
       }
-      // judge-cost 没有规则/命令级的稳定键，判定面名就是它最细的稳定键——signature 与
+      // judge-cost 没有规则/命令级的稳定键，判定名就是它最细的稳定键——signature 与
       // face 同值是**刻意**的：总线侧按 signature 聚合时，judge-cost 与命令签名分属不同
       // category，不会混桶；另造一套签名反而多出一种键形要维护。
       reportPass(context, category, cost.face, cost);

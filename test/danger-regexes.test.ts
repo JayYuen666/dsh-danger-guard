@@ -1,6 +1,6 @@
 // test/danger-regexes.test.ts —— 正则字面量判据的边界。
 //
-// 这条判据决定用户给的密钥模式是「裸片段」还是「写成字面量」；判错的方向是静默失效
+// 这条判据决定用户给的密钥模式是「裸片段」（设置界面占位示例用的就是这个说法）还是「写成字面量」；
 // （字面量被当裸片段编译，永远匹配不到），所以逐形钉住。
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";

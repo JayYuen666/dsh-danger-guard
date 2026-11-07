@@ -1,6 +1,6 @@
 // test/policy-deny.test.ts —— 拒绝文案的三段拼法（`lib/policy-deny.ts`）。
 //
-// 这一份钉的是本轮"拒绝时要给改写示例"那条决策的**唯一落点**：
+// 这一份钉的是本轮"拒绝时要给改写示例"那条决策的**唯一位置**：
 //   基础理由（这条命令为什么不对）→ 出路（改哪几个词能过）→ 档位说明（这一档为什么这样处置），
 //   而"本该问、但这档问不了"降级来的 deny 还要再接一段换档出路。
 // 少了最后那一段，模型拿到的只有"不许"，读不出成因也看不到下一步。
@@ -107,7 +107,7 @@ describe("policyDenyText：三段文案的顺序与内容", () => {
 
 describe("policyDenyFlags：与文案同一份判据", () => {
   it("deny 档两类都算（本档硬拒 + 降级硬拒）；判据即 mode-policy 的 decideRule", () => {
-    // 判据单源在 lib/mode-policy.ts：`policyDenyFlags` 的 verdict 取 `decideRule`，
+    // 判据使用唯一来源在 lib/mode-policy.ts：`policyDenyFlags` 的 verdict 取 `decideRule`，
     // `policyDenyText` 的降级尾巴取同一张表上的 `deniedByPolicy`（host.ts 那一处调用点用的就是这两枚，
     // 都不直接调 decideRule）。这里钉的是两条对同一组 (facts, key) 给同一结论——各判一套就会出现
     // 「文案说硬拒而标志位不是」那种互斥的下一步。

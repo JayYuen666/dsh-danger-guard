@@ -9,9 +9,9 @@
 //   host.ts                = 证据判定（扫会话事件 + fs 探测）→ 产出**带成因**的缺项
 //   本文件                 = 纯状态机：据缺项决定放行/拒绝、守防死锁配额
 //   lib/gap-directives.ts  = 把缺项翻成可照做的**指令结构**（`need × why` 全表 + 缺项规范顺序）
-//   lib/ref-search-policy.ts = 引用取证的口径面（哪些检索工具算、各自按哪些参数判）
+//   lib/ref-search-policy.ts = 引用取证的规则（哪些检索工具算、各自按哪些参数判）
 //
-// 文案不在本文件：中英两份单源在 lib/messages.ts，渲染函数（gapLine / renderDenyMessage）
+// 文案不在本文件：中英两份唯一来源在 lib/messages.ts，渲染函数（gapLine / renderDenyMessage）
 // 把消息表当**参数**收——宿主在 guard 调用点传 `messagesFor(MESSAGES, locale)` 的结果。
 // 于是状态机既不读设置、也不自带某一种语言，测试只需喂一份字典；键齐全由 tsc 保证
 // （`Messages[key]` 取值类型），覆盖率不添不可达分支。
@@ -49,7 +49,7 @@ export type FactNeed =
   // 文档层触达探查（该层存在时要求）
   | "docs";
 
-/** 逐层探查项：引用面与 read 有各自的投递/新鲜度口径，不参与 layerSeqs。 */
+/** 逐层探查项：被引用与 read 有各自的发送/产物一致性规则，不参与 layerSeqs。 */
 export type LayerNeed = Exclude<FactNeed, "read" | "refs">;
 
 /** 为什么缺——决定该给什么指令（核心：不同成因不同提示）。 */
@@ -96,7 +96,7 @@ export interface FactEvidenceInput {
   /** 当前已处理事件数（配额水位锚点）。 */
   logSeq: number;
   /** 目标当前**未了结的外部改动**水位（事件下标）；-1 = 没有。
-   *  只由 host 的外部改动归因抬升，模型自己的连续编辑不抬升——配额与新鲜度都按这条口径。 */
+   *  只由 host 的外部改动归因抬升，模型自己的连续编辑不抬升——配额与产物一致性都按这条规则。 */
   externalChangeSeq: number;
   /** 目标是否为新建（write/create 且 fs 不存在）。 */
   newFile?: boolean;
@@ -104,19 +104,19 @@ export interface FactEvidenceInput {
   ctx?: FactGapContext;
 }
 
-/** 预检的投递水位：两项各自的**投递位次**（-1 = 这一项从未投递）。
+/** 预检的发送水位：两项各自的**发送位次**（-1 = 这一项从未发送）。
  *  拆成两位而不是 `{seq, read, refs}` 一枚：A 面只投 refs、B 面可能只投 read，两者先后落在
  *  同一个键上——合一位要么覆盖掉对方那一项，要么把 read 的新鲜度按 refs 的位次重算，而
- *  read 的判据要的正是**它自己那次**投递的位次（与 `staleBase` 比）。 */
+ *  read 的判据要的正是**它自己那次**发送的位次（与 `staleBase` 比）。 */
 export interface DeliveryWatermark {
   readonly readSeq: number;
   readonly refsSeq: number;
-  /** 层探查（test/e2e/docs）各自的投递位次：与 refs 同理由拆位——一次 B 面可能只覆盖其中
-   *  两层（第三层不在扫描覆盖里），合一位就会把"已投递"扩散到没覆盖的那层上。 */
+  /** 层探查（test/e2e/docs）各自的发送位次：与 refs 同理由拆位——一次 B 面可能只覆盖其中
+   *  两层（第三层不在扫描覆盖里），合一位就会把"已发送"扩散到没覆盖的那层上。 */
   readonly layerSeqs: Readonly<Partial<Record<LayerNeed, number>>>;
 }
 
-/** 没有投递时的缺省水位：两位皆 -1——与"从未投递"在比较与短路下同形（比较恒假）。
+/** 没有发送时的缺省水位：两位皆 -1——与"从未发送"在比较与短路下同形（比较永远不成立）。
  *  运行时也冻结：它被多个模块当共享常量传递，冻结让"谁把它改了一格"当场暴露。 */
 export const NO_DELIVERY: DeliveryWatermark = Object.freeze({
   readSeq: -1,
@@ -125,12 +125,12 @@ export const NO_DELIVERY: DeliveryWatermark = Object.freeze({
 });
 
 /** 无法判定证据时的退化输入：只按 read/refs 两项起步，**不探层**——历史不可得时 host
- *  也没有可归因的层结论，`layerSeqs` 因此不参与这一面。
- *  预检的投递水位不在"没做过"之列——那是插件自己的记录（B 面当场递过正文、A 面随读取
+ *  也没有可归因的层结论，所以这条退化路径不看 `layerSeqs`。
+ *  预检的发送水位不在"没做过"之列——那是插件自己的记录（B 面当场递过正文、A 面随读取
  *  附过引用面），**不依赖会话日志**。不剔除它就会出现"预检补完 → guard 仍按不可判定缺项
  *  拒 → 再补 → 再拒"的死循环（配额放行只是把死循环换成免检，不是解）。
- *  `done` 那格照本模块的口径带上，让拒绝文案能说清"已经给过的不再要求"。
- *  两项都已投递 ⇒ gaps 为空，`check` 直接放行（首拒/交互确认都不再发生）。 */
+ *  `done` 那格照本模块的规则带上，让拒绝文案能说清"已经给过的不再要求"。
+ *  两项都已发送 ⇒ gaps 为空，`check` 直接放行（首拒/交互确认都不再发生）。 */
 export function undeterminable(delivered: DeliveryWatermark): FactEvidenceInput {
   const gaps: FactGap[] = [];
   const done: FactNeed[] = [];
@@ -225,7 +225,7 @@ export function renderDenyMessage(denial: FactDenial, messages: DangerGuardMessa
  *  apply_patch 是多目标补丁，目标清单由 host 侧逐枚传入；这里只负责状态机按键分片。 */
 const EDIT_TOOLS = new Set(["edit", "write", "str_replace_editor", "apply_patch"]);
 
-/** 明确放行的文件面：**文档格式**扩展名（md/markdown/rst/adoc）。
+/** 明确放行的文件类型：**文档格式**扩展名（md/markdown/rst/adoc）。
  *  `.txt` 不在其中：它是通用文本容器，`CMakeLists.txt` / `requirements.txt` 是构建与
  *  依赖逻辑，不是"无执行影响"的文档。`.md` 也可能被文档构建系统消费，所以这条豁免
  *  只表示"按后缀免取证"，不承诺目标没有执行影响。
@@ -242,10 +242,10 @@ const DEFAULT_MAX_SESSIONS = 64;
 /** 每张会话内台账（pending / released）的文件数上限；单会话最多记住约 2× 个条目。 */
 const DEFAULT_MAX_FILES = 200;
 /** 默认未收敛拒绝次数上限：达上限后配额放行 + 警告（防理论死锁）。
- *  导出单源：host 的 BUILTIN_BASE 与 client 设置卡的回退显示共用，防三处漂移。 */
+ *  导出唯一来源：host 的 BUILTIN_BASE 与 client 设置卡的回退显示共用，防三处漂移。 */
 export const DEFAULT_MAX_DENIES = 2;
-/** 写面大小阈值（字符数）：≤small 视为小改（只要求 read），>big 视为大段重写（升 high）。
- *  导出单源：host 的 BUILTIN_BASE 与 client 设置卡 fallback 共用，防三处漂移；
+/** 写入大小阈值（字符数）：≤small 视为小改（只要求 read），>big 视为大段重写（升 high）。
+ *  导出唯一来源：host 的 BUILTIN_BASE 与 client 设置卡 fallback 共用，防三处漂移；
  *  放在 lib 而非 host 还避开另一个坑——host 的 BUILTIN_BASE 在模块求值期引用后段
  *  const 会命中 TDZ，插件加载即崩。 */
 export const DEFAULT_SMALL_EDIT_CHARS = 200;
@@ -295,7 +295,7 @@ interface SessionState {
    * 配额放行的文件 → 放行时的事件水位（`logSeq`）。**失效条件是设计的一部分**：
    * 只有 host 认定"目标在放行之后被改过"（`externalChangeSeq` **不小于**放行水位）
    *  才过期重来。host 的 `externalChangeSeq` 只在**确属外部改动**时抬升、其余场景恒为 -1
-   * （见 host.ts `evidenceFor` 的 staleBase——定稿口径"自己的连续编辑不再反复过门"）
+   * （见 host.ts `evidenceFor` 的 staleBase——定稿规则"自己的连续编辑不再反复过门"）
    * ——所以同一会话里配额放行对同一目标是**持久**的，直到该文件被会话外改动、
    * 该分片被 LRU 淘汰、或插件重载（reset）。命中配额会刷新本条目的 LRU 位次。
    * 已知代价：模型"熬满 maxDenies 次拒绝"即拿到该文件的长期免检。是否收紧属产品决策
@@ -305,7 +305,7 @@ interface SessionState {
 }
 
 /** 缺项集合的规范形态（按 need 去重、固定序，不含 why）——比对收敛用。
- *  规范顺序单源在 lib/gap-directives.ts 的 `NEED_ORDER`（与本文件的渲染口同处一份文件）。 */
+ *  规范顺序唯一来源在 lib/gap-directives.ts 的 `NEED_ORDER`（与本文件的渲染口同处一份文件）。 */
 function needsKey(gaps: readonly FactGap[]): string {
   const has = new Set(gaps.map((gap) => gap.need));
   return NEED_ORDER.filter((need) => has.has(need)).join(",");
@@ -408,7 +408,7 @@ export class FactGate {
 
   /**
    * 只读查询：该目标此刻是否处于**配额放行**态（防死锁承诺）。
-   * 判据与 `tryRelease` 单源（`releaseValid`），但**一个状态都不改**：不建分片、不 touch、
+   * 判据与 `tryRelease` 唯一来源（`releaseValid`），但**一个状态都不改**：不建分片、不 touch、
    * 不删过期项——那些留给真正的 `check()`。
    * 当前**可判定地**仍缺 `read` 时一律返回 false：配额只免上层探查，不能让预检在
    * "模型还没看过当前版本"时替门禁让路。不可判定态沿用旧配额（交互确认是那条路的出口）。
@@ -430,7 +430,7 @@ export class FactGate {
   }
 
   /**
-   * 放行判据的**单源**（`releasedFor` 与 `tryRelease` 共用，两处各写一遍迟早漂成
+   * 放行判据的**唯一来源**（`releasedFor` 与 `tryRelease` 共用，两处各写一遍迟早漂成
    * "预检让路、门禁仍拒"或反过来的两张皮）：条目在、可判定态不缺 `read`、
    * 外部改动水位**严格早于**放行水位。只读，不做任何状态更新。
    */

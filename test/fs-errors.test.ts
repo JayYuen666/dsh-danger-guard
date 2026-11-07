@@ -46,7 +46,11 @@ describe("isNotFoundError：`code` 优先于 message", () => {
   it("message 前缀匹配带词边界：ENOENTX 一类拼接串不算「不存在」", () => {
     assert.equal(isNotFoundError(fsError({ message: "ENOENTX: 不是缺失" })), false);
     assert.equal(isNotFoundError(fsError({ message: "ENOENT: no such file, stat '/x'" })), true);
-    assert.equal(isNotFoundError(fsError({ message: "ENOENT" })), true, "裸前缀也认");
+    assert.equal(
+      isNotFoundError(fsError({ message: "ENOENT" })),
+      true,
+      "只有前缀、后面什么都没有也认",
+    );
   });
 
   it("非对象 / null / 字符串一律不算「不存在」（不猜）", () => {
@@ -55,7 +59,7 @@ describe("isNotFoundError：`code` 优先于 message", () => {
     }
   });
 
-  it("code 不是字符串时按「无 code」回落 message（口径与上一条一致）", () => {
+  it("code 不是字符串时按「无 code」回落 message（规则与上一条一致）", () => {
     const drifted = Object.assign(new Error("ENOENT: ok"), { code: 17 });
     assert.equal(isNotFoundError(drifted), true, "code 非字符串时仍认 message 前缀");
   });
@@ -132,7 +136,7 @@ describe("presenceOfAttempt：三态分类（与平台无关）", () => {
   });
 
   it("非有限的 mtime（NaN / Infinity）按 unknown 处理，不以 present 向外传播", () => {
-    // 下游拿 mtimeMs 做 `>` 跳变判定：NaN 恒假会让外部改动检测静默失效——
+    // 下游拿 mtimeMs 做 `>` 跳变判定：NaN 永远不成立会让外部改动检测静默失效——
     // 注入的假 stat / 上游封装的异常返回值必须在这一层被折成"不可知"。
     for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
       assert.deepEqual(

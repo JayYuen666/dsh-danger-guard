@@ -1,4 +1,4 @@
-// bash 判定与密钥面判定的属性面：单测（test/danger-rules.test.ts，394 例）钉的是想到的
+// bash 判定与密钥检查判定的属性测试：单测（test/danger-rules.test.ts，394 例）钉的是想到的
 // 命令形状，这一层用 fast-check 扫任意文本与变体变换。变体性质的期望值全部来自
 // /tmp 探针实测（本包五条真实存在的规则在 sudo/env/time、bash -c 包裹、&& 后缀、
 // 空白填充四种变换下判定不消失），不从实现派生。
@@ -53,7 +53,7 @@ describe("bashVerdict 与 bashDanger 的出口一致性", () => {
   });
 });
 
-describe("超长命令的保守收口", () => {
+describe("超长命令的保守统一处理", () => {
   it("超过判定上限的命令一律 nestedShellUnconfirmed（探针实测的常量上限 1_000_000）", () => {
     for (const length of [1_000_001, 2_000_000]) {
       assert.equal(bashDanger("x".repeat(length)), "nestedShellUnconfirmed");
@@ -94,7 +94,7 @@ describe("变体不变式：判定只许不变或升档，不许消失（漏拦�
   });
 });
 
-describe("isSecretPath 的密钥面性质", () => {
+describe("isSecretPath 的密钥检查性质", () => {
   /** 合法目录段（不含点开头，避免与密钥文件名形状纠缠）。 */
   const dirSegmentArb = fc.stringMatching(/^[a-z][a-z0-9]{0,7}$/u);
   const dirPrefixArb = fc
@@ -103,7 +103,7 @@ describe("isSecretPath 的密钥面性质", () => {
   /** 密钥名后缀：字母数字下划线（词表的段形是 [A-Za-z0-9_]+，连字符是分隔符不是段内字符）。 */
   const fileSuffixArb = fc.stringMatching(/^[a-z0-9_]{1,8}$/u);
 
-  it(".env 全族（任意目录深度、任意后缀）恒命中", () => {
+  it(".env 及其全部变体（任意目录深度、任意后缀）恒命中", () => {
     fc.assert(
       fc.property(dirPrefixArb, fileSuffixArb, (prefix, suffix) => {
         const dotted = prefix.length > 0 ? `${prefix}/` : "";

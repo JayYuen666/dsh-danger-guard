@@ -1,11 +1,11 @@
-// 设置面的单一来源：条目 schema + 内置默认底座 + 命名空间常量 + 值面快照。
+// 设置界面的单一来源：条目 schema + 内置默认底座 + 命名空间常量 + 值快照。
 //
-// 为什么单独成文件（而不是留在 host.ts）：0.1.7 的 bulkhead 把「设置面」与「拦截面」拆成
+// 为什么单独成文件（而不是留在 host.ts）：0.1.7 的 bulkhead 把「设置界面」与「拦截」拆成
 // 两个 profile 条目（见 README「两个条目」与 cordis.patch.yml）。cordis 在 **apply 之前**
 // 校验条目自己的 Config（vendor/cordis/src/fiber.ts:50 `resolveConfig`、:641-664 `_reload`），
 // 越界值会让**该条目**FAILED。拦截半因此不能再挂 Config——它挂的就是这份严格 schema，
 // 一行笔误就能让整道安全闸门下线。schema 归设置条目（settings-host.ts）持有，
-// 两个产物各自内联本文件（仓内单源，产物各一份），谁也不 import 谁。
+// 两个产物各自内联本文件（仓内唯一来源，产物各一份），谁也不 import 谁。
 //
 // ⚠ 依赖必须是宿主 fork `@deepseek-ai/schemastery`（quality-gate / ctx-observe 同款）：
 //   1) 只有 fork 有原生 `.volatile()`（vendor/schemastery/src/index.ts:480-482 即
@@ -31,14 +31,14 @@ import { DEFAULT_REF_SEARCH_STRICT_TOOLS, DEFAULT_REF_SEARCH_TOOLS } from "./ref
  *  0.1.6 那套 `settingsScope.bind({ namespace })` 已随宿主移除，别再照这里写回去。 */
 export const SETTINGS_NS = "danger-guard-settings";
 
-/** 设置条目向拦截半暴露值面的服务名（`ctx.provide` / `ctx.get` 的官方可选读法：
+/** 设置条目向拦截半暴露值的服务名（`ctx.provide` / `ctx.get` 的官方可选读法：
  *  未提供时 `ctx.get(name)` 返回 undefined 而不抛错——拦截半据此判定"设置面不在"。
- *  刻意不叫 danger-guard：名字要说明它是**值面读数口**，不是闸门本身。 */
+ *  刻意不叫 danger-guard：名字要说明它是**值取值接口**，不是闸门本身。 */
 export const SETTINGS_READER = "dangerGuardSettings";
 
 /** 内置默认底座：0.1.6 交给 `settings.register(ns, schema, { base })` 的那一份，
  *  0.1.7 逐字段落成下面 ConfigSchema 的 `.default(...)`（数组默认值必须是完整清单：
- *  数组整体替换、不做增量合并，settings/index.ts:175-185）。单源留在本处，
+ *  数组整体替换、不做增量合并，settings/index.ts:175-185）。唯一来源留在本处，
  *  schema 与降级读取（numOf/strArray）都引用它，防两处漂移。
  *  ⚠ 设置条目 FAILED / 不在组合里时，拦截半就落回这份——它必须永远是"闸门开着"那一组值。
  *  整体与其数组都冻结：host 的降级路径把这份实例**直接**交给下游当判定配置，任何一处
@@ -60,7 +60,7 @@ export const BUILTIN_BASE: Config = {
   extraDevServerWords: [],
   extraDevRunArgs: [],
   extraSecretPatterns: [],
-  // 检索取证默认名单（单源在 lib/ref-search-policy.ts，与指令文案兜底、client hint 兜底共用）。
+  // 检索取证默认名单（唯一来源在 lib/ref-search-policy.ts，与指令文案兜底、client hint 兜底共用）。
   refSearchTools: [...DEFAULT_REF_SEARCH_TOOLS],
   refSearchStrictTools: [...DEFAULT_REF_SEARCH_STRICT_TOOLS],
 };
@@ -75,7 +75,7 @@ Object.freeze(BUILTIN_BASE);
 export interface Config {
   enabled: boolean;
   factGateEnabled: boolean;
-  /** 编辑前预检（Phase 2，两个面各挂一条官方瀑布）：
+  /** 编辑前预检（Phase 2，两边各挂一条官方瀑布）：
    *  A 面在 `tools/post-execute` 把引用面随**读取结果**交出去（additionalContexts），
    *  B 面在 `tools/pre-execute` 把当场取到的正文/引用面写进**这一次的拒绝理由**，
    *  于是常规流程一次编辑都不会被拒；物理停止仍在 dispatch 之前，"改之前先看清它"没有让。
@@ -88,9 +88,9 @@ export interface Config {
   maxDenies: number;
   /** 严格模式：忽略分档，每个代码文件首次编辑都走全探查（read+refs+所有存在层）。 */
   strictMode: boolean;
-  /** 写面 ≤ 此字符数且不含签名关键字 → low 档（只要 read）。 */
+  /** 写入 ≤ 此字符数且不含签名关键字 → low 档（只要 read）。 */
   smallEditChars: number;
-  /** 写面 > 此字符数 → high 档（大段重写，全探查）。 */
+  /** 写入 > 此字符数 → high 档（大段重写，全探查）。 */
   bigEditChars: number;
   /** 追加的测试层目录名（并入内置层名词表）。 */
   extraTestDirs: string[];
@@ -102,20 +102,20 @@ export interface Config {
    * 只有列在这里的名字才给凭证：第三方检索工具要计入取证，就把它的工具名加进来。
    */
   refSearchTools: string[];
-  /** refSearchTools 里改走「严格相对路径」口径（root + query/fts/vector）的子集。 */
+  /** refSearchTools 里改走「严格相对路径」规则（root + query/fts/vector）的子集。 */
   refSearchStrictTools: string[];
 }
 
-/** 设置条目 apply 收到的值面：全字段 volatile ⇒ 宿主一律以 `Volatile<T>` 引用交付
+/** 设置条目 apply 收到的值：全字段 volatile ⇒ 宿主一律以 `Volatile<T>` 引用交付
  *  （vendor/cosmokit/src/volatile.ts，fork 的 resolve 见 vendor/schemastery/src/index.ts:521-526）。
  *  引用即"现读"：设置卡改完，下一次 `.get()` 就是新值，不需要重载插件。
  *  官方同型声明见 packages/core/agent-default-model/src/index.ts:24-31。
- *  字段清单**从 Config 派生**（映射类型）而不是手抄一遍：新增设置字段时只改 Config 与
+ *  字段清单**从 Config 派生**（映射类型）而不是自己抄一遍：新增设置字段时只改 Config 与
  *  schema 两处，引用面自动跟上——五份清单（Config/ConfigRefs/BUILTIN_BASE/ConfigSchema/
  *  snapshot）里能少抄一份就少抄一份。 */
 export type ConfigRefs = { [Field in keyof Config]: Volatile<Config[Field]> };
 
-/** 把值面（引用）落成一次判定用的 plain Config：下游判定链因此一行不改、也不持有宿主引用。
+/** 把值（引用）落成一次判定用的 plain Config：下游判定链因此一行不改、也不持有宿主引用。
  *  官方同款读法见 quality-gate/host.ts 的 `settingsOf(config)`（逐字段 `.get()`）。
  *  数组字段一律 `[...]` 复制：`Volatile<T>.get()` 对对象返回 `VolatileSnapshot<T>`
  *  （@deepseek-ai/cosmokit 的 volatile.d.ts:3-9 ⇒ `readonly string[]`），而消费侧要的是
@@ -139,9 +139,9 @@ export function snapshot(config: ConfigRefs): Config {
   };
 }
 
-/** 设置条目的 Config schema（= 设置命名空间的表单投影 + 行 config 的校验门槛）。
+/** 设置条目的 Config schema（= 设置命名空间的表单投影 + 行 config 的校验条件）。
  *  约束一项不减：`maxDenies` 的 1..5、`smallEditChars ≥ 1`、`bigEditChars ≥ 2`
- *  既是行 config 的门槛，也是宿主写回前的校验门槛（settings/index.ts:399-409
+ *  既是行 config 的条件，也是宿主写回前的校验条件（settings/index.ts:399-409
  *  validatePaths → 完整 Config 校验；写回另有 config-editor 的 `resolveConfig` 一遍）。
  *  ⚠ 这份严格 schema 现在**只**挂在设置条目上：它校验失败只可能让设置面下线，
  *  拦危险命令的是另一个条目（host.ts），那条路上没有任何用户可编辑的 Config。 */
@@ -158,7 +158,7 @@ export const ConfigSchema = Schema.object({
   extraTestDirs: Schema.array(String)
     .default([...BUILTIN_BASE.extraTestDirs])
     .volatile(),
-  // v6 词表可配置化：用户可扩充危险面（默认空 = 只用内置词表）。
+  // v6 词表可配置化：用户可扩充危险词表（默认空 = 只用内置词表）。
   extraDevServerWords: Schema.array(String)
     .default([...BUILTIN_BASE.extraDevServerWords])
     .volatile(),
@@ -168,7 +168,7 @@ export const ConfigSchema = Schema.object({
   extraSecretPatterns: Schema.array(String)
     .default([...BUILTIN_BASE.extraSecretPatterns])
     .volatile(),
-  // 引用取证的凭证面：可计入的检索工具名 + 其中走严格相对路径口径的子集。
+  // 引用取证的凭证检查：可计入的检索工具名 + 其中走严格相对路径规则的子集。
   // 默认值即修复前 host 里写死的那三个名字与那条 zg_search 分支（判定逐条不变）。
   refSearchTools: Schema.array(String)
     .default([...BUILTIN_BASE.refSearchTools])

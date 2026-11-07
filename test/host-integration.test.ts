@@ -5,12 +5,12 @@
 // 「官方到底怎么把调用交给我们、我们的决定又被官方怎么处理」从来没被跑过：
 //  - 瀑布顺序：`tools/pre-execute` 整趟跑完才轮到单调的 guard（官方只在 `kind==='allow'` 时核 guard）；
 //  - deny 的物化：理由被写成 `Error: <理由>` 的 `isError` 结果，模型收到的不是静默失败；
-//  - `additionalContexts` 在真 dispatch 的结果面上到底存不存在、能不能与别的插件的上下文并存；
+//  - `additionalContexts` 在真 dispatch 的结果的类型上到底存不存在、能不能与别的插件的上下文并存；
 //  - guard 拿到的是**模型字面量**（深冻结，宿主不注入 realpath 形——全仓 grep `resolvedPaths`
 //    零命中，路径解析在工具体内，见 packages/fs/tool-fs/src/read-target.ts:25），
-//    所以软链/相对路径那两面能拦住靠的是本包自己的 realpathOf，这条依赖只写在注释里不算数；
+//    所以软链/相对路径那两处能拦住靠的是本包自己的 realpathOf，这条依赖只写在注释里不算数；
 //  - **直接 `ctx.tools.execute` 不写会话日志**（只有 agent loop 会 appendToolCall）：
-//    于是"模型自己检索过"这类凭证在这一层必然读不到，只有预检的投递水位能顶。
+//    于是"模型自己检索过"这类凭证在这一层必然读不到，只有预检的发送水位能顶。
 //    这条边界是实测出来的事实，所以下面把它写成显式断言，正向用例在
 //    test/agent-loop-e2e.test.ts。
 // 装配与工具见 test/host-spine.ts：真注册、真校验、真执行，read/edit/write 真的读盘写盘，
@@ -21,7 +21,7 @@ import { rm, symlink } from "node:fs/promises";
 import path from "node:path";
 
 import type { Agent } from "@deepseek-ai/dsh-agent";
-// 审批面的两个类型从声明它那一侧取（wire-safe 入口）：本包不依赖它的运行期实现，
+// 审批通道的两个类型取自声明它们的那个 wire-safe 入口：本包不依赖它的运行期实现，
 // 这一层要钉的是"我们的 ask 决定被官方怎么读"。
 import type { ApprovalOutcome, ApprovalRequestEvent } from "@deepseek-ai/dsh-user-approval/types";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
@@ -55,7 +55,7 @@ import {
 import type { Spine } from "./host-spine.ts";
 import { loggedText } from "./setup-logs.ts";
 
-// 外来插件那一条上下文按官方口径自己声明一个 source.kind（官方插件测试同一手法）：
+// 外来插件那一条上下文按官方规则自己声明一个 source.kind（官方插件测试同一手法）：
 // MessageSourceMap 是合并式扩展，不声明就造不出「别的插件的消息」。
 declare module "@deepseek-ai/dsh-llm" {
   interface MessageSourceMap {
@@ -64,7 +64,7 @@ declare module "@deepseek-ai/dsh-llm" {
 }
 
 const { zh } = MESSAGES;
-// 判别段的取法见 host-spine.ts：`[fact-gate]` 是三种口径共用的前缀，拿它当标记等于没断言。
+// 判别段的取法见 host-spine.ts：`[fact-gate]` 是三种规则共用的前缀，拿它当标记等于没断言。
 const HANDOFF_MARK = gateMarkOf(zh.preflightHandoff);
 const ATTACH_MARK = gateMarkOf(zh.preflightAttach);
 const LIST_MARK = gateMarkOf(zh.headFirst);
@@ -105,7 +105,7 @@ function modelText(result: Awaited<ReturnType<typeof dispatch>>): string {
 }
 
 /** 一条必定走**清单**的盲改：先把扫描预算吃光（capTree），B 面才答不出 refs / 层证据而让路，
- *  于是拒绝理由里逐条点名检索口径——想读"指令点了哪些工具"必须走这一档，
+ *  于是拒绝理由里逐条点名检索规则——想读"指令点了哪些工具"必须走这一档，
  *  mid 档与没截断的 high 档都会被 B 面当场递证据，压根不给清单。 */
 async function refsLine(spine: Spine, agent: Agent, callId: string): Promise<string> {
   await capTree(spine);
@@ -158,7 +158,7 @@ describe("真实 spine 下的接线与物化", () => {
     );
   });
 
-  it("软链指到密钥文件仍按密钥面拦，且正文一个字都不出现在理由里", async () => {
+  it("软链指到密钥文件仍按密钥检查拦，且正文一个字都不出现在理由里", async () => {
     const { spine, agent } = await stage();
     const link = path.join(spine.project.root, "looks-harmless.link");
     await symlink(spine.project.envFile, link);
@@ -204,7 +204,7 @@ describe("真实 spine 下的接线与物化", () => {
 
   it("pre-execute 里被拦下的调用不进 guard ⇒ 事实门的轮次不推进", async () => {
     const { spine, agent } = await stage();
-    // 轮次是 guard 的记账，只有走**行动清单**那条路才推进；先把扫描预算吃光，B 面才让路
+    // 轮次是 guard 的记录下来，只有走**行动清单**那条路才推进；先把扫描预算吃光，B 面才让路
     // （否则它当场递证据并写下水位，q3 就直接放行了，这条用例什么也测不到）。
     await capTree(spine);
     const stopper = spine.ctx.on("tools/pre-execute", async (_exec, next) => {
@@ -319,7 +319,7 @@ describe("真实 spine 下的接线与物化", () => {
       path.join(spine.project.root, "src", "big.ts"),
       `// ${"b".repeat(PREFLIGHT_MAX_BYTES + 500)}`,
     );
-    // ⚠ old_string 取短：写面一大就判"大段重写"升 high，走的是清单而不是递证据——
+    // ⚠ old_string 取短：写入一大就判"大段重写"升 high，走的是清单而不是递证据——
     // 这条要钉的是"目标很大"，不是"这次改动很大"。
     const result = await dispatch(spine, agent, "g1", TOOL_EDIT, {
       file_path: big,
@@ -381,7 +381,7 @@ describe("真实 spine 下的接线与物化", () => {
     assert.match(await readDisk(fresh), /export const created/u, "放行即落盘");
   });
 
-  it("直接 dispatch 的调用不落会话日志 ⇒ 这一层的放行只可能来自预检自己的投递水位", async () => {
+  it("直接 dispatch 的调用不落会话日志 ⇒ 这一层的放行只可能来自预检自己的发送水位", async () => {
     const { spine, agent } = await stage();
     const file = await addSource(spine, "nolog.ts");
     const blind = highBlind(file, "x");
@@ -401,13 +401,13 @@ describe("真实 spine 下的接线与物化", () => {
     assert.equal(
       afterSearch.isError,
       false,
-      "放行的是 l1 那趟投递写下的水位（下一枚用例把「模型自己搜过」这条单独钉死）",
+      "放行的是 l1 那趟发送写下的水位（下一枚用例把「模型自己搜过」这条单独钉死）",
     );
   });
 
   it("模型自己 dispatch 的检索换不到凭证 ⇒ 引用面仍由本包当场扫一遍", async () => {
-    // 与上一枚用例的对照：这一台从头到尾只让模型自己 grep 过（没有任何预检投递），
-    // 若那次 grep 被记账，本包就不必再扫，拒绝理由里也不会有引用面这一块。
+    // 与上一枚用例的对照：这一台从头到尾只让模型自己 grep 过（没有任何预检发送），
+    // 若那次 grep 被记录下来，本包就不必再扫，拒绝理由里也不会有被引用这一块。
     const { spine, agent } = await stage();
     const file = await addSource(spine, "solo.ts");
     const searched = await dispatch(spine, agent, "s1", "grep", {
@@ -447,7 +447,7 @@ describe("真实 spine 下的接线与物化", () => {
 
   it("maxDenies 用尽 ⇒ 配额放行并留下一条警告（真实轮次，不是桩里的计数）", async () => {
     const { spine, agent } = await stage({ maxDenies: 1 });
-    // 配额是 guard 的记账：只有走清单的那条路才推进轮次，所以先把扫描预算吃光（B 面答不出）
+    // 配额是 guard 的记录下来：只有走清单的那条路才推进轮次，所以先把扫描预算吃光（B 面答不出）
     await capTree(spine);
     const file = await addSource(spine, "quota.ts");
     const first = await dispatch(spine, agent, "d1", TOOL_EDIT, highBlind(file, "a"));
@@ -502,7 +502,7 @@ describe("真实 spine 下的接线与物化", () => {
     assert.doesNotMatch(
       text,
       /root 指向/u,
-      "严格口径的 root/query/fts/vector 属于那枚插件，没装就不该给这条路由",
+      "严格规则的 root/query/fts/vector 属于那枚插件，没装就不该给这条路由",
     );
     assert.ok(text.includes("grep"), "注册在位的两条照点");
     assert.ok(text.includes("glob"));
@@ -515,13 +515,13 @@ describe("真实 spine 下的接线与物化", () => {
     assert.ok(text.includes("grep"), "注册在位的那条照点");
   });
 
-  it("名单整条都不在这台宿主上 ⇒ 明说「无法记账」，而不是给一条走不通的路", async () => {
+  it("名单整条都不在这台宿主上 ⇒ 明说「无法记录下来」，而不是给一条走不通的路", async () => {
     const { spine, agent } = await stage({ refSearchTools: ["nope_a", "nope_b"] });
     const text = await refsLine(spine, agent, "t3");
     assert.doesNotMatch(text, /nope_a|nope_b/u, "两条都不存在，一条都不该点");
     assert.ok(
       text.includes("当前没有可计入取证的检索工具"),
-      `应给出「无法记账」那句指令，实际：${text.slice(0, 320)}`,
+      `应给出「无法记录下来」那句指令，实际：${text.slice(0, 320)}`,
     );
   });
 
@@ -551,14 +551,14 @@ describe("真实 spine 下的接线与物化", () => {
     await Promise.all([rm(broken), rm(escape), rm(outside)]);
   });
 
-  it("引用命中不许把凭据文件的正文抄进证据（扫描面也算外泄）", async () => {
+  it("引用命中不许把凭据文件的正文抄进证据（扫描范围也算外泄）", async () => {
     const { spine, agent } = await stage();
     const file = await addSource(spine, "token.ts");
     // 让 `.env` 的某一行撞上目标的词干：这正是"引用命中"会被抄出去的那种行
     await writeDisk(spine.project.envFile, 'token = "sk-scan-leak-sentinel"\n');
     const result = await dispatch(spine, agent, "e2e1", TOOL_EDIT, midBlind(file));
     const text = modelText(result);
-    assert.ok(text.includes(HANDOFF_MARK), "B 面照给证据（这条不改判据强度）");
+    assert.ok(text.includes(HANDOFF_MARK), "B 面照给证据（这条不改判据的强度）");
     assert.doesNotMatch(
       text,
       /sk-scan-leak-sentinel/u,
@@ -583,11 +583,11 @@ describe("真实 spine 下的接线与物化", () => {
       (bare?.findings ?? []).some((finding) => finding.text.includes("sk-scan-leak-sentinel")),
       "对照组失效说明磁盘形状变了，上面的绿也就不能算证住了什么",
     );
-    assert.equal(bare?.quarantined, 0, "不给判据时不该有隔离计数");
+    assert.equal(bare?.quarantined, 0, "不传隔离判据时不该有隔离计数");
   });
 
   it("隔离判据吃用户追加的词表：extraSecretPatterns 点名的路径同样不抄正文", async () => {
-    // 这条同时钉两件事：① 扫描侧与密钥闸吃**同一把**词表（用户追加的模式在扫描面也生效）；
+    // 这条同时钉两件事：① 扫描侧与密钥闸吃**同一把**词表（用户追加的模式在扫描里同样生效）；
     // ② 内置分支之外的"有 extraSecretPatterns"那一支真被执行过（覆盖率只说走到没走到，
     //    这里说的是它确实改变了结论）。
     const { spine, agent } = await stage({ extraSecretPatterns: [String.raw`deploy\.sh`] });
@@ -611,13 +611,13 @@ describe("真实 spine 下的接线与物化", () => {
 // 这一组存在的理由（与上面几组同源）：`{ kind: "ask" }` 是**宿主的**决定形状，不是我们的。
 // 单元层只能证"我们交出了那个形状"，证不了"官方怎么读它、怎么物化它的结论"。所以这里
 // 用真 `ToolRuntime` 走到官方的 `prepareExecution` → `serviceAsk`，而**答案**从一枚替身
-// 审批服务来（官方那一侧只负责把答案映射成放行/拒绝——那是我们要钉的那一段）。
+// 审批服务来（官方只负责把答案映射成放行/拒绝——那一段正是我们要钉住的）。
 //
 // 四条命题：
-//   ① 无审批面（headless / CI）⇒ **fail-closed**：拒绝，且用**我们**交的 reason 当理由；
+//   ① 无审批通道（headless / CI）⇒ **fail-closed**：拒绝，且用**我们**交的 reason 当理由；
 //   ② `allowed-once` ⇒ 真的放行并执行（审批不是"再拒一次"）；
 //   ③ `rejected` / `unavailable` ⇒ 拒绝，且**工具体没有被调用**（物理停止在 dispatch 之前）；
-//   ④ 请求带上了我们的 `reason` 与**逐语言**的 `displayReason`（弹窗那一面）。
+//   ④ 请求带上了我们的 `reason` 与**逐语言**的 `displayReason`（弹窗上给用户看的那句）。
 /** 官方四种结论里我们最常用的那一枚（收常量：sonarjs 的 no-duplicate-string 盯重复字面量）。 */
 const ALLOWED_ONCE: ApprovalOutcome = "allowed-once";
 
@@ -649,10 +649,10 @@ describe("需确认档（ask 通道）：官方 serviceAsk 的四个出口", () 
   // 那样测到的就不是审批通道）——照既有用例的给法补齐。
   const askExec = { description: "检查嵌套体", command: ASK_COMMAND } as const;
 
-  it("无审批面 ⇒ fail-closed：拒绝，理由用我们交的那句（不是静默放行）", async () => {
+  it("无审批通道 ⇒ fail-closed：拒绝，理由用我们交的那句（不是静默放行）", async () => {
     const { spine, agent } = await stageAsk();
     const text = modelText(await dispatch(spine, agent, "ask-none", TOOL_BASH, askExec));
-    // 官方的降级臂给的是 `ask.reason ?? <它自己的兜底句>` —— 我们交了就一定是我们的那句。
+    // 官方的降级分支给的是 `ask.reason ?? <它自己的兜底句>` —— 我们交了就一定是我们的那句。
     // 理由 = 基础文案 + 档位说明。这个 spine 没装沙箱执行器 ⇒ 模式读不到 ⇒ 保守列。
     assert.equal(text, `Error: ${MESSAGES.zh.nestedShellUnconfirmed}\n${MESSAGES.zh.noteUnknown}`);
   });
@@ -687,7 +687,7 @@ describe("需确认档（ask 通道）：官方 serviceAsk 的四个出口", () 
     assert.match(text, /was cancelled/u);
   });
 
-  it("审批请求带上我们的 reason 与**逐语言**的 displayReason（弹窗那一面）", async () => {
+  it("审批请求带上我们的 reason 与**逐语言**的 displayReason（弹窗上给用户看的那句）", async () => {
     const { spine, agent, requests } = await stageAsk(ALLOWED_ONCE);
     await dispatch(spine, agent, "ask-payload", TOOL_BASH, askExec);
     assert.equal(requests.length, 1, "一次 ask 恰好问一次");
@@ -706,7 +706,7 @@ describe("需确认档（ask 通道）：官方 serviceAsk 的四个出口", () 
     });
   });
 
-  it("deny 档的命令**不问审批**（同一张 RULE_TIER：两档互斥，不可能双重收口）", async () => {
+  it("deny 档的命令**不问审批**（同一张 RULE_TIER：两档互斥，不可能双重统一处理）", async () => {
     const { spine, agent, requests } = await stageAsk(ALLOWED_ONCE);
     const result = await dispatch(spine, agent, "ask-not", TOOL_BASH, {
       description: "清理",

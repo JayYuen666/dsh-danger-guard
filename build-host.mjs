@@ -4,13 +4,13 @@
 // 构建 host 产物（host.js + settings.js）：每个入口单独一次 rolldown（不是同一次多输入——
 // 多输入会把 lib/settings-schema.ts 提成共享 chunk，本包要的是两个自包含单文件），落在
 // **包根**（与源码同目录，故 `import.meta.dirname` 的语义与源码态完全一致）。
-// 编排（依赖段外部化、输出守卫、region 正典化、moduleIds 结构性判据）统一住在
+// 编排（依赖段外部化、输出守卫、region 路径规范化、moduleIds 结构性判据）统一实现在
 // @jayyuen66/dsh-plugin-shared/lib/build-host，一处可改；本文件只声明产物表、生成头与本仓
 // 的两件取舍：minify（装载器只 import() 文本，注释与空白是真实装载成本）与装饰器预转换
 // （为什么必须有：见 decorator-transform.mjs 的文件头）。
-// minify 下 `//#region` 标记不再出现，正典化是空操作但保留（压的是「cwd 泄漏进产物」这条
+// minify 下 `//#region` 标记不再出现，规范化是空操作但保留（压的是「cwd 泄漏进产物」这条
 // 性质，rolldown 一旦恢复标记就立刻重新需要）；内联体的函数名会被 mangle，任何「某函数体
-// 没被内联」的文本判据都会恒绿，跨包外部化的门禁因此走**结构性判据**：buildHostReport /
+// 没被内联」的文本判据都会无条件通过，跨包外部化的门禁因此走**结构性判据**：buildHostReport /
 // buildSettingsReport 交回 chunk 的内联模块 id 清单，由用例对着 package.json 的依赖表判
 // 「一个都没进来」。
 // 不产 .d.ts：插件包对外没有 TS API——dsh 按包名载入运行，没有人 import 它。
@@ -23,7 +23,7 @@ export { singleEntryChunk } from "@jayyuen66/dsh-plugin-shared/lib/build-artifac
 
 const root = import.meta.dirname;
 
-/** 两个产物的落盘名（构建、查表与门禁多处共用，钉成常量防漂移）。 */
+/** 两个产物的写到磁盘名（构建、查表与门禁多处共用，钉成常量防漂移）。 */
 const HOST_OUTPUT = "host.js";
 const SETTINGS_OUTPUT = "settings.js";
 
@@ -43,7 +43,7 @@ const ENTRIES = [
   },
 ];
 
-/** 同一进程内源码不会变：四个导出（与直跑落盘）共用同一次构建，
+/** 同一进程内源码不会变：四个导出（与直跑写到磁盘）共用同一次构建，
  *  避免重复 rolldown，也让「产物 + 内联模块清单」始终来自同一批结果。
  *  @type {Promise<import("@jayyuen66/dsh-plugin-shared/lib/build-host").HostArtifact[]> | undefined} */
 let cachedBuild;

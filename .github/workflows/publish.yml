@@ -60,12 +60,12 @@ jobs:
           node-version: 24.9
           registry-url: https://registry.npmjs.org
           cache: pnpm
-      # 静态 token 是 OIDC 失败时的兜底，不是发布的前提：仓库里没有这枚 secret 是正常状态，
+      # 静态 token 是 OIDC 失败时的后备，不是发布的前提：仓库里没有这枚 secret 是正常状态，
       # 走 trusted publishing 的仓库本来就不该长期存它。所以这一步在值为空时放行，只把
       # 凭据本身不跨步骤传递：步骤输出会落成 RUNNER_TEMP 下的文件，同 job 后续步骤
       # （含 install 与 check 里跑的依赖脚本）都能枚举读到；写进 job 级环境同理。
       # 因此形态校验、预检与发布各自从 secrets 取一次、各自就地清洗；三处清洗必须同形。
-      # 静态 token 只是兜底，所以这里判的是「还能不能用」，不是「必须有效」：
+      # 静态 token 只是后备，所以这里判的是「还能不能用」，不是「必须有效」：
       #   · 200      → 原样传给发布步
       #   · 401/403  → 告警并清空，让发布步走 OIDC。凭据失效不是工作流该红的理由，
       #                OIDC 也没配好时发布步会在认证处以 ENEEDAUTH 红，那一步才是真判据。
@@ -81,7 +81,7 @@ jobs:
           PASS_TOKEN="$(printf '%s' "${TOKEN:-}" | bash .github/scripts/normalize-token.sh)"
           if [ -n "$PASS_TOKEN" ]; then echo "::add-mask::$PASS_TOKEN"; fi
           # 形态校验就地做（清洗后的值不跨步骤传递）。GitHub token 对 npmjs 无效，
-          # 送去 whoami 等于把一枚 GH 凭据交给 npm，必须当场拒；但兜底凭据不应成为
+          # 送去 whoami 等于把一枚 GH 凭据交给 npm，必须当场拒；但后备凭据不应成为
           # 发布的前提——告警并清空后按 OIDC 发布，是否真能发由 publish 步判。
           case "$PASS_TOKEN" in
             "") : ;;
@@ -145,7 +145,7 @@ jobs:
       # prepack 会重建 host.js / client.js / types/，产物不入库也发得出去。
       # 凭据优先级：OIDC 在前，这枚 NODE_AUTH_TOKEN 在后（pnpm 的 publish_options.rs 原话
       # "OIDC takes precedence over a configured static token"）。trusted publisher 配好时
-      # 它根本不参与认证，交换失败才轮到它——留着是兜底，不是主路。
+      # 它根本不参与认证，交换失败才轮到它——留着是后备，不是主路。
       # 注入方式只能是环境变量：setup-node 配了 registry-url 会把 `${NODE_AUTH_TOKEN}` 占位写进
       # RUNNER_TEMP/.npmrc 并用 NPM_CONFIG_USERCONFIG 指过去，$HOME/.npmrc 被忽略；真 token 留在
       # 环境变量里。别往仓库里的 .npmrc 写明文——pnpm 不展开仓库级 .npmrc 里的 `${...}` 占位

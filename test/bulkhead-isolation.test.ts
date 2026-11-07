@@ -41,7 +41,7 @@ const ST = {
  *  但少一处 promise 构造与 executor 返回值的坑。 */
 const settle = (): Promise<void> => sleep(0);
 
-/** 读数口形状守卫（类型谓词，不是断言）：`ctx.get` 给的是 unknown。 */
+/** 取值接口形状守卫（类型谓词，不是断言）：`ctx.get` 给的是 unknown。 */
 function isReader(value: unknown): value is SettingsReader {
   return (
     typeof value === "object" &&
@@ -141,13 +141,13 @@ describe("bulkhead 隔离性：坏 Config 只能杀设置面，杀不掉闸门",
     assert.equal(guard.state, ST.ACTIVE, "拦截条目必须照常装配");
     assert.equal(settings.state, ST.FAILED, "坏 Config 只炸设置条目自己");
     assert.ok(tools.predicate, "guard 谓词已挂上");
-    // 设置条目没 provide 读数口 ⇒ 拦截半读不到 ⇒ 回落 BUILTIN_BASE（maxDenies 仍是安全值）
+    // 设置条目没 provide 取值接口 ⇒ 拦截半读不到 ⇒ 回落 BUILTIN_BASE（maxDenies 仍是安全值）
     assert.equal(ctx.get(SETTINGS_READER, false), undefined);
     assert.equal(typeof tools.predicate(rmrf), "string", "降级路径下危险命令照拦");
     await ctx.fiber.dispose();
   });
 
-  it("设置条目合法时挂出读数口，拦截半读到用户改的值（bulkhead 不是常态代价）", async () => {
+  it("设置条目合法时挂出取值接口，拦截半读到用户改的值（bulkhead 不是常态代价）", async () => {
     const { ctx, guard, settings } = harness({ maxDenies: 1, strictMode: true });
     await settle();
     assert.equal(guard.state, ST.ACTIVE);

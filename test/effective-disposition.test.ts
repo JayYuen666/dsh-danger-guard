@@ -1,9 +1,9 @@
-// test/effective-disposition.ts 的单元测试：扫描层与收口共用的**实际处置**。
+// test/effective-disposition.ts 的单元测试：扫描层与统一处理共用的**实际处置**。
 //
 // 为什么单列：这一族的主张全是可以在无宿主环境下断言的行为——
-//   · 惰性单次读取（非覆盖键不碰宿主服务面；同一实例内只读一次）；
-//   · 服务面抛错时的保守兜底（异常不冒出排序阶段，rmrf 保持 deny）；
-//   · 沙箱覆盖把 rmrf 从 deny 折成 allow，且排序结论与收口结论同源（verdictOf）；
+//   · 惰性单次读取（非覆盖键不碰宿主服务；同一实例内只读一次）；
+//   · 宿主服务抛错时的保守兜底（异常不冒出排序阶段，rmrf 保持 deny）；
+//   · 沙箱覆盖把 rmrf 从 deny 折成 allow，且排序结论与统一处理结论同源（verdictOf）；
 //   · cwd 的铸造边界校验绝对性（相对 cwd 不得按 process.cwd() 解析出假覆盖）。
 // host 侧的接线（工厂每调用建一枚、guard 与审批通道吃同一枚）由 test/host.test.ts 钉。
 import { describe, it } from "vitest";
@@ -26,7 +26,7 @@ const FACTS: PolicyFacts = {
   sandboxCovers: false,
 };
 
-/** 执行器自报在拦 + 策略解析出同一 mode、唯一可写根 `/ws` 的宿主服务面。 */
+/** 执行器自报在拦 + 策略解析出同一 mode、唯一可写根 `/ws` 的宿主服务。 */
 const confiningHost: EffectiveDispositionHost = {
   shellRaw: () => ({ sandboxMode: WORKSPACE_MODE }),
   policyRaw: () => ({ resolve: () => ({ mode: WORKSPACE_MODE, workspaceRoot: "/ws" }) }),
@@ -44,7 +44,7 @@ const privatePrefixed = (absolute: string): string =>
   absolute.startsWith("/private") ? absolute : `/private${absolute}`;
 
 describe("effectiveDispositionOf：惰性与覆盖", () => {
-  it("非沙箱覆盖键不碰宿主服务面：shellRaw / policyRaw 一次都不调", () => {
+  it("非沙箱覆盖键不碰宿主服务：shellRaw / policyRaw 一次都不调", () => {
     let reads = 0;
     const count = (): undefined => {
       reads += 1;
@@ -65,7 +65,7 @@ describe("effectiveDispositionOf：惰性与覆盖", () => {
     assert.equal(reads, 0);
   });
 
-  it("沙箱覆盖把 rmrf 从 deny 折成 allow；同一实例只读一次宿主面", () => {
+  it("沙箱覆盖把 rmrf 从 deny 折成 allow；同一实例只读一次宿主接口", () => {
     let reads = 0;
     const effective = effectiveDispositionOf({
       facts: FACTS,
@@ -82,7 +82,7 @@ describe("effectiveDispositionOf：惰性与覆盖", () => {
     // `/etc/foo` 包不住任何可写根 → 沙箱整体拦下 → 让路。
     assert.equal(effective.dispositionOf(rmrfWith(["/etc/foo"])), "allow");
     assert.equal(reads, 1, "宿主面惰性读一次，排序多次求值不重复读盘");
-    // 收口与排序同源：同一 (key, fix) 一次求出结论与覆盖后的事实。
+    // 统一处理与排序同源：同一 (key, fix) 一次求出结论与覆盖后的事实。
     const outcome = effective.verdictOf("rmrf", {
       role: "disasterTarget",
       offending: ["/etc/foo"],
@@ -91,9 +91,9 @@ describe("effectiveDispositionOf：惰性与覆盖", () => {
     assert.equal(outcome.facts.sandboxCovers, true);
   });
 
-  it("策略面同样只读一次（排序与收口共用同一份缓存）", () => {
+  it("策略同样只读一次（排序与统一处理共用同一份缓存）", () => {
     let reads = 0;
-    // 宿主面整份复用 confiningHost，只换 policyRaw 计数那一枚：三处字面复制会在 confiningHost
+    // 宿主接口整份复用 confiningHost，只换 policyRaw 计数那一枚：三处字面复制会在 confiningHost
     // 变更时漏改，而这条用例要钉的恰好只是「只读一次」。
     const effective = effectiveDispositionOf({
       ...confiningHost,
@@ -113,7 +113,7 @@ describe("effectiveDispositionOf：惰性与覆盖", () => {
     assert.equal(reads, 1, "策略解析也只读一次");
   });
 
-  it("宿主实现抛错 ⇒ 排序与收口都按不让路兜底（异常不外冒）", () => {
+  it("宿主实现抛错 ⇒ 排序与统一处理都按不让路兜底（异常不外冒）", () => {
     const throwOnPolicy = effectiveDispositionOf({
       facts: FACTS,
       session: undefined,
@@ -212,7 +212,7 @@ describe("effectiveDispositionOf：惰性与覆盖", () => {
       cwd: undefined,
       ...confiningHost,
     });
-    // 只有 disasterTarget 的**绝对词面**需要折；别的 role 折它等于凭空造出一份删除目标，
+    // 只有 disasterTarget 的**绝对路径词**需要折；别的 role 折它等于凭空造出一份删除目标，
     // 而覆盖判据会照着那份假清单放行。
     assert.equal(
       effective.coveredFactsOf("rmrf", { role: "bypassFlag", offending: ["--force"] }),
@@ -241,7 +241,7 @@ describe("effectiveDispositionOf：灾难目标先折规范形再比可写根（
   });
 });
 
-describe("effectiveDispositionOf：宿主服务面异常的保守兜底", () => {
+describe("effectiveDispositionOf：宿主服务异常的保守兜底", () => {
   it("shellRaw / resolve 抛错 ⇒ 交回 undefined，rmrf 保持 deny，异常不冒出排序", () => {
     const effective = effectiveDispositionOf({
       facts: FACTS,
@@ -267,10 +267,10 @@ describe("effectiveDispositionOf：宿主服务面异常的保守兜底", () => 
 describe("effectiveDispositionFactory：cwd 的铸造边界", () => {
   it("相对 cwd 不打 brand：相对灾难目标不按 process.cwd() 解析，宁可不让路", () => {
     const effective = effectiveDispositionFactory(confiningHost)(undefined, "w/proj", FACTS);
-    // cwd 若被原样品牌化，`.` 会按 process.cwd() 解析出一个与 /ws 无关的绝对形，
+    // cwd 若被原样打上 brand，`.` 会按 process.cwd() 解析出一个与 /ws 无关的绝对形，
     // 一次真实的工作区删除会被误判成"沙箱已覆盖"而放行。
     assert.equal(effective.dispositionOf(rmrfWith(["."])), "deny");
-    // 排序与收口同一份事实：覆盖后 facts 也不得报"沙箱已覆盖"。
+    // 排序与统一处理同一份事实：覆盖后 facts 也不得报"沙箱已覆盖"。
     assert.equal(
       effective.verdictOf("rmrf", rmrfWith(["."]).fix).facts.sandboxCovers,
       false,
@@ -287,7 +287,7 @@ describe("effectiveDispositionFactory：cwd 的铸造边界", () => {
   it("绝对 cwd 照常参与归一：相对目标按它解析，不绝对化时才判覆盖", () => {
     const effective = effectiveDispositionFactory(confiningHost)(undefined, "/elsewhere", FACTS);
     // `/elsewhere` 之下没有任何可写根（根只有 /ws 与 /tmp 系）→ 让路。
-    // 这一条同时是品牌化生效的证明：把工厂里的绝对性判断改成恒 `cwd: undefined` 时，
+    // 这一条同时是 brand 生效的证明：把工厂里的绝对性判断改成恒 `cwd: undefined` 时，
     // `.` 退回相对形态、按不让路处理，这条断言就红（变异实测过）。
     assert.equal(effective.dispositionOf(rmrfWith(["."])), "allow");
   });

@@ -1,6 +1,6 @@
-// host.ts：引用取证「可计入的检索工具」名单 + 判据口径改为设置项的运行路径接线测试。
+// host.ts：引用取证「可计入的检索工具」名单 +判据规则改为设置项的运行路径接线测试。
 //
-// 背景：门禁的取证记账原先把工具名写死成 grep/glob/zg_search（zg_search 是**另一包**
+// 背景：门禁的取证记录下来原先把工具名写死成 grep/glob/zg_search（zg_search 是**另一包**
 //   zvec-grep 注册的工具名），第三方提供的检索工具（rg_search / semgrep_scan…）无论怎么
 //   搜都不被计入 → 门禁持续以"没检索过"拒绝，拒绝理由与模型可执行的路径彻底脱节。
 //   这不是硬依赖（没装 zvec-grep 时那条分支只是永不命中），真正的缺陷是**排他**。
@@ -12,7 +12,7 @@
 // 断言设计原则（可判定性）：
 //   1) 同一份取证证据 + 只改一个设置值 → 门禁结果必须翻转；
 //   2) 拒绝文案点名的工具名必须与生效名单一致（新名字出现、被移除的名字不出现）；
-//   3) 默认名单下逐条复现修复前的判定（含 zg_search 的严格相对路径口径）。
+//   3) 默认名单下逐条复现修复前的判定（含 zg_search 的严格相对路径规则）。
 import { describe, it, afterAll, beforeAll } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -21,7 +21,7 @@ import path from "node:path";
 import plugin, { BUILTIN_BASE } from "../host.ts";
 import type { Config } from "../host.ts";
 import { SETTINGS_READER } from "../lib/settings-schema.ts";
-// 口径面（名单 → 判据映射）单源在 lib/ref-search-policy.ts。
+// 名单到判据的映射只有一份来源，在 lib/ref-search-policy.ts。
 import {
   DEFAULT_REF_SEARCH_STRICT_TOOLS,
   DEFAULT_REF_SEARCH_TOOLS,
@@ -29,9 +29,9 @@ import {
 } from "../lib/ref-search-policy.ts";
 import type { RefSearchPolicy } from "../lib/ref-search-policy.ts";
 // 会话日志出自官方 SessionEvent 夹具构造器（信封必填位与 ToolCallId/MessageId/SessionSeq
-// 品牌都在夹具里补一次）；fx 前缀避开与 makeEvents() 交出的局部 `call` 遮蔽。
+// 的 `brand` 标记都在夹具里补一次）；fx 前缀避开与 makeEvents() 交出的局部 `call` 遮蔽。
 import { call as fxCall, result as fxResult } from "./fixtures/events.ts";
-// 事件类型与生产面（host.ts）同源：官方判别联合由 shared 具名 re-export。
+// 事件类型与生产代码（host.ts）同源：官方判别联合由 shared 具名 re-export。
 import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 
 // ── 轻量宿主替身（同 test/host-tier-settings.test.ts 契约）────────────────────
@@ -39,11 +39,11 @@ interface MockCtx {
   tools: {
     guard: (fn: (exec: Record<string, unknown>) => string | undefined) => () => void;
   };
-  /** 0.1.7 的 settings 面：拦截半只调 describe()（locale 偏好读面）。 */
+  /** 0.1.7 的 settings 面：拦截半只调 describe()（locale 偏好读取接口）。 */
   settings: {
     describe: () => { ns: string; value: unknown; revision: number }[];
   };
-  /** cordis 可选服务读法：只给设置条目挂出的值面读数口。 */
+  /** cordis 可选服务读法：只给设置条目挂出的值取值接口。 */
   get: (name: string) => unknown;
   guardInstalled: { fn: (exec: Record<string, unknown>) => string | undefined } | null;
   effects: (() => void)[];
@@ -55,7 +55,7 @@ function createMockCtx(): MockCtx {
   const ctx: MockCtx = {
     guardInstalled: null,
     effects: [],
-    // 内置默认底座（名单默认值 = lib/ref-search-policy.ts 单源常量），用例再逐项覆写名单。
+    // 内置默认底座（名单默认值 = lib/ref-search-policy.ts 唯一来源常量），用例再逐项覆写名单。
     value: { ...BUILTIN_BASE },
     tools: {
       guard(fn) {
@@ -86,7 +86,7 @@ const applyPlugin = (ctx: MockCtx): void => {
 };
 
 /**
- * 把值面写成**不合 Config 型**的形状（0.1.7 里 schema 会先拒这些值，所以正常通道写不进来；
+ * 把值写成**不合 Config 型**的形状（0.1.7 里 schema 会先拒这些值，所以正常通道写不进来；
  *  这里要证的仍是"运行路径自己收敛"）。经 Object.assign 走 unknown 通道：用例照旧断言，
  *  但不靠 `as never` 把 Config 的类型关掉。
  */
@@ -100,16 +100,16 @@ function poke(config: Config, field: keyof Config, dirty: unknown): void {
 let root: string;
 let target: string;
 
-/** 两种口径的名字：多处断言共用，避免同一字面量反复出现。 */
+/** 两种规则的名字：多处断言共用，避免同一字面量反复出现。 */
 const PATTERN = "pattern";
 const STRICT_RELATIVE = "strict-relative";
 
 /** 目标文件名：既是落地的源文件名，也是各检索日志里指向它的 pattern/query。
- *  字面量散在十条用例里改一处就漏（`no-duplicate-string` 点的就是这种漂移面）。 */
+ *  字面量散在十条用例里改一处就漏（`no-duplicate-string` 点的就是这种漂移）。 */
 const TARGET_BASENAME = "policy-mod.ts";
-/** 目标所在目录（mkdir 与严格口径的相对路径共用同一来源，改名不会只漏一处）。 */
+/** 目标所在目录（mkdir 与严格规则的相对路径共用同一来源，改名不会只漏一处）。 */
 const SRC_DIR = "src";
-/** 严格口径的 POSIX 相对路径（不能用 path.join：Windows 上会带反斜杠）。 */
+/** 严格规则的 POSIX 相对路径（不能用 path.join：Windows 上会带反斜杠）。 */
 const TARGET_REL = `${SRC_DIR}/${TARGET_BASENAME}`;
 
 /** 一次 edit 调用：会话带 cwd（相对路径与"目标相对路径"判据都要它才成立）。 */
@@ -166,7 +166,7 @@ const MID_ARGS = {
 /** low 档改动：≤small(200) 且不触签名 → 只要 read（用于隔离"空名单只关引用面"）。 */
 const SMALL_ARGS = { old_string: "const value = 1", new_string: "const value = 2" };
 
-describe("引用取证的可计入检索工具名单与判据口径", () => {
+describe("引用取证的可计入检索工具名单与判据规则", () => {
   beforeAll(async () => {
     root = await mkdtemp(path.join(tmpdir(), "dg-refsearch-"));
     await mkdir(path.join(root, SRC_DIR), { recursive: true });
@@ -183,7 +183,7 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
     it("默认名单：BUILTIN_BASE 等于内置单源常量（防三处漂移）", () => {
       const ctx = createMockCtx();
       applyPlugin(ctx);
-      // 0.1.7 没有 register 的 base：底座就是拦截半读不到设置值面时回落的 BUILTIN_BASE，
+      // 0.1.7 没有 register 的 base：底座就是拦截半读不到设置值时回落的 BUILTIN_BASE，
       // 它与 ConfigSchema 的 .default(...) 同源（lib/settings-schema.ts）。
       assert.deepEqual(BUILTIN_BASE.refSearchTools, [...DEFAULT_REF_SEARCH_TOOLS]);
       assert.deepEqual(BUILTIN_BASE.refSearchStrictTools, [...DEFAULT_REF_SEARCH_STRICT_TOOLS]);
@@ -191,7 +191,7 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       assert.deepEqual([...DEFAULT_REF_SEARCH_STRICT_TOOLS], ["zg_search"], "今天的严格分支");
     });
 
-    it("grep 与 glob 的项目级检索各计入一次引用取证（pattern/include 口径）", () => {
+    it("grep 与 glob 的项目级检索各计入一次引用取证（pattern/include 规则）", () => {
       const ctx = createMockCtx();
       applyPlugin(ctx);
       // 两个键名各喂一次：签名读的是 `sigOf(pattern, include)`，只钉 pattern 时
@@ -202,13 +202,13 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
           assert.equal(
             fire(ctx, `default-${tool}-${key}`, log, MID_ARGS),
             undefined,
-            `${tool} 的 ${key} 口径都要计入引用取证`,
+            `${tool} 的 ${key} 规则都要计入引用取证`,
           );
         }
       }
     });
 
-    it("zg_search 仍走严格口径：query/fts/vector + root 作用域，取错字段或无关词都不算", () => {
+    it("zg_search 仍走严格规则：query/fts/vector + root 作用域，取错字段或无关词都不算", () => {
       const ctx = createMockCtx();
       applyPlugin(ctx);
       const byName = searchLog("zg_search", { query: [TARGET_BASENAME], root });
@@ -231,7 +231,7 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       const patternOnly = searchLog("zg_search", { root, pattern: TARGET_BASENAME });
       assert.ok(
         fire(ctx, "default-zg-pattern-blind", patternOnly, MID_ARGS) !== undefined,
-        "严格口径不读 pattern/include：签名取错字段就不算取证",
+        "严格规则不读 pattern/include：签名取错字段就不算取证",
       );
       // 标题承诺的三位里 fts 与 query 已有用例，vector 以前没有：它和 fts 同槽
       // （`sigOf(fts, vector)`），只读 fts 的实现当时不会红 —— 语义检索那条腿就此失联。
@@ -239,7 +239,7 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       assert.equal(
         fire(ctx, "default-zg-vector", byVector, MID_ARGS),
         undefined,
-        "vector 与 fts 同槽：按语义检索查过也要记账",
+        "vector 与 fts 同槽：按语义检索查过也要记录下来",
       );
       const byQueries = searchLog("zg_search", { queries: [TARGET_BASENAME], root });
       assert.equal(
@@ -250,7 +250,7 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       const includeOnly = searchLog("zg_search", { root, include: TARGET_BASENAME });
       assert.ok(
         fire(ctx, "default-zg-include-blind", includeOnly, MID_ARGS) !== undefined,
-        "严格口径不读 include：那一位只属于 pattern 口径",
+        "严格规则不读 include：那一位只属于 pattern 规则",
       );
     });
 
@@ -272,7 +272,7 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       assert.equal(
         fire(ctx, "rg-after", log, MID_ARGS),
         undefined,
-        "列入名单后 pattern/path 口径即生效",
+        "列入名单后 pattern/path 规则即生效",
       );
     });
 
@@ -286,10 +286,10 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       assert.match(denied, /rg_search/u, "指令点名刚配置的第三方工具");
       assert.match(denied, /grep/u);
       assert.doesNotMatch(denied, /glob|zg_search/u, "已从名单移除的名字不得再出现在指令里");
-      assert.match(denied, /path 指向/u, "pattern 口径 → 告诉模型起点参数是 path");
+      assert.match(denied, /path 指向/u, "走 pattern 规则 → 告诉模型起点参数是 path");
     });
 
-    it("口径按工具名映射：同一工具声明为严格口径后 root/query 才算、pattern/path 不算", () => {
+    it("规则按工具名映射：同一工具声明为严格规则后 root/query 才算、pattern/path 不算", () => {
       const ctx = createMockCtx();
       applyPlugin(ctx);
       ctx.value.refSearchTools = ["rg_search"];
@@ -297,13 +297,13 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       const byPattern = searchLog("rg_search", { path: root, pattern: TARGET_BASENAME });
       assert.ok(
         fire(ctx, "strict-pattern-blind", byPattern, MID_ARGS) !== undefined,
-        "声明为严格口径后不再读 pattern/include",
+        "声明为严格规则后不再读 pattern/include",
       );
       const byQuery = searchLog("rg_search", { query: TARGET_BASENAME, root });
       assert.equal(
         fire(ctx, "strict-query-hit", byQuery, MID_ARGS),
         undefined,
-        "root + query 命中文件名 → 计入（严格口径随工具名走，不是 zg_search 专属分支）",
+        "root + query 命中文件名 → 计入（严格规则随工具名走，不是 zg_search 专属分支）",
       );
     });
 
@@ -314,7 +314,7 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       assert.equal(
         fire(ctx, "read-precedence", readLog(), SMALL_ARGS),
         undefined,
-        "read 仍按读证据记账：low 档只需 read 即放行",
+        "read 仍按读证据记录下来：low 档只需 read 即放行",
       );
       // mid 档才看得出「read 有没有被当成引用凭证」：一次检索形态的 read 调用不能顶替引用面。
       const searchShapedRead = searchLog("read", { path: root, pattern: TARGET_BASENAME });
@@ -349,10 +349,10 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       );
     });
 
-    it("拒绝文案按宿主真实注册面点名：没注册的工具不出现", () => {
+    it("拒绝文案按宿主真实注册入口点名：没注册的工具不出现", () => {
       const ctx = createMockCtx();
-      // 只在**本用例**补一个注册面：rg_search 未注册、grep 注册。必须在 apply 之前挂上：
-      // 在位探测口是装配期从 `ctx.tools` 造出来的（见 host.ts 的 toolPresentOf 调用点）。
+      // 只在**本用例**补一个注册入口：rg_search 未注册、grep 注册。必须在 apply 之前挂上：
+      // 在位探测入口是装配期从 `ctx.tools` 造出来的（见 host.ts 的 toolPresentOf 调用点）。
       (ctx.tools as unknown as { get?: (name: string) => unknown }).get = (name) =>
         name === "grep" ? {} : undefined;
       applyPlugin(ctx);
@@ -378,7 +378,7 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       );
     });
 
-    it("运行时值不合型（值面绕过 schema 被写坏）→ 回落内置默认名单，既不静默收紧也不静默免检", () => {
+    it("运行时值不合型（值绕过 schema 被写坏）→ 回落内置默认名单，既不会静默收紧也不会静默免检", () => {
       const ctx = createMockCtx();
       applyPlugin(ctx);
       poke(ctx.value, "refSearchTools", "grep");
@@ -392,9 +392,9 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
     });
   });
 
-  describe("名单为空数组时的保守口径", () => {
-    // 选择的口径：**显式空数组 = 任何检索都不计入引用取证**（与"字段未配置/值非法"回落默认
-    // 严格区分）。理由：本包是安全拦截插件，引用取证面只能收紧不能放宽——把空数组当"未设置"
+  describe("名单为空数组时的保守规则", () => {
+    // 选择的规则：**显式空数组 = 任何检索都不计入引用取证**（与"字段未配置/值非法"回落默认
+    // 严格区分）。理由：本包是安全拦截插件，引用取证只能收紧不能放宽——把空数组当"未设置"
     // 去回落默认，等于让一次笔误的清空悄悄变回全量凭证；按空处理最坏只多拒几轮，且拒绝理由
     // 直说"名单为空"，模型与管理员都看得见该往哪儿补（maxDenies 配额仍是防死锁出口）。
     it("显式空名单：任何检索都不计入引用取证，且指令说明名单为空", () => {
@@ -435,7 +435,7 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
   });
 
   describe("refSearchPolicyOf 的形状契约（映射由名单派生）", () => {
-    it("默认策略：两份口径名单与 criteria 映射同序同集", () => {
+    it("默认策略：两份规则名单与 criteria 映射同序同集", () => {
       const policy: RefSearchPolicy = refSearchPolicyOf(
         DEFAULT_REF_SEARCH_TOOLS,
         DEFAULT_REF_SEARCH_STRICT_TOOLS,
@@ -444,14 +444,14 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       assert.deepEqual([...policy.strictTools], ["zg_search"]);
       assert.equal(policy.criteria.get("grep"), PATTERN);
       assert.equal(policy.criteria.get("zg_search"), STRICT_RELATIVE);
-      assert.equal(policy.criteria.get("rg_search"), undefined, "名单之外不给口径");
+      assert.equal(policy.criteria.get("rg_search"), undefined, "名单之外不给规则");
     });
 
     it("严格名单里的陌生名字不授予凭证（只有 refSearchTools 决定计不计入）", () => {
       const policy = refSearchPolicyOf(["grep"], ["grep", "semgrep_scan"]);
       assert.equal(policy.criteria.size, 1, "semgrep_scan 未列入 refSearchTools → 不给凭证");
       assert.equal(policy.criteria.get("semgrep_scan"), undefined);
-      assert.deepEqual([...policy.strictTools], ["grep"], "同时在严格名单里 → 口径随之切换");
+      assert.deepEqual([...policy.strictTools], ["grep"], "同时在严格名单里 → 规则随之切换");
       assert.deepEqual([...policy.patternTools], []);
     });
 
@@ -459,9 +459,9 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       const policy = refSearchPolicyOf(["grep", "", "grep", "glob"], ["grep"]);
       assert.deepEqual([...policy.criteria.keys()], ["grep", "glob"], "重复的名字不重复进映射");
       assert.deepEqual([...policy.strictTools], ["grep"]);
-      assert.deepEqual([...policy.patternTools], ["glob"], "口径名单与映射同步去重");
-      assert.equal(policy.criteria.has(""), false, "空串不是工具名，不进判据也不进指令");
-      // 冻结是运行期防线：记账与指令文案共用这份策略，就地 push 会永久改写两处。
+      assert.deepEqual([...policy.patternTools], ["glob"], "规则名单与映射同步去重");
+      assert.equal(policy.criteria.has(""), false, "空串不是工具名，不进规则表也不进指令");
+      // 冻结是运行期防线：记录下来与指令文案共用这份策略，就地 push 会永久改写两处。
       assert.equal(Object.isFrozen(policy.patternTools), true);
       assert.equal(Object.isFrozen(policy.strictTools), true);
       // criteria 不暴露写方法：ReadonlyMap 只是编译期约束，对外交的是只读视图。
@@ -469,7 +469,7 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       assert.equal(Reflect.get(policy.criteria, "delete"), undefined, "criteria 上拿不到 delete");
     });
 
-    it("工具名前后空白先归一，再判严格口径与去重", () => {
+    it("工具名前后空白先归一，再判严格规则与去重", () => {
       const policy = refSearchPolicyOf([" grep ", "grep", "zg_search "], [" zg_search "]);
       assert.deepEqual([...policy.criteria.keys()], ["grep", "zg_search"]);
       assert.deepEqual([...policy.patternTools], ["grep"]);
@@ -478,7 +478,7 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       assert.equal(policy.criteria.has(" zg_search "), false);
     });
 
-    it("criteria 只交读面：没有 set/delete/clear，冻结也不依赖 Map 的 no-op 行为", () => {
+    it("criteria 只交读取接口：没有 set/delete/clear，冻结也不依赖 Map 的 no-op 行为", () => {
       const policy = refSearchPolicyOf(["grep"], []);
       assert.equal("set" in policy.criteria, false);
       assert.equal("delete" in policy.criteria, false);
@@ -486,7 +486,7 @@ describe("引用取证的可计入检索工具名单与判据口径", () => {
       assert.equal(Object.isFrozen(policy.criteria), true);
     });
 
-    it("读面保留 Map 的遍历形状：entries / values / forEach", () => {
+    it("读取接口保留 Map 的遍历形状：entries / values / forEach", () => {
       const policy = refSearchPolicyOf(["grep", "zg_search"], ["zg_search"]);
       assert.deepEqual(
         [...policy.criteria.entries()],

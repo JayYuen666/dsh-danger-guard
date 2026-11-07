@@ -80,7 +80,7 @@ function kubectlDryRun(words: readonly string[]): boolean {
       // 会被读成预演（实际它是 `--as-group` 的值），一次真实删除就此漏判。
       skipValue = false;
     } else if (word === KUBECTL_DRY_RUN_FLAG) {
-      // 裸形后面可以跟独立取值（`--dry-run client`）：取值为 client/server 才是预演，
+      // 不带 `=` 的写法后面可以跟独立取值（`--dry-run client`）：取值为 client/server 才是预演，
       // 缺失或未知值都会执行。该取值不是旗标，跳过它。
       const value = words[index + 1];
       dryRun = value !== undefined && KUBECTL_DRY_RUN_VALUES.has(value.toLowerCase());

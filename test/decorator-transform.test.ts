@@ -1,4 +1,4 @@
-// test/decorator-transform.test.ts —— 装饰器预转换的**判据面**。
+// test/decorator-transform.test.ts —— 装饰器预转换的**判据**。
 //
 // 为什么单列：这套东西只有两条真判据 —— "这个文件要不要预转换"与"转换失败时能不能说清
 // 为什么"。前者错了的表现是**产物合法但装饰器还在**（装载期才炸，构建报成功）；后者错了
@@ -19,19 +19,19 @@ import {
 
 /** 临时目录前缀（`mkdtemp` 会在它后面追加随机段）。 */
 const TMP_PREFIX = "dg-deco-test-";
-/** 带装饰器的 TS 源文本：被转换的那一侧，各处复用同一份。 */
+/** 带装饰器的 TS 源文本：转换的输入，各处复用同一份。 */
 const DECORATED_SOURCE = "function dec(_v: unknown, _c: unknown): void {}\n@dec class A {}\n";
 /** 含方法装饰器的源文本（类装饰器与方法装饰器会产出不同的 metadata 接收者）。 */
 const DECORATED_METHOD_SOURCE =
   "function dec(_v: unknown, _c: unknown): void {}\n@dec class A { @dec m() {} }\n";
-/** 门槛用例的输入：只含装饰器那一行。 */
+/** 形状门槛用例的输入：只含装饰器那一行。 */
 const DECORATED_LINE = "@dec class A {}\n";
-/** 下面两份源共用的装饰器落点：本文件的用例都靠它先过门槛，tsc 才有产物可裁。 */
+/** 下面两份源共用的装饰器位置：本文件的用例都靠它先过形状门槛，tsc 才有产物可裁。 */
 const DECORATOR_TAIL = ["function dec(_v: unknown, _c: unknown): void {}", "@dec class A {}"];
 /** 发布句在源里就是多行：看 tsc 打印成什么形状、裁剪认不认它。
  *  `declare const _metadata` 是故意的 —— 它让 tsc 把自己那份临时名改成 `_metadata_1`，
  *  于是产物里只有源里这一条语句带着 `if (_metadata)` 前缀，判据不会和注入的那条混淆。
- *  ⚠ 逐行数组拼装而不是模板字面量：本文件自己也要过装饰器管线，而裁剪的锚点只看行首形状，
+ *  ⚠ 逐行数组拼装而不是模板字面量：本文件自己也要过装饰器流水线，而裁剪的锚点只看行首形状，
  *  字面量里那行 `if (_metadata) Object.defineProperty(` 会在一行里匹配上锚点又不以 `);` 收尾，
  *  于是加载期就落进抛错支（实测过一次）。拼成数组后每行都带引号与前导空格，锚点匹配不上。 */
 const SPLIT_METADATA_SOURCE = [
@@ -44,7 +44,7 @@ const SPLIT_METADATA_SOURCE = [
   ...DECORATOR_TAIL,
   "",
 ].join("\n");
-/** 一个普通 TS 文件路径（不读盘，只用来喂门槛）。 */
+/** 一个普通 TS 文件路径（不读盘，只用来喂形状门槛）。 */
 const TS_PATH = "/some/a.ts";
 
 /** 在临时目录里造一份源文件，交回它的绝对路径与一份清理函数。 */
@@ -82,7 +82,7 @@ describe("要不要预转换：形状门槛", () => {
     assert.equal(needsDecoratorLowering("/some/a.json", DECORATED_LINE), false);
   });
 
-  it(".mts / .cts 也是 TS：门槛认它们（产物后缀由下一组用例盯）", () => {
+  it(".mts / .cts 也是 TS：形状门槛认它们（产物后缀由下一组用例盯）", () => {
     assert.equal(needsDecoratorLowering("/some/a.mts", DECORATED_LINE), true);
     assert.equal(needsDecoratorLowering("/some/a.cts", DECORATED_LINE), true);
   });
@@ -97,7 +97,7 @@ describe("产物后缀：按源后缀找 tsc 真正写出的那一份", () => {
       const out = lowerStandardDecorators(DECORATED_METHOD_SOURCE, file);
       assert.ok(out.code.length > 0, "应当产出编译后的代码");
       assert.ok(out.code.includes("__esDecorate"), "装饰器应当被降级成调用");
-      // 返回面是 `{ code, map: { sources, mappings } | null }`（失败给 null，不给 undefined），
+      // 返回类型是 `{ code, map: { sources, mappings } | null }`（失败给 null，不给 undefined），
       // 所以先按 null 判存在；再钉 sources 指回那份源文件的绝对路径——只断「有映射」的话，
       // sources 写成别的文件也不会红。
       const { map } = out;
@@ -171,7 +171,7 @@ describe("vite 钩子：带 query 的 id 要剥掉 query 再当路径", () => {
     }
   });
 
-  it("不带 query 且无装饰器时交回 undefined（管线继续用原文）", () => {
+  it("不带 query 且无装饰器时交回 undefined（流水线继续用原文）", () => {
     const plugin = viteDecorators();
     assert.equal(plugin.transform("export const x = 1;\n", TS_PATH), undefined);
   });
@@ -214,7 +214,7 @@ describe("metadata 发布句：只裁锚点匹配得上的整条单行语句", (
 
   it("锚点匹配得上却不以 `);` 收尾时当场抛错，点名那一行", async () => {
     // 抛错支的真输入不需要桩：模板字面量里的同形文本落到产物就是那一行形（行首顶格、以 `{` 收尾）。
-    // 本仓自己撞过一次 —— 把这段源写成本文件的模板字面量时，**本文件**也要过装饰器管线，
+    // 本仓自己撞过一次 —— 把这段源写成本文件的模板字面量时，**本文件**也要过装饰器流水线，
     // 加载期就红在这一条上。所以源逐行拼出来：测试文件里的每一枚元素都带引号与前导空格，
     // 匹配不上锚点；写进临时文件之后那一行才顶格。
     const source = [

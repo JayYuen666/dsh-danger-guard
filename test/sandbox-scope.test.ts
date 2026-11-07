@@ -1,6 +1,6 @@
-// test/sandbox-scope.test.ts —— 宿主沙箱管辖面的判据：哪些灾难目标该让给宿主去拦。
+// test/sandbox-scope.test.ts —— 宿主沙箱管辖范围的判据：哪些灾难目标该让给宿主去拦。
 //
-// 这一支存在的理由（与 dsh 官方保护面对齐）：dsh 自带进程级沙箱（`ctx.shell.sandboxMode`
+// 这一支存在的理由（与 dsh 官方保护机制对齐）：dsh 自带进程级沙箱（`ctx.shell.sandboxMode`
 // 是执行器的自报、`ctx.sandboxPolicy.resolve()` 给出逐调用的 mode 与工作区根），而它的拒绝
 // 会附带**官方认可的升级路径**（`sandbox_permissions` + `justification` → 用户审批）。
 // 我们的硬拒跑在 bash 工具之前，会把那条路整个掐死 —— 所以"沙箱确实管得住的目标"要让路。
@@ -28,7 +28,7 @@ import { disasterTargetPathOf } from "../lib/danger-rules.ts";
 /** 「工作区内修改」档的沙箱模式名（多处复用）。 */
 const WS_MODE = "workspace-write" as const;
 
-/** 以给定目录为唯一可写根的沙箱管辖面（多处复用）。 */
+/** 以给定目录为唯一可写根的沙箱管辖范围（多处复用）。 */
 const scopeWith = (root: string): SandboxScope => ({ mode: WS_MODE, roots: [asOsPath(root)] });
 
 /** 一台"规范化即原样"的折法（多数用例不需要软链语义，给恒等函数让断言看得清）。 */
@@ -54,7 +54,7 @@ const BRACE_ROOT_TARGET = "{/workspace,/etc}";
 const privatePrefixed = (absolute: string): string =>
   absolute.startsWith("/private") ? absolute : `/private${absolute}`;
 
-/** 一个"执行器自报在拦 + 策略解析出给定 mode/工作区根"的宿主面。 */
+/** 一个"执行器自报在拦 + 策略解析出给定 mode/工作区根"的宿主接口。 */
 function scopeOf(
   mode: string,
   workspaceRoot: unknown = WORKSPACE,
@@ -69,7 +69,7 @@ function scopeOf(
   );
 }
 
-describe("sandboxScopeOf：读宿主的两个能力面", () => {
+describe("sandboxScopeOf：读宿主的两个能力清单", () => {
   it("执行器自报不沙箱（`sandboxMode` 缺席）⇒ 不留 scope ⇒ 我们兜底", () => {
     assert.equal(
       sandboxScopeOf(
@@ -218,7 +218,7 @@ describe("sandboxDropsOf：『包不住可写根』才让路（核心安全判�
   });
 
   it("根目录那一支单独钉住：`/` 必须被判成『包住一切』", () => {
-    // 踩过的坑：`"${candidate}/"` 对 `candidate = "/"` 拼出 `"//"`，`startsWith` 恒假，
+    // 踩过的坑：`"${candidate}/"` 对 `candidate = "/"` 拼出 `"//"`，`startsWith` 永远不成立，
     // 于是 `rm -rf /` 会被判成"包不住可写根"而**让路一次全盘删除**。
     const scope = scopeOf(WRITABLE_MODE);
     assert.ok(scope !== undefined);
@@ -367,13 +367,13 @@ describe("包含性判据的组件边界：`..` 只是名字前缀时不算上�
   });
 });
 
-describe("disasterTargetPathOf：灾难目标词面 → 绝对路径", () => {
+describe("disasterTargetPathOf：灾难目标用词 → 绝对路径", () => {
   it("家目录三形（`~` / `~/…` / `$HOME`）各自落在同一棵树里", () => {
     const home = disasterTargetPathOf("~", undefined);
     assert.ok(home !== undefined, "家目录形必须归一得出来");
     // 判据是「归一成宿主上的绝对路径」，不是「以 `/` 开头」：Windows 的绝对形是 `C:\\…`。
     assert.ok(path.isAbsolute(home), `家目录归一形必须是绝对路径：${home}`);
-    // 子路径按**平台**拼接（词面里的分隔符永远是 `/`，产出必须落到宿主的形状上）。
+    // 子路径按**平台**拼接（用词里的分隔符永远是 `/`，产出必须落到宿主的形状上）。
     const docs = path.join(home, "Documents");
     assert.equal(disasterTargetPathOf("~/Documents", undefined), docs);
     assert.equal(disasterTargetPathOf("$HOME", undefined), home);
@@ -385,12 +385,12 @@ describe("disasterTargetPathOf：灾难目标词面 → 绝对路径", () => {
     assert.equal(disasterTargetPathOf("/etc/../usr", undefined), "/usr");
   });
 
-  it("带盘符的 Windows 字形不归一（落点要过盘符表，本包明令不猜）", () => {
+  it("带盘符的 Windows 字形不归一（目标位置要过盘符表，本包明令不猜）", () => {
     // `path.posix.isAbsolute("C:/etc")` 是假 ⇒ 它掉不进绝对形分支；而反斜杠形态在 opaque 里。
-    // 判据是"宁可交回 undefined 让调用方不让路"，不是猜一个看起来合理的落点。
+    // 判据是"宁可交回 undefined 让调用方不让路"，不是猜一个看起来合理的位置。
     assert.equal(disasterTargetPathOf("C:/etc", undefined), undefined);
     // 生产链路一定带会话 cwd：盘符形的「不猜」不能只在 cwd 缺席时成立，否则
-    // `path.resolve(cwd, "C:/etc")` 会编出一个看似合理的落点。
+    // `path.resolve(cwd, "C:/etc")` 会编出一个看似合理的位置。
     assert.equal(disasterTargetPathOf("C:/etc", asOsPath("/w")), undefined);
     assert.equal(disasterTargetPathOf("//server/share", asOsPath("/w")), undefined);
   });
@@ -406,7 +406,7 @@ describe("disasterTargetPathOf：灾难目标词面 → 绝对路径", () => {
   });
 
   it("判不出来的一律 undefined：glob / 反斜杠 / `~user` / 变量默认值形", () => {
-    // 这几类的落点要过展开、盘符表或口令表才知道，猜它们就是给"误放行"开口子。
+    // 这几类的位置要过展开、盘符表或口令表才知道，猜它们就是给"误放行"开口子。
     for (const word of [
       "/*",
       "/usr/**",
@@ -423,14 +423,14 @@ describe("disasterTargetPathOf：灾难目标词面 → 绝对路径", () => {
     }
   });
 
-  // 这两段词面里的 `${` 与 `$(` 是**被测数据**，不是模板占位：拆成两段再拼，
+  // 这两段用词里的 `${` 与 `$(` 是**被测数据**，不是模板占位：拆成两段再拼，
   // 免得静态检查把普通字符串里的 `${` 判成「占位不会插值」。
   const BRACE_VAR = ["$", "{X}"].join("");
   const CMD_SUBST = ["~", "/$", "(id)"].join("");
 
   it("家目录**子段**单独判不透明：`~/x` 可判，`~/$W` 判不出来", () => {
     // 前缀 `~/` / `$HOME/` 是合法写法，但子段里的 `$` 展开后落到哪棵树要过口令表才知道。
-    // 判据是「子段这一侧」：只判整串会把前缀的 `~`/`$HOME` 也算可疑，于是 `~/Documents`
+    // 判据只看子段那一部分：只判整串会把前缀的 `~`/`$HOME` 也算可疑，于是 `~/Documents`
     // 这种最常见、完全可判的写法退成 undefined —— 那是误伤（判不出来 ⇒ 让路 ⇒ 不让路）。
     const home = disasterTargetPathOf("~", undefined);
     assert.ok(home !== undefined);
@@ -444,15 +444,15 @@ describe("disasterTargetPathOf：灾难目标词面 → 绝对路径", () => {
   it("变量在**工作区内**展开时不许让路：`rm -rf ~/$W` 真删的是整个工作区", () => {
     // 修复前 `~/$W` 归一成「家目录 + 字面 `$W`」，那个字符串落在可写根之外 ⇒
     // `sandboxDropsOf` 判「沙箱会整体拦下」⇒ 守卫让路。而它真实展开后正是工作区本身。
-    // 让路的前提是「沙箱会拦下这枚目标」，判不出落点的词面根本不该进那条推理。
+    // 让路的前提是「沙箱会拦下这枚目标」，判不出位置的用词根本不该进那条推理。
     const target = disasterTargetPathOf("~/$W", asOsPath(WORKSPACE));
     assert.equal(target, undefined);
     assert.equal(sandboxDropsOf(scopeWith(WORKSPACE), [target]), false);
   });
 
-  it("反引号与引号也判不出来：命令替换要先执行才知落点", () => {
+  it("反引号与引号也判不出来：命令替换要先执行才知位置", () => {
     // 修复前它们不在不透明字符集里：`/tmp/\`id\`` 被当普通绝对路径归一（`path.posix.normalize`
-    // 只折 `.`/`..`，不碰反引号）⇒ 判出一个看起来合法的落点，而真实落点由另一条命令决定。
+    // 只折 `.`/`..`，不碰反引号）⇒ 判出一个看起来合法的位置，而真实写到哪儿由另一条命令决定。
     for (const word of ["`cmd`", "/tmp/`id -u`", '/tmp/x"', "/tmp/a\nb"]) {
       assert.equal(disasterTargetPathOf(word, asOsPath(WORKSPACE)), undefined, word);
     }
@@ -574,7 +574,7 @@ describe("writableRootsOf：规范化失败的那一枚按 path.resolve 形保�
   });
 });
 
-/** 额外可写根那一族的宿主面：工作区根 `/ws`，额外根由用例给。 */
+/** 额外可写根那一族的宿主接口：工作区根 `/ws`，额外根由用例给。 */
 function scopeWithAdditional(
   additionalWritableRoots: unknown,
   canonicalize: Canonicalize = identity,
@@ -630,7 +630,7 @@ describe("additionalWritableRoots：显式授予的目录也是可写根", () =>
   });
 
   it("规范化失败的额外根按 path.resolve 形保留，不丢", () => {
-    // 与工作区根同一条口径：丢掉这一枚会让它底下的目标看起来"谁都没包住"。
+    // 与工作区根同一条规则：丢掉这一枚会让它底下的目标看起来"谁都没包住"。
     const scope = scopeWithAdditional([EXTRA_UNRESOLVED], (absolute) =>
       absolute === EXTRA_UNRESOLVED ? undefined : absolute,
     );
@@ -782,7 +782,7 @@ describe("sandboxCoveredFacts：只给 rmrf 的灾难目标补覆盖位", () => 
     });
   });
 
-  it("空 offending 或词面全判不出来 ⇒ 原样交回（空数组不能让 every 恒真）", () => {
+  it("空 offending 或用词全判不出来 ⇒ 原样交回（空数组不能让 every 恒真）", () => {
     const empty = { role: "disasterTarget", offending: [] } as const;
     assert.equal(sandboxCoveredFacts(facts, "rmrf", empty, scope, undefined), facts);
     const windows = { role: "disasterTarget", offending: [String.raw`C:\Windows`] } as const;

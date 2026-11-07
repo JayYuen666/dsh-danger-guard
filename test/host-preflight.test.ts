@@ -1,9 +1,9 @@
 // host.ts「编辑前预检」的运行路径接线测试。
 //
-// 为什么经监听器 + guard 两个入口断言：预检的两面各自挂在一条官方瀑布上——
+// 为什么经监听器 + guard 两个入口断言：预检的两处各自挂在一条官方瀑布上——
 //   A 面 `ctx.on("tools/post-execute")`（引用面随读取结果出去），
 //   B 面 `ctx.on("tools/pre-execute")`（盲改被带证据的拒绝拦下），
-//   随后同步的 `ctx.tools.guard` 谓词凭**投递水位**放行。
+//   随后同步的 `ctx.tools.guard` 谓词凭**发送水位**放行。
 // I/O 与渲染本体在 lib/preflight-scan.ts（那边的预算/截断/二进制判据由
 //   test/preflight-scan.test.ts 直接钉），本文件只管接线与水位：tsc 能证明"字段被读了"，
 //   证明不了"读了真的改变放行结果"——本文件按后者写。
@@ -13,7 +13,7 @@
 //   ② 证据真前置：A 面的引用块挂在**读取结果**上（下一次编辑之前就看得见），
 //      B 面的正文写进**这一次**调用的拒绝理由（不是下一步）；
 //   ③ 有界且诚实：预算截断的扫描可以说、但不记凭证；正文定长读（大文件截断并点明）；
-//   ④ 水位可判且可回收：随会话销毁回收、不顶外部改动；密钥面与配额放行态一律让路。
+//   ④ 水位可判且可回收：随会话销毁回收、不顶外部改动；密钥检查与配额放行态一律让路。
 //
 // 为什么用真实临时目录：引用扫描与目标读取全靠 fs（`projectRootOf` 认工程标记、二进制靠
 //   NUL 字节、`isFile()` 判目录），替身路径探不出任何东西；`/w/proj/...` 那类假路径会让
@@ -29,12 +29,12 @@ import { SETTINGS_READER } from "../lib/settings-schema.ts";
 import { MESSAGES, fillTemplate } from "../lib/messages.ts";
 // 扫描的两枚上限从 lib 取（用例不许重抄数字：改了上限用例要跟着走，而不是先红）。
 import { PREFLIGHT_MAX_FILES, PREFLIGHT_MAX_FINDINGS } from "../lib/preflight-scan.ts";
-// 会话日志出自官方 SessionEvent 夹具构造器（信封必填位与品牌都在夹具里补一次）。
+// 会话日志出自官方 SessionEvent夹具构造器（信封必填位与类型品牌都在夹具里补一次）。
 import { call as fxCall, result as fxResult } from "./fixtures/events.ts";
 import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
-// 两条瀑布的**官方面**：本文件的替身载荷一律按 `Events` 的投影 checked，不再手抄形状。
-// 手抄的风险很具体——`{kind:"allow"}` 拼错、结果少一枚必填位、decision 换了臂，用例照样绿，
-// 而真宿主根本不是那样调的；把形状钉到官方声明上，漂移就变成编译错误。
+// 两条瀑布的**官方面**：本文件的替身载荷一律按 `Events` 的投影 checked，不再自己抄的形状。
+// 自己抄的风险很具体——`{kind:"allow"}` 拼错、结果少一枚必填位、decision 换了分支，用例照样绿，
+// 而真宿主根本不是那样调的；把形状对齐到官方声明上，漂移就变成编译错误。
 import type { Events } from "@deepseek-ai/cordis";
 import type { ContentBlock, ToolCallId, UserMessage } from "@deepseek-ai/dsh-llm";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
@@ -45,10 +45,10 @@ import { brandString } from "@deepseek-ai/dsh-brand";
 import type { PreflightFs } from "../lib/preflight-scan.ts";
 import { localFsFace } from "./fixtures/local-fs-face.ts";
 
-// ── 文案标记：一律从消息表单源取，不在用例里重抄文案 ─────────────────────────
+// ── 文案标记：一律从消息表唯一来源取，不在用例里重抄文案 ─────────────────────────
 /** 模板的首段（到第一个空格）：`[引用探查] …` → `[引用探查]`。文案改版只会让用例红。
  *  ⚠ 只对**带独占标签**的模板成立：`[fact-gate] ` 那 12 个字符是行动清单 / 递证据 / 随读取
- *  附上三种口径**共用**的前缀，拿它当标记会让两条互斥的断言同时为真。所以下面
+ *  附上三种规则**共用**的前缀，拿它当标记会让两条互斥的断言同时为真。所以下面
  *  ATTACH_HEAD/HANDOFF_HEAD 取整句，两处 `slice(0, 20)` 也必须切过前缀才有判别力
  *  （真 spine 那两层用的是 host-spine.ts 的 gateMarkOf）。 */
 const markOf = (template: string): string => template.slice(0, template.indexOf(" "));
@@ -73,14 +73,14 @@ const REF_LINE_PREFIX = MESSAGES.zh.preflightRefsLine.slice(
  * 两条瀑布的官方面（`Parameters<>` 剥掉 `this`，与 host.ts 里那两枚读法同一条）：
  *  - `'tools/pre-execute'(exec: ToolExecution, next: () => Promise<PreToolDecision>)`（installed dsh-tools :47）
  *  - `'tools/post-execute'(exec, result: Readonly<ToolExecutionResult>, next)`（:70）
- * 本文件的每一枚替身载荷都按这几位 checked：`kind` 拼错、结果少一枚必填位、decision 换臂，
+ * 本文件的每一枚替身载荷都按这几位 checked：`kind` 拼错、结果少一枚必填位、decision 换分支，
  *  都会在这里变成编译错误，而不是留下一条"测试绿、宿主不这样调"的假用例。
  */
 type PreExecuteArgs = Parameters<Events["tools/pre-execute"]>;
 type PostExecuteArgs = Parameters<Events["tools/post-execute"]>;
-/** 官方执行面（两条瀑布的第一实参同一枚 `ToolExecution`）。 */
+/** 官方执行上下文（两条瀑布的第一实参同一枚 `ToolExecution`）。 */
 type OfficialExec = PreExecuteArgs[0];
-/** 官方结果面（success 带 `value`、failure 带 `error` 的判别联合）。 */
+/** 官方结果的类型（success 带 `value`、failure 带 `error` 的判别联合）。 */
 type OfficialResult = PostExecuteArgs[1];
 /** 两条瀑布的返回域（allow/deny/cancel/ask 与 accept/block）。 */
 type PreOutcome = Awaited<ReturnType<PreExecuteArgs[1]>>;
@@ -90,13 +90,13 @@ type PostExecuteFn = (...args: PostExecuteArgs) => Promise<PostOutcome>;
 /** 官方 `ToolGuard` 面（:732 `(execution: Readonly<ToolExecution>) => string | undefined`）。 */
 type GuardFn = (execution: Readonly<OfficialExec>) => string | undefined;
 
-/** 官方品牌的集中补一处（同 test/fixtures/events.ts 补信封的理由）：`callId`/`rootCallId`
- *  是 `ToolCallId` 幻影品牌串，`token` 是 `symbol & {…}` 的不透明身份。真宿主三枚一定带，
+/** 官方类型品牌的集中补一处（同 test/fixtures/events.ts 补信封的理由）：`callId`/`rootCallId`
+ *  是只带 `ToolCallId` 类型品牌的幻影串，`token` 是 `symbol & {…}` 的不透明身份。真宿主三枚一定带，
  *  替身不给就是抄近路——本插件不读它们，但**下一个读它们的改动**必须能在编译期站住。 */
 const CALL_ID = brandString<ToolCallId>("dg-preflight-call");
 const EXEC_TOKEN: OfficialExec["token"] = Symbol("dg-preflight-token") as never;
 
-/** 决定面上的四个臂（用例里的字面量都换成这四枚，拼错的可能性交给编译器）。 */
+/** 决定上的四个分支（用例里的字面量都换成这四枚，拼错的可能性交给编译器）。 */
 const ALLOW: PreOutcome = { kind: "allow" };
 const DENY_BY_OTHER: PreOutcome = { kind: "deny", reason: "别的插件拦的" };
 const ACCEPT: PostOutcome = { kind: "accept" };
@@ -115,14 +115,14 @@ const FAILED_RESULT: OfficialResult = {
 
 interface MockCtx {
   tools: { guard: (fn: GuardFn) => () => void };
-  /** 官方可选注入面：预检要的 `fs` 从这里交出去（与真宿主的 `ctx.inject(["fs"], …)` 同形）。
+  /** 官方可选注入：预检要的 `fs` 从这里交出去（与真宿主的 `ctx.inject(["fs"], …)` 同形）。
    *  置 `fsFace = undefined` 就是"这个 profile 没装 fs 后端"那一支。 */
   inject: (deps: readonly string[], activate: (child: Record<string, unknown>) => void) => void;
   /** 交给预检的 fs 读法（本地盘实现，见 test/fixtures/local-fs-face.ts 的理由）。 */
   fsFace: PreflightFs | undefined;
-  /** settings 面：拦截半只调 describe()（locale 偏好读面）。 */
+  /** settings 面：拦截半只调 describe()（locale 偏好读取接口）。 */
   settings: { describe: () => { ns: string; value: unknown; revision: number }[] };
-  /** cordis 可选服务读法：只给设置条目挂出的值面读数口。 */
+  /** cordis 可选服务读法：只给设置条目挂出的值取值接口。 */
   get: (name: string) => unknown;
   /** 事件注册：本文件要抓两条瀑布、session/disposed（水位回收）与 fs/observed（官方真实路径）。 */
   on: (event: string, listener: unknown) => unknown;
@@ -135,8 +135,8 @@ interface MockCtx {
   postExecute: { fn: PostExecuteFn } | null;
   disposed: ((session: unknown) => unknown) | null;
   /** `fs/observed` 的监听器：后端每观察一枚目标就报一次，本包据此记下官方那一形真实路径。
-   *  载荷按 unknown 收——用例要送的正是"后端交来的 target"，而 `targetKey` 是 opaque 品牌位，
-   *  测试里没必要（也不该）造一枚合法品牌值：本包只读 `displayPath`。 */
+   *  载荷按 unknown 收——用例要送的正是"后端交来的 target"，而 `targetKey` 带 opaque 类型品牌，
+   *  测试里没必要（也不该）造一枚合法值：本包只读 `displayPath`。 */
   observed: ((target: unknown) => unknown) | null;
 }
 
@@ -195,7 +195,7 @@ function createMockCtx(): MockCtx {
   return ctx;
 }
 
-/** 装配（同其余 host 用例：拦截条目没有 Config，值面经 SETTINGS_READER 现读）。 */
+/** 装配（同其余 host 用例：拦截条目没有 Config，值经 SETTINGS_READER 现读）。 */
 const apply = (ctx: MockCtx): void => {
   plugin.apply(ctx as never);
 };
@@ -211,7 +211,7 @@ const fakeSession = (
  *  官方 `Agent` 面就是 `{ readonly id: SessionId }`（@deepseek-ai/dsh-agent 的 types.d.ts:11），
  *  所以替身**给得出**合法 id；`session` 不在官方面上，是本包自己的读取投影
  *  （`isPreflightAgent` 那条运行时判据守的就是它）。
- *  ⚠ 这一位过去是 `unknown`：当时 dsh-agent 不在依赖里，`ToolExecution.agent` 的类型面解析不到
+ *  ⚠ 这一位过去是 `unknown`：当时 dsh-agent 不在依赖里，`ToolExecution.agent` 的类型上解析不到
  *  而塌成 `any`，于是形状全靠自觉。装上官方件之后编译器开始管这件事（同一轮里
  *  `signal`/`arguments` 的宽处也一起现形），所以这里改回有名有形的构造。 */
 const fakeAgent = (session: unknown, id = "dg-session"): unknown => ({
@@ -219,17 +219,17 @@ const fakeAgent = (session: unknown, id = "dg-session"): unknown => ({
   session,
 });
 
-/** 一次调用面（signal / agent 都可缺位，用于测坏形状与取消）。 */
+/** 一次调用点（signal / agent 都可缺位，用于测坏形状与取消）。 */
 interface ExecFace {
   name: string;
   arguments?: unknown;
   signal?: AbortSignal;
   /** 好形状走 `fakeAgent`（带合法 SessionId）；坏形状用例送的正是"官方面不允许的东西"
-   *  ——那一档在类型面上没有合法构造口，所以整位收在 unknown，由 execOf 单点宽化。 */
+   *  ——那一档在类型上没有合法构造口，所以整位收在 unknown，由 execOf 单点宽化。 */
   agent?: unknown;
 }
 
-/** 补成官方执行面：品牌位集中在这里给，用例只写它关心的那几位。 */
+/** 补成官方执行上下文：类型品牌集中在这里给，用例只写它关心的那几位。 */
 const execOf = (exec: ExecFace): OfficialExec => ({
   callId: CALL_ID,
   rootCallId: CALL_ID,
@@ -280,7 +280,7 @@ function mustDeny(reason: string | undefined, label: string): string {
 /** 决定里的拒绝理由（没拦就回空串）：上面那组用例只关心"给模型的那句长什么样"。 */
 const denyText = (decision: PreOutcome): string => denyReason(decision) ?? "";
 
-/** 决定上附着的上下文清单（accept 与 block 三种臂都带得上这一位）。 */
+/** 决定上附着的上下文清单（accept 与 block 三种分支都带得上这一位）。 */
 const contextsOf = (decision: PostOutcome): readonly UserMessage[] =>
   decision.additionalContexts ?? [];
 
@@ -291,7 +291,7 @@ function contextAt(decision: PostOutcome, index = 0): UserMessage {
   return message;
 }
 
-/** 第 n 条附加上下文的正文（官方 ContentBlock 是判别联合，先认 text 那一臂）。 */
+/** 第 n 条附加上下文的正文（官方 ContentBlock 是判别联合，先认 text 那一条分支）。 */
 function contextText(decision: PostOutcome, index = 0): string {
   const [block] = contextAt(decision, index).content;
   assert.ok(block?.type === "text", "附加块是文本块");
@@ -309,7 +309,7 @@ const otherContext: UserMessage = createUserMessage({
   },
 });
 
-/** 随后同步跑的那道 guard 谓词：载荷与两条瀑布同一枚官方面（`execOf` 补品牌位）。
+/** 随后同步跑的那道 guard 谓词：载荷与两条瀑布同一枚官方面（`execOf` 补类型品牌）。
  *  官方契约里 guard 收到的正是 `Readonly<ToolExecution>`，这里不另抄一份窄形状。 */
 const guardOf = (
   ctx: MockCtx,
@@ -370,7 +370,7 @@ let targetMain: string;
 let bigTarget: string;
 /** 主夹具里**不存在**的目标（读不出正文 ⇒ B 面不拦）。 */
 let missingTarget: string;
-/** 主夹具里的密钥面目标（`.env`）：正文永不出域，引用面照给。 */
+/** 主夹具里的密钥检查目标（`.env`）：正文永不出域，被引用照给。 */
 let secretTarget: string;
 const SECRET_SENTINEL = "hunter2";
 /** 主夹具里再一枚目标：专测水位的两条生命周期。 */
@@ -399,7 +399,7 @@ let targetDirs: string;
 let rootLayer: string;
 let targetLayer: string;
 /** 层夹具②：`test` 是一枚**软链**（指向树内真实目录）。门禁的层探查走 `isDir`（statSync，跟链）
- *  ⇒ 认它存在并要层证据；而扫描按官方 lstat 口径**不跟软链** ⇒ 那层永远进不了 `dirs`。
+ *  ⇒ 认它存在并要层证据；而扫描按官方 lstat 规则**不跟软链** ⇒ 那层永远进不了 `dirs`。
  *  于是"扫描跑完了、但这一层没被走到"有了独立夹具——与"预算截断"那条不同源，
  *  两者都必须让路（半份「这层我探过了」最糟）。 */
 let rootLinked: string;
@@ -681,7 +681,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       }
     });
 
-    it("会话给了 seq ⇒ 投递位次直接取它，不为日志长度再折叠一遍台账", async () => {
+    it("会话给了 seq ⇒ 发送位次直接取它，不为日志长度再折叠一遍台账", async () => {
       const ctx = createMockCtx();
       apply(ctx);
       let snapshots = 0;
@@ -771,7 +771,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
         OK_RESULT,
         { kind: "block", feedback },
       );
-      // 判别式收窄（assert.ok 带 asserts 签名）而不是 `as` 抄一份形状：官方 union 换臂就报错。
+      // 判别式收窄（assert.ok 带 asserts 签名）而不是 `as` 抄一份形状：官方 union 换分支就报错。
       assert.ok(decision.kind === "block", "block 不被换成 accept");
       assert.deepEqual(decision.feedback, feedback, "feedback 一字不改");
       assert.equal(decision.additionalContexts?.length, 1, "被改判的结果仍然带得上证据");
@@ -961,7 +961,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
         args: editArgs(targetMain),
         session: offSession,
       });
-      assert.ok(denied !== undefined, "判据一条不减，变的只是谁去取证");
+      assert.ok(denied !== undefined, "要求项一条不减，变的只是谁去取证");
     });
 
     it("目标内容超单文件上限 ⇒ 截断并点明，末尾哨兵不出现", async () => {
@@ -1020,7 +1020,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       assert.ok(deny.includes(MESSAGES.zh.headFirst.slice(0, 20)), "走的是行动清单那一支");
     });
 
-    it("密钥面（.env）⇒ 让路：不拦、正文不出现在任何模型可见文本里", async () => {
+    it("密钥检查（.env）⇒ 让路：不拦、正文不出现在任何模型可见文本里", async () => {
       const ctx = createMockCtx();
       ctx.value.smallEditChars = 10;
       apply(ctx);
@@ -1051,8 +1051,8 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       }
     });
 
-    it("引用扫描的凭据面隔离吃用户追加的词表；词表值面不是数组时按内置判据继续（不放宽也不报错）", async () => {
-      // 一条用例两个臂：`extraSecretPatterns` 生效与"值面未经 schema 校验、不是数组"时的降级读取。
+    it("引用扫描的凭据检查隔离吃用户追加的词表；词表值不是数组时按内置判据继续（不放宽也不报错）", async () => {
+      // 一条用例两个分支：`extraSecretPatterns` 生效与"值未经 schema 校验、不是数组"时的降级读取。
       // 后者必须**继续用内置词表**而不是整趟抛错，也绝不能因为读不到用户模式就把已隔离的东西放回来。
       const hitFile = path.join(rootMain, "src", "keep.ts");
       await writeFile(hitFile, 'import "./ref-mod"; // keep-leak-sentinel\n');
@@ -1079,8 +1079,8 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
 
       // 同一枚目标换一个会话（避开扫描缓存），把用户词表换成"不是数组"的形状
       const loose = fakeSession("s-quarantine-loose", []);
-      // 不经 ConfigSchema 的值面（宿主组合层之外的形状变化正是这里要挡的）：
-      // `as never` 是本文件喂"官方类型面上给不出的形状"的既有手法（同 EXEC_TOKEN 那枚品牌位）。
+      // 不经 ConfigSchema 的值（宿主组合层之外的形状变化正是这里要挡的）：
+      // `as never` 是本文件喂"官方类型上给不出的形状"的既有手法（`EXEC_TOKEN` 那一枚就是这么给的）。
       const degraded = createMockCtx();
       degraded.value = {
         ...BUILTIN_BASE,
@@ -1123,7 +1123,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
         reason.includes("test"),
         "点名真实存在的那层目录（与门禁算缺项同一个 existingLayersOf）",
       );
-      // 层证据进投递水位 ⇒ guard 那三项全部记 done：这一趟不该再要一遍。
+      // 层证据进发送水位 ⇒ guard 那三项全部记 done：这一趟不该再要一遍。
       assert.equal(
         guardOf(ctx, { name: "edit", args, session }),
         undefined,
@@ -1191,7 +1191,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
         agent: fakeAgent(session),
       });
       // 与上一条不同的成因：这里 `complete` 为真（树很小），是"门禁认得那层、扫描走不到那层"。
-      // 门禁的层探查跟软链（statSync），扫描按官方 lstat 口径不跟——两边口径不同源时，
+      // 门禁的层探查跟软链（statSync），扫描按官方 lstat 规则不跟——两边规则不同源时，
       // 唯一安全的去向就是让路，而不是替模型宣称"这层我探过了、零命中"。
       assert.deepEqual(decision, ALLOW, "那一层没被走到 ⇒ 不拿半份证据拦人");
       const denied = guardOf(ctx, { name: "edit", args, session });
@@ -1207,7 +1207,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       ctx.value.preflightEnabled = false;
       apply(ctx);
       // 决策 ④：配额只免**上层探查**、不免 read ⇒ 这里得让 read 已是证据、缺的只是引用面
-      // （所以会话日志里放一次成功的 read，且把编辑升到"触及导出面"那一档——低档只要求 read，
+      // （所以会话日志里放一次成功的 read，且把编辑升到"触及导出名单"那一档——低档只要求 read，
       //  read 一满足就直接放行了，根本走不到配额）。
       const session = fakeSession("s-quota", readEvents(disposeTarget));
       const args = { ...editArgs(disposeTarget), new_string: "export const value = 2" };
@@ -1276,7 +1276,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       }
     });
 
-    it("认定链抛错（会话面炸）⇒ 兜底吞掉：不拦、不改决定，只留一条告警", async () => {
+    it("认定链抛错（会话类型炸）⇒ 兜底吞掉：不拦、不改决定，只留一条告警", async () => {
       const ctx = createMockCtx();
       ctx.value.smallEditChars = 10;
       apply(ctx);
@@ -1378,7 +1378,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       // 当凭证，而那次检索也不是穷尽的 —— 要求我们这趟扫描穷尽比那还严，代价落在最需要预检的
       // 大仓上（遍历必然被截断 ⇒ 凭证永远给不出 ⇒ 预检白做）。
       // 找到了引用就是**实证**：模型已经看见了"谁在用"。而"零命中 + 被截断"仍然不给凭证 ——
-      // 假阴性全部住在那一种里（见下一条用例）。
+      // 假阴性全都出自这一种情形（见下一条用例）。
       assert.equal(
         guardOf(ctx, { name: "edit", args, session }),
         undefined,
@@ -1575,7 +1575,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       );
       assert.ok(handoff.includes(READ_MARK), "正文随行（这是解除失效点的依据）");
       // 原样重试 ⇒ 放行。若失效点只按事件位次解除，这里会一直卡在缺 read 上：
-      // 外部改动发生在日志之外，投递位次与失效点取到的是**同一个下标**。
+      // 外部改动发生在日志之外，发送位次与失效点取到的是**同一个下标**。
       assert.equal(
         guardOf(ctx, { name: "edit", args, session }),
         undefined,
@@ -1656,7 +1656,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       apply(ctx);
       const observed = observedOf(ctx);
       const target = officialTarget("observed");
-      // low 档 + 会话里已有成功读取 ⇒ 除了密钥面，这一趟没有别的缺项：
+      // low 档 + 会话里已有成功读取 ⇒ 除了密钥检查，这一趟没有别的缺项：
       // 于是"放行 → 拦"的翻转只可能来自那枚缓存。
       const session = fakeSession("s-official-observed", readEvents(target));
       const args = editArgs(target);
@@ -1689,7 +1689,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       );
     });
 
-    it("后端拒绝交出 processPath ⇒ 官方那一形缺席，B 面照常递证据（拦截面一条不减）", async () => {
+    it("后端拒绝交出 processPath ⇒ 官方那一形缺席，B 面照常递证据（拦截一条不减）", async () => {
       const ctx = createMockCtx();
       ctx.value.smallEditChars = 10;
       ctx.fsFace = localFsFace({ processPathThrows: "backend refuses processPath" });
@@ -1722,7 +1722,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       );
     });
 
-    it("没有 fs 后端 ⇒ fs/observed 报了也记不下（判定退回声明形 + 本机形，拦截面一条不减）", () => {
+    it("没有 fs 后端 ⇒ fs/observed 报了也记不下（判定退回声明形 + 本机形，拦截一条不减）", () => {
       const ctx = createMockCtx();
       // 这个 profile 没装 fs 后端：注入回调不激活、箱子是空的（预检整趟也不参与）。
       ctx.fsFace = undefined;
@@ -1757,7 +1757,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       );
     });
 
-    it("一次盲改对同一枚目标只问一次身份（正文与版本探针复用 B 面那一次 resolve）", async () => {
+    it("一次盲改对同一枚目标只问一次身份（正文与版本探测复用 B 面那一次 resolve）", async () => {
       const ctx = createMockCtx();
       ctx.value.smallEditChars = 10;
       const face = localFsFace();
@@ -1772,7 +1772,7 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       apply(ctx);
       const target = officialTarget("reuse");
       const reason = await editDenyOf(ctx, target, fakeSession("s-official-reuse", []));
-      assert.ok(reason !== undefined, "这一趟确实走了 B 面递证据（否则探针数不到东西）");
+      assert.ok(reason !== undefined, "这一趟确实走了 B 面递证据（否则那枚记录器数不到东西）");
       // 目标一枚 + 扫描起点一枚 + **每一层扫描起点一枚**（分层遍历要按层下钻，每层的起点
       // 都得先定身份；层数=目标到 root 的深度）。远端/沙箱后端下每一枚 resolve 可能是一次往返，
       // 所以这里既钉"同一枚目标只问一次"，也钉"多出来的那几枚是**层**的身份、不是目标的重复"：
@@ -1868,7 +1868,7 @@ describe("分层预算扫描（C）：近邻优先，预算不再被远处的兄
     assert.ok(reason.includes(partialLine(PREFLIGHT_MAX_FILES, rootDeep)), "未扫完照旧点名");
   });
 
-  it("截断但找到了引用 ⇒ **凭证照给**：原样重试即放行（这就是那个 bug 的收口）", async () => {
+  it("截断但找到了引用 ⇒ **凭证照给**：原样重试即放行（这就是那个 bug 的统一处理）", async () => {
     const ctx = createMockCtx();
     ctx.value.smallEditChars = 10;
     apply(ctx);
@@ -1960,7 +1960,7 @@ describe("预检接线：结算与请求装配各自抛错时只记一条告警"
   it("读取基线结算抛错 ⇒ 只记一条告警，下游决定原样交回", async () => {
     const ctx = createMockCtx();
     apply(ctx);
-    // `workingDirectory` 服务面换代：结算里那次 cwd 现取会抛，而这一趟仍必须走完。
+    // `workingDirectory` 宿主服务换代：结算里那次 cwd 现取会抛，而这一趟仍必须走完。
     const boom = new Error("workingDirectory 服务换代");
     ctx.get = (name: string): unknown => {
       if (name === "workingDirectory") {
@@ -1979,7 +1979,7 @@ describe("预检接线：结算与请求装配各自抛错时只记一条告警"
         agent: fakeAgent(fakeSession("s-settle-throws", [])),
       });
       assert.equal(decision.kind, "accept", "结算抛错不打断这条读取");
-      // 结算与随后的请求装配读的是同一枚服务面，所以这一趟两处各记一条；这里只要求
+      // 结算与随后的请求装配读的是同一枚宿主服务，所以这一趟两处各记一条；这里只要求
       // "结算那一处的异常被接住并带上原错误"，别把条数钉成实现细节。
       assert.ok(warn.mock.calls.length > 0, "结算那一处的异常被接住并出声");
       assert.equal(warn.mock.calls[0]?.[1], boom, "告警里带的是原错误（不是新编的一句）");

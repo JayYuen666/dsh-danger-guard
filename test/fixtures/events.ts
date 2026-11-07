@@ -1,12 +1,12 @@
 // test/fixtures/events.ts —— 官方 `SessionEvent` 夹具构造器（与 plugins/shared 的同名文件
 // 同一份形状，两边各自留一份是为了让测试目录不跨包互相拖 dependencies；改一边记得同步）。
 //
-// 生产面（host.ts 的证据链 → shared `scanToolEvents`）绑官方判别联合后，夹具必须满足本地
+// 生产代码（host.ts 的证据链 → shared `scanToolEvents`）绑官方判别联合后，夹具必须满足本地
 // 投影（host.ts 曾自持的那枚 `FactEvent`）一笔带过的三条真约束（都是这一轮由编译器逼出来
 // 的，写在这里备忘）：
 //   1. 信封必填位齐全：`seq`（且它是 `SessionSeq = BrandedNumber<'SessionSeq'>`，不是
 //      number）、`time`，以及 `data.turn` / `data.step`；
-//   2. `callId` / `subCallId` 是 `ToolCallId` 品牌串，`tool/result.message.id` 是
+//   2. `callId` / `subCallId` 是带 brand 标记的 `ToolCallId`，`tool/result.message.id` 是带 brand
 //      `MessageId` 品牌串——裸字符串不能直接书写；
 //   3. `tool/result` 属官方 `SurfaceEventType`：消息生产事件**必须**自带 `surfaceOp`，
 //      `Session.append` 对缺它的写入直接拒收。这条在本地投影里完全看不见。
@@ -14,8 +14,8 @@
 // 要测「宿主真送来畸形事件」的用例仍显式走 badEvent()——那是用例明说的意图，不是把
 // 生产类型放宽成可选换来的。
 //
-// 本文件只被 test/** 用（发布面 `files` 只有 host.js/settings.js/client.js），所以它
-// **值导入** @deepseek-ai/dsh-brand 不影响产物：品牌构造器只活在测试进程里。
+// 本文件只被 test/** 用（发布名单 `files` 只有 host.js/settings.js/client.js），所以它
+// **值导入** @deepseek-ai/dsh-brand 不影响产物：`brandString` 与 `brandNumber` 只活在测试进程里。
 
 import { beforeEach } from "vitest";
 import { brandNumber, brandString } from "@deepseek-ai/dsh-brand";
@@ -123,7 +123,7 @@ export function ptcSettle(subId: string, name: string, isError: boolean): Sessio
   return event;
 }
 
-/** 与本插件取证记账无关的事件：官方 `turn/start` 的载荷最省（只有 `turn`），用来钉住
+/** 与本插件取证记录下来无关的事件：官方 `turn/start` 的载荷最省（只有 `turn`），用来钉住
  *  「非工具事件不进两张表」。 */
 export function unrelated(): SessionEvent {
   const event: SessionEvent = { type: "turn/start", seq: seq(), time: 0, data: { turn: 1 } };
@@ -131,9 +131,9 @@ export function unrelated(): SessionEvent {
   return event;
 }
 
-/** 显式畸形事件：类型面已不可表示的坏形状（缺 callId、缺 name、data 非对象、未知类型、
+/** 显式畸形事件：类型声明里已不可表示的坏形状（缺 callId、缺 name、data 非对象、未知类型、
  *  retired 的 content[0].isError……）。个别用例经它表达「宿主真送来了这个」，测的是取证
- *  器的降级口径，不是类型合法性。
+ *  器的降级规则，不是类型合法性。
  *
  *  信封的 `seq` 由夹具补齐（用例自己写了 seq 时以它为准）：真宿主交来的**每条**已提交事件
  *  都带 seq，投影折叠按 `event.seq` 记行位（等价于扫描器的数组下标），所以坏事件也得

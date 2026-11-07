@@ -24,7 +24,7 @@ const PKG_PREFIX = ((): string => {
   return `[${name.replace(/^dsh-/u, "")}]`;
 })();
 
-/** 模板片段的最短有效长度：空串 `includes("")` 恒真、极短高频词几乎认可任何日志。 */
+/** 模板片段的最短有效长度：空串 `includes("")` 永远成立、极短高频词几乎认可任何日志。 */
 const MIN_TEMPLATE_CHARS = 6;
 
 // 模块初始化即校验模板集合：失校必须显式红，不能等某条日志碰巧不匹配才暴露。

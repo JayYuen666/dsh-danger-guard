@@ -14,9 +14,9 @@ import type {
   FactNeed,
   NeedWhy,
 } from "../lib/fact-gate.ts";
-// 行动指令与缺项规范顺序单源在 lib/gap-directives.ts（状态机只经它渲染拒绝消息与归一收敛键）。
+// 行动指令与缺项规范顺序唯一来源在 lib/gap-directives.ts（状态机只经它渲染拒绝消息与归一收敛键）。
 import { NEED_ORDER, gapLine } from "../lib/gap-directives.ts";
-// 检索取证口径单源在 lib/ref-search-policy.ts（host 的记账与指令文案吃同一份）。
+// 检索取证规则唯一来源在 lib/ref-search-policy.ts（host 的记录下来与指令文案吃同一份）。
 import {
   DEFAULT_REF_SEARCH_STRICT_TOOLS,
   DEFAULT_REF_SEARCH_TOOLS,
@@ -108,7 +108,7 @@ function placeholders(template: string): Set<string> {
   return found;
 }
 
-/** 带 `{占位符}` 的模板键从文案表现量派生：手写清单漏掉新增模板时这条安全网会静默失效。 */
+/** 带 `{占位符}` 的模板键从文案表当场实测派生：手写清单漏掉新增模板时这条安全网会静默失效。 */
 function templateKeysOf(): (keyof DangerGuardMessages)[] {
   return (Object.keys(MESSAGES.zh) as (keyof DangerGuardMessages)[]).filter(
     (key) => placeholders(MESSAGES.zh[key]).size > 0 || placeholders(MESSAGES.en[key]).size > 0,
@@ -159,7 +159,7 @@ describe("factGate：强校验状态机", () => {
 
   it("拒绝计数按文件共享、不按工具名分片：edit 计过的 write 续算到第 2 轮", () => {
     // 黑盒判别：若记忆按工具名分片，write 这次会是"首次拒绝"（headFirst），
-    // /第 2 轮/ 断言当场红——这是"共享"真正可观察的行为面。
+    // /第 2 轮/ 断言当场红——这是"共享"真正可观察的行为测试。
     const first = gate.check("edit", PROJECT_TARGET_FILE, undefined, lack(["read"]));
     assert.equal(first.kind, "deny");
     const second = gate.check("write", PROJECT_TARGET_FILE, undefined, lack(["read"]));
@@ -504,13 +504,13 @@ describe("str_replace_editor 并存编辑器过事实门", () => {
   });
 });
 
-describe("不可判定输入与投递水位", () => {
-  it("投递缺省常量在运行时也不可变", () => {
+describe("不可判定输入与发送水位", () => {
+  it("发送缺省常量在运行时也不可变", () => {
     assert.equal(Object.isFrozen(NO_DELIVERY), true);
     assert.equal(Object.isFrozen(NO_DELIVERY.layerSeqs), true);
   });
 
-  it("历史不可得时只按 read/refs 起步；投递水位翻成 done，layerSeqs 不进入该退化面", () => {
+  it("历史不可得时只按 read/refs 起步；发送水位翻成 done，layerSeqs 不进入该退化面", () => {
     const missing = undeterminable(NO_DELIVERY);
     assert.deepEqual(
       missing.gaps.map((gap) => gap.need),
@@ -534,7 +534,7 @@ describe("不可判定输入与投递水位", () => {
 });
 
 describe("第 4 项自检：FactNeed 全覆盖 + gapLine 分支可产出（防不可达分支）", () => {
-  it("收敛键：NEED_ORDER 覆盖 FactNeed 全部字面量，不静默丢项", () => {
+  it("收敛键：NEED_ORDER 覆盖 FactNeed 全部字面量，不会静默丢项", () => {
     // 若有人在 FactNeed 加新 need（如 ci/scan/lint）却忘了加进 NEED_ORDER，
     // needsKey 会把它从收敛比对里漏掉：补上会反复"多一项"，永远不收敛 → 配额放行。
     // 本测试在编译期（satisfies）与运行期（size + 存在性）双保险。
@@ -579,13 +579,13 @@ describe("第 4 项自检：FactNeed 全覆盖 + gapLine 分支可产出（防�
 });
 
 describe("引用探查指令从生效策略派生（指令与实际认的工具一致）", () => {
-  it("未带策略（host 兜底/单测裸调用）→ 回落内置默认名单，两份口径都写进指令", () => {
+  it("未带策略（host 后备/单测裸调用）→ 回落内置默认名单，两份口径都写进指令", () => {
     const line = refsLine(undefined);
     assert.match(line, /grep/u);
     assert.match(line, /glob/u);
     assert.match(line, /zg_search/u);
-    assert.match(line, /path 指向/u, "pattern 口径的起点参数");
-    assert.match(line, /root 指向/u, "严格口径的起点参数");
+    assert.match(line, /path 指向/u, "走 pattern 规则时的起点参数");
+    assert.match(line, /root 指向/u, "走严格规则时的起点参数");
     assert.match(line, /policy-mod\.ts/u, "指令仍落到目标文件名");
   });
 
@@ -597,13 +597,13 @@ describe("引用探查指令从生效策略派生（指令与实际认的工具�
     assert.match(line, /pattern/u);
   });
 
-  it("口径随工具名切换：严格名单里的工具按 root/query 指令，不再要它传 pattern", () => {
+  it("规则随工具名切换：严格名单里的工具按 root/query 指令，不再要它传 pattern", () => {
     const policy = refSearchPolicyOf(["rg_search"], ["rg_search"]);
     const line = refsLine(policy);
-    assert.match(line, /rg_search`? 的 root 指向/u, "严格口径 → 起点写 root");
+    assert.match(line, /rg_search`? 的 root 指向/u, "严格规则 → 起点写 root");
     assert.match(line, /query/u);
-    assert.doesNotMatch(line, /pattern|include/u, "严格口径不读 pattern/include");
-    assert.match(line, /相对路径/u, "严格口径的相对路径要求必须写给模型");
+    assert.doesNotMatch(line, /pattern|include/u, "严格规则不读 pattern/include");
+    assert.match(line, /相对路径/u, "严格规则的相对路径要求必须写给模型");
   });
 
   it("空名单：指令说明「未配置或配置的工具不可用」两种可能，而不是断言 refSearchTools 为空", () => {
@@ -627,7 +627,7 @@ describe("引用探查指令从生效策略派生（指令与实际认的工具�
     assert.doesNotMatch(line, /grep|glob|zg_search/u);
   });
 
-  it("默认名单常量本身就是修复前的判定口径（单源，防三处漂移）", () => {
+  it("默认名单常量本身就是修复前的判定规则（唯一来源，防三处漂移）", () => {
     assert.deepEqual([...DEFAULT_REF_SEARCH_TOOLS], ["grep", "glob", "zg_search"]);
     assert.deepEqual([...DEFAULT_REF_SEARCH_STRICT_TOOLS], ["zg_search"]);
   });
@@ -790,7 +790,7 @@ describe("取证指令双语（文案表按语言渲染）", () => {
 
   it("两语模板的 {占位符} 集合一致（翻译不会漏掉插值）", () => {
     const keys = templateKeysOf();
-    // 派生逻辑失效（例如文案表整体被换形状）时不让这条用例空转通过。
+    // 派生逻辑失效（例如文案表整体被换形状）时不让这条用例在没有实际校验的情况下通过。
     assert.ok(keys.length >= 10, `只派生到 ${keys.length} 个带占位符的模板键`);
     for (const key of keys) {
       assert.deepEqual(

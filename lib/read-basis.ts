@@ -1,4 +1,4 @@
-// lib/read-basis.ts —— 「模型读到的是哪一版」的记账单源。
+// lib/read-basis.ts —— 「模型读到的是哪一版」的记录唯一来源。
 //
 // 为什么单独成模块：这一小组状态回答的是同一个问题（**当前文件版本下，模型看过的那份内容
 // 还算不算数**），而它的三条不变式都属于"两处各写一遍就会静默失效"那一类：
@@ -13,9 +13,9 @@
 //      差分一算就把观测基线刷成新值；把结论只留在局部变量里，"外部改动"会在下一次评估时
 //      凭空消失，旧 read 证据重新成立——而模型根本还没读过新内容。
 //
-// 生命周期与其余派生台账一致：模块级、容量由 lruPut 兜底、会话销毁时按键前缀回收、
+// 生命周期与其余派生台账一致：模块级、容量由 lruPut 后备、会话销毁时按键前缀回收、
 // 插件卸载时整表清空。键形由调用方拼（host.ts 的 sessionTargetKeyOf），本模块不重复那一处
-// 口径——拼接写两遍就会让两侧读到不同的键而**没有任何报错**。
+// 规则——拼接写两遍就会让两侧读到不同的键而**没有任何报错**。
 
 import { lruPut } from "./lru.ts";
 
@@ -87,7 +87,7 @@ function shiftStaged(key: string): StagedRead | undefined {
  *
  * 提交同时解除失效点——"拿到了这一版"正是那条判据的解除条件，不必再在两处各比一次。
  *
- * 没有暂存时**什么都不记**：执行面与 guard 时点的键不同源（例如中途 `cd`）时，这次成功
+ * 没有暂存时**什么都不记**：执行上下文与 guard 时点的键不同源（例如中途 `cd`）时，这次成功
  * 回调找不到自己那一笔观测；拿"现读的 mtime"当基线等于替一份没验证过的内容背书，还会把
  * 失效点一并清掉（fail-open）。宁可少记一次基线（下次 read 仍要证据）。
  * @param key `会话|目标`
@@ -205,7 +205,7 @@ export function attributeExternalChange(input: AttributionInput): Attribution {
   return { externallyChanged, staleBase: externallyChanged ? staleCandidate : -1 };
 }
 /** 预检把正文当场递进结果里 ⇒ 那枚"还没看过这一版"的失效点可以解除。
- *  为什么调用方不能靠投递水位的位次判：水位记的是日志长度，而外部改动发生在日志之外，
+ *  为什么调用方不能靠发送水位的位次判：水位记的是日志长度，而外部改动发生在日志之外，
  *  两者会取到同一个下标（delivered.readSeq > staleBase 不成立），会一直卡在缺 read 上。 */
 export function clearStaleness(key: string): void {
   const current = basis.get(key);

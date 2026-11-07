@@ -3,7 +3,7 @@
 //
 // 为什么单列（而不是留在 host.ts 的接线里）：这一半不碰宿主的决定形状（`PreToolDecision`
 // 是判别联合，装配它归 host），只做"这条调用该不该问用户 + 问的话说什么"。
-// 于是它可以脱离宿主单测，而 host 那一侧只剩一行形状映射。
+// 于是它可以脱离宿主单测，而 host 里只剩一行形状映射。
 //
 // 为什么**不依赖 fs / session**（与预检 B 面正相反）：它要的证据全在调用参数里 ——
 // 命令原文就是全部输入。B 面预检读不到工具实际用的那份盘就一个字不编（读宿主本地盘
@@ -31,15 +31,15 @@ export interface AskRequest {
   command: string;
   /** 当次语言的说明（官方 `reason`：回给模型的那句）。 */
   reason: string;
-  /** 全语言的展示文案（官方 `displayReason` 形状：弹窗那一面）。 */
+  /** 全语言的展示文案（官方 `displayReason` 形状：弹窗上给用户看的那句）。 */
   displayReason: { en: string; [locale: string]: string };
 }
 
 /**
- * 弹窗那一面的逐语言文案：规则本文 + 该档位的说明。
+ * 弹窗上给用户看的逐语言文案：规则本文 + 该档位的说明。
  *
  * 为什么不能只交 `displayReasonOf(key)`：那只含规则本文，于是模型侧看得到档位说明、
- * 用户在弹窗里看不到——同一件事的两面说两套话，而弹窗才是用户做决定的那个面。
+ * 用户在弹窗里看不到——同一件事的两头说两套话，而弹窗才是用户做决定的那一处。
  *
  * @param key   命中的规则键。
  * @param facts 档位事实。
@@ -69,11 +69,11 @@ function displayReasonWithNote(
  *                `severityOf` 若由宿主给，应包含沙箱覆盖等逐命中事实）。
  * @param facts   档位事实（宿主读好后传入；缺省处置与档位说明用）。
  * @param messages 当次语言的文案表（宿主在调用点现取，本模块不读设置也不自带语言）。
- *   **调用契约**：弹窗那一面的逐语言文案取自本模块的全局 `MESSAGES`，而模型侧的
+ *   **调用契约**：弹窗上的逐语言文案取自本模块的全局 `MESSAGES`，而模型侧的
  *   `reason` 取自这份参数——类型只约束内容形状、不带语言身份，所以两者同源这件事
  *   由调用方兑现：`messages` 必须取自 `MESSAGES` 的某一语言项。传自造字典时，模型
  *   看到的与用户弹窗里看到的会是两句不同的话。
- * @returns 需要审批时返回请求；`allow`/`deny` 两档返回 `undefined`（分别由下游与 guard 收口）。
+ * @returns 需要审批时返回请求；`allow`/`deny` 两档返回 `undefined`（分别由下游与 guard 统一处理）。
  */
 export function askRequestOf(
   name: string | undefined,
@@ -91,7 +91,7 @@ export function askRequestOf(
   const hit = bashVerdictOf(name, args, { ...opts, severityOf: dispositionOf });
   let request: AskRequest | undefined;
   // 档位过滤在**本模块**（不在 lib/danger-rules.ts，也不在 lib/mode-policy.ts）：
-  // 那一侧只回"检测到了什么"与"该档怎么处置"，"这一趟要不要走审批通道"是这条通道自己的事。
+  // 那两个模块只回"检测到了什么"与"该档怎么处置"，"这一趟要不要走审批通道"是这条通道自己的事。
   // 过滤与排序用**同一个** `dispositionOf`；guard 也用它，所以同一枚命中不会在两处得到
   // 不同结论，覆盖后的 `rmrf` 也不会把后段从扫描里抹掉。
   if (hit !== undefined && dispositionOf(hit.verdict) === "ask") {
@@ -102,7 +102,7 @@ export function askRequestOf(
       // 两处文案同源（同一个 key 索引同一份目录），所以模型侧看到的理由与用户在弹窗里
       // 看到的那句说的是同一件事，不会一方说"需确认"、另一方说"已拒绝"。
       // 档位说明两处都接上：模型侧读得到"这是哪一档、为什么这一档要问"，用户在弹窗里
-      // 也读得到——只接 `reason` 会让弹窗那一面退回旧文案。
+      // 也读得到——只接 `reason` 会让弹窗退回旧文案。
       reason: modeNoteApplies(facts, key)
         ? `${messages[key]}\n${messages[modeNoteKeyOf(facts)]}`
         : messages[key],
@@ -119,8 +119,8 @@ export function askRequestOf(
  * 只会把那张卡炸成碎片。所以重复的那次不再上报（只在统计里记一格）——**判定与弹卡不变**，
  * 这一层不承担"少问用户一次"的职责。
  *
- * 容量口径：按会话分片、每会话固定上限；分片数也有上限（超出的按插入序淘汰），宿主进程
- * 退出即消失，不落盘。会话结束由宿主调 `drop` 回收分片——那只是提前回收，不是有界的前提。
+ * 容量规则：按会话分片、每会话固定上限；分片数也有上限（超出的按插入序淘汰），宿主进程
+ * 退出即消失，不写到磁盘。会话结束由宿主调 `drop` 回收分片——那只是提前回收，不是有界的前提。
  */
 export class AskDeduper {
   /** 每会话一张键表；分片数由 `maxSessions` 按插入序淘汰兜底。 */
@@ -166,7 +166,7 @@ export class AskDeduper {
     let table = this.seen.get(key);
     if (table === undefined) {
       table = new Set();
-      // 分片也走容量口径：淘汰按插入序（命中不续命），最旧会话的丢法同上面那条退化理由。
+      // 分片也走容量规则：淘汰按插入序（命中不续命），最旧会话的丢法同上面那条退化理由。
       lruPut(this.seen, key, table, this.maxSessions);
     }
     if (table.has(dedupKey)) {

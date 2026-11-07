@@ -1,6 +1,6 @@
-// lib/settings-read.ts —— **设置值面的防御性读取**：把"用户可能手改坏"的那一层收口。
+// lib/settings-read.ts —— **设置值的防御性读取**：把"用户可能手改坏"的那一层统一处理。
 //
-// 为什么单列：设置条目的 `Config` schema 是严格档，但值面的来源不止那一条路 ——
+// 为什么单列：设置条目的 `Config` schema 是严格档，但值的来源不止那一条路 ——
 // 宿主组合层之外的形状变化（降级注册后的持久段、旧版本残留、profile 行 config 的
 // 非法值）都可能把非数组、混类型的东西送到判定链上。这一层负责把它们折成
 // "能用的就用、不能用的回落"，并且**出声**（静默丢弃等于让用户以为配上了）。
@@ -54,7 +54,7 @@ export function strArray(value: unknown, field: string): string[] | undefined {
 }
 
 /**
- * 词表配置 → bash 判定选项。**单源**：guard 与需确认档共用一份 —— 两处各写一遍迟早会漂，
+ * 词表配置 → bash 判定选项。**唯一来源**：guard 与需确认档共用一份 —— 两处各写一遍迟早会漂，
  * 而漂的表现是"guard 拦得住、审批却看不见"（或反过来），那种不一致没有任何运行期信号。
  *
  * 条件展开是因为"缺省 = 用内置词表"：送一个显式 `undefined` 与不送该键语义不同
@@ -69,23 +69,23 @@ export const bashOptsOf = (cfg: Config): BashDangerOptions => {
   };
 };
 
-/** 写面阈值的降级告警：**只响一次**（与数组字段的降级告警同一条口径——坏设置在修复前
+/** 写入阈值的降级告警：**只响一次**（与数组字段的降级告警同一条规则——坏设置在修复前
  *  每次判定都会命中，逐次刷屏反而盖掉真正的拦截记录）。 */
 let thresholdWarned = false;
 
 /**
- * 数值型设置取值：只接受有限正安全整数（与设置 schema 的 `natural()` 同口径）。
+ * 数值型设置取值：只接受有限正安全整数（与设置 schema 的 `natural()` 同规则）。
  *  字符串、数组、布尔与超出安全整数的值一律回落内置默认——它们不是用户在数值输入框里
- *  给出的值，放宽读法等于把写面闸门整体下调。
+ *  给出的值，放宽读法等于把写入闸门整体下调。
  */
 export function numOf(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
 /**
- * 写面分档阈值，带**交叉校验**：`small ≥ big` 时 mid 档不可达（(big, small] 区间的写面
+ * 写入分档阈值，带**交叉校验**：`small ≥ big` 时 mid 档不可达（(big, small] 区间的写入
  * 在 host 的 tierOf 里全被升成 high），分档语义被静默改写。schema 只能逐字段校验数值
- * 范围，两条阈值的关系约束放不进声明式 schema——在消费边界收口：非法组合整对回落
+ * 范围，两条阈值的关系约束放不进声明式 schema——在消费边界统一处理：非法组合整对回落
  * 内置默认并告警。数值合法性（非法/缺省回落内置默认、绝不用 0 兜底）只有这一份实现，
  * host 侧也从这里 import —— 两份同形副本会各自漂移。
  */

@@ -53,7 +53,7 @@ describe("writeTargetsOf", () => {
     );
   });
 
-  it("空路径被丢弃；同一路径重复出现时按最保守的 creatable 收口", () => {
+  it("空路径被丢弃；同一路径重复出现时按最保守的 creatable 统一处理", () => {
     const empty = writeTargetsOf("apply_patch", {
       input: "*** Begin Patch\n*** Add File: \n+x\n*** End Patch",
     });

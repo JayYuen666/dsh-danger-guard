@@ -2,7 +2,7 @@
 // @ts-check
 /// <reference types="node" />
 // 构建 types/：先让 tsc 出声明，再把声明里的相对说明符从源码后缀改写成产物后缀。
-// 编排（两阶段草稿→替换、说明符正典化、清单口径）统一住在 @jayyuen66/dsh-plugin-shared/
+// 编排（两阶段草稿→替换、说明符规范化、清单规则）统一实现在 @jayyuen66/dsh-plugin-shared/
 // lib/build-types，一处可改；本文件只定位本仓依赖图里的 tsc 入口并转交目录约定。
 // 为什么需要后处理与两阶段——见 shared 同名切面的文件头。
 import { existsSync, readFileSync } from "node:fs";

@@ -8,15 +8,15 @@
 // 这件事必须由一张**以档位为第一维**的表来表达。
 //
 // 本模块的边界：纯函数、零 I/O、不 import `node:fs`（可以用 `node:os`/`node:path`，
-// 与 `lib/danger-rules.ts` 同口径）。档位事实由宿主读好后作为 `PolicyFacts` 传进来
+// 与 `lib/danger-rules.ts` 同规则）。档位事实由宿主读好后作为 `PolicyFacts` 传进来
 // （它要读 `ctx.shell` / `ctx.sandboxPolicy` / `ctx.approval` / `ctx.permissionPresets`），
 // 于是这张表本身可以脱离宿主逐格单测。
 //
-// ⚠ 与官方沙箱的分工（整张表的立足点）：官方沙箱只管**文件效应**，网络与进程面不在它的
+// ⚠ 与官方沙箱的分工（整张表的立足点）：官方沙箱只管**文件效应**，网络与进程不在它的
 // 词汇表里（`dsh-sandbox` 的类型注释原话），收得最紧的那一档也只是拒写、读一律放行。
 // 所以「写」类判据在沙箱确实管得住的格子里该让给它（我们硬拒会掐死官方给的 escalation
 // 那条路），而「无文件效应」的危险（下载即执行、git 破坏、外部基础设施破坏）四种预设
-// 一个都盖不到，那才是我们要补的面。
+// 一个都盖不到，那才是我们要补的那一层。
 
 import type { BashDenialKey, BashVerdict } from "./danger-rules.ts";
 
@@ -62,7 +62,7 @@ export interface PolicyFacts {
   readonly mode: GuardMode;
   /** 本会话此刻能否真的问到用户：审批策略为 `ask`（配置缺席按宿主默认的 `ask`）。
    *  审批服务整个缺席时按 `true` 处理——宿主那条 fail-closed 路径保留我们交的 reason，
-   *  判定与文案都不变，只是最终结论由宿主收口成拒绝。 */
+   *  判定与文案都不变，只是最终结论由宿主统一处理成拒绝。 */
   readonly askable: boolean;
   /** 本会话是不是「自动审查」档（`danger-full-access` + `ask` + 逐调用 reviewer）。 */
   readonly autoReview: boolean;
@@ -82,7 +82,7 @@ type ModeTable = Readonly<Record<BashDenialKey, RuleVerdict>>;
  *
  * 逐列的理由：
  *  - `read-only`：沙箱拒一切写，写类判据（`rmrf`）一律让给沙箱；`pipeShell` 在这一档照问——
- *    管道执行不落盘，沙箱拒写根本管不到「下载即执行」，让给沙箱等于不拦；仍然要问的是
+ *    管道执行不写到磁盘，沙箱拒写根本管不到「下载即执行」，让给沙箱等于不拦；仍然要问的是
  *    那些沙箱盖不到的东西（git 破坏族、基础设施族）与"判据看不见"的形态。
  *  - `workspace-write`：沙箱的语义是**允许**改工作区，所以包住可写根的灾难删除必须我们拦
  *    （沙箱是路径白名单、不提供原子性：`rm -rf ~` 会先删光工作区再在边界外被拒）；
@@ -118,7 +118,7 @@ const BASE: Readonly<Record<Exclude<GuardMode, typeof FULL_ACCESS_MODE>, ModeTab
     rmrf: "deny",
     pipeShell: "deny",
     devServer: "allow",
-    // 这一档降到放行：它表达的是「判据看不见」而不是「确认危险」，而这一档的沙箱仍在保护写面。
+    // 这一档降到放行：它表达的是「判据看不见」而不是「确认危险」，而这一档的沙箱仍在保护写入。
     nestedShellUnconfirmed: "allow",
     gitResetHard: "ask",
     gitCheckoutDiscard: "ask",
@@ -160,7 +160,7 @@ const BASE: Readonly<Record<Exclude<GuardMode, typeof FULL_ACCESS_MODE>, ModeTab
  * 为什么只有这两枚：reviewer 是一个 LLM，它的 allow 不等于用户批准，而这一档的沙箱什么都
  * 不拦；灾难删除与"下载即执行"是两条它可能被话术说服放过的形态，也是唯一值得留一道
  * 不可绕过的确定性命中的地方。其余全部交给 reviewer——我们再问一次就是同一个动作两张卡。
- * `noVerify` 不在本集合里，但同样在这一档硬拒：绕 git 钩子不是沙箱面的事，交给 reviewer
+ * `noVerify` 不在本集合里，但同样在这一档硬拒：绕 git 钩子不是沙箱管的事，交给 reviewer
  * 等于让它替一条与沙箱无关的固定判据做决定（见 `decideRule`）。
  *
  * 导出：档位说明文案（lib/policy-deny.ts）要按**同一份集合**决定"哪几条拒绝接硬拦成因"，
@@ -197,14 +197,14 @@ export function decideRule(facts: PolicyFacts, key: BashDenialKey): RuleVerdict 
       // 也会让"完全权限档"成为钩子绕过的唯一开口。
       return key === "noVerify" ? "deny" : "allow";
     }
-    // 完全权限但仍能问：沿用工作区档的处置（沙箱不兜底，所以写类判据一律我们拦）。
+    // 完全权限但仍能问：沿用工作区档的处置（沙箱不后备，所以写类判据一律我们拦）。
     return BASE["workspace-write"][key];
   }
   const base = BASE[facts.mode][key];
   // 沙箱确实盖住这次的目标（只可能发生在 `rmrf` 上）：让宿主去拦，它会给出官方拒绝标记
   // 与 escalation 路径，而我们的硬拒会掐死那条路。
   // `unknown` 档没有可用的沙箱模式，`sandboxCovers` 却可能由另一条读取路径补齐；
-  // 这一档的契约是"没有沙箱兜底"，不能凭这一位让路。
+  // 这一档的契约是"没有沙箱后备"，不能凭这一位让路。
   if (base === "deny" && key === "rmrf" && facts.mode !== "unknown" && facts.sandboxCovers) {
     return "allow";
   }
@@ -212,7 +212,7 @@ export function decideRule(facts: PolicyFacts, key: BashDenialKey): RuleVerdict 
     return base;
   }
   // 「问」的前提是真的能问：审批策略为 `never` 时宿主会在任何应答者之前确定性返回
-  // `rejected`，那等于硬拒且文案不由我们控制。这里自己收口成 `deny`，于是回给模型的
+  // `rejected`，那等于硬拒且文案不由我们控制。这里自己统一处理成 `deny`，于是回给模型的
   // 是我们那张带改写示例的话。
   return facts.askable ? "ask" : "deny";
 }
@@ -281,9 +281,9 @@ export function severityResolverOf(facts: PolicyFacts): (verdict: BashVerdict) =
   };
 }
 
-/** 本表覆盖的全部规则键，**从 `BASE` 派生**而不是手抄一份。
+/** 本表覆盖的全部规则键，**从 `BASE` 派生**而不是自己抄一份。
  *
- *  为什么必须派生：逐格矩阵测试正是遍历它，手抄的清单会在"新增规则键却忘了补这里"时
+ *  为什么必须派生：按格遍历的用例正是遍历它，自己抄的清单会在"新增规则键却忘了补这里"时
  *  静默少测一格——而 `Record` 只会因为 `BASE`/`AUTO_REVIEW_HARD_STOPS` 缺格而报错，
  *  不会因为清单漏项报错。派生之后两者结构上不可能不一致。 */
 export const ALL_RULE_KEYS: readonly BashDenialKey[] = Object.keys(BASE["read-only"]).filter(
@@ -292,7 +292,7 @@ export const ALL_RULE_KEYS: readonly BashDenialKey[] = Object.keys(BASE["read-on
 
 /** 每条档位说明**对哪几枚规则键**成立（其余键只出基础理由与出路，不接一段无关的成因）。
  *
- *  `read-only` 与 `unknown` 两段讲的是"这一层的定位"（谁负责写面、有没有沙箱兜底），
+ *  `read-only` 与 `unknown` 两段讲的是"这一层的定位"（谁负责写入、有没有沙箱兜底），
  *  对任何键都成立；工作区档那段讲的是删除的原子性，只有 `rmrf` 用得上；自动审查那段讲的是
  *  "为什么只留少数几条硬拦"，只在那几条硬拦真的被拒时才有意义。
  *

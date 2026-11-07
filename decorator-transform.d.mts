@@ -20,13 +20,13 @@ export function lowerStandardDecorators(
   coverageHints?: boolean,
 ): { code: string; map: DecoratorSourceMap | null };
 
-/** rolldown 插件（构建管线）。 */
+/** rolldown 插件（构建流水线）。 */
 export function rolldownDecorators(): {
   name: string;
   transform: (code: string, id: string) => { code: string; map: DecoratorSourceMap | null } | null;
 };
 
-/** Vite 插件（测试管线）。 */
+/** Vite 插件（测试流水线）。 */
 export function viteDecorators(): {
   name: string;
   enforce: "pre";
