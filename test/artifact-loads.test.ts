@@ -4,7 +4,7 @@
 // 与体积预算（`test/dist-size.test.ts`）—— **两条都不执行产物**，所以"产物是语法上无效的 JS"
 // 这一类错它们一条都抓不住。真踩过：rolldown 不认识标准装饰器，会把 `@Remote("stats")`
 // **原样吐进 `host.js`**，而 `npm run build` 报**成功** —— 那一段一旦发出去，插件在宿主里
-// 直接加载失败，且没有任何本地信号。修法（`decorator-transform.mjs`）本身也需要这条门禁后备：
+// 直接加载失败，且没有任何本地信号。修法（shared 的 `lib/decorator-lowering.ts`）本身也需要这条门禁后备：
 // 它跑 `tsc` 且**不看退出码**（`--noResolve` 下必有 TS2307），所以"产物到底成不成"只能靠真加载。
 //
 // 只加载两个 host 产物：`client.js` 是浏览器 UMD 外壳，在 Node 里 import 会撞 `window is not

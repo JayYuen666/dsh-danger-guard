@@ -408,6 +408,7 @@ describe("bashDanger：多段命令逐段检查", () => {
   it("后台 dev server 的让路不吞掉后段", () => {
     const background = { run_in_background: true };
     assert.equal(bashVerdictOf("bash", { command: "git status" }), undefined);
+    assert.equal(bashVerdictOf("bash", undefined), undefined, "参数缺席：没有命令可判");
     assert.equal(bashVerdictOf("bash", { command: NPM_RUN_DEV, ...background }), undefined);
     assert.equal(
       bashVerdictOf("bash", { command: "npm run dev; git reset --hard", ...background })?.verdict

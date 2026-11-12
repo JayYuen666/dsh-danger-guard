@@ -48,7 +48,6 @@ describe("effectiveDispositionOf：惰性与覆盖", () => {
     let reads = 0;
     const count = (): undefined => {
       reads += 1;
-      return undefined;
     };
     const effective = effectiveDispositionOf({
       facts: FACTS,
@@ -199,7 +198,9 @@ describe("effectiveDispositionOf：惰性与覆盖", () => {
         }),
       }),
       canonicalize: (absolutePath) => absolutePath,
-      tempDir: "/tmp",
+      // 这一条钉的是 POSIX 语义（额外根计入终端覆盖根）；平台必须显式钉住，
+      // 否则 Windows CI 上会按宿主平台收窄，结论从 deny 翻成 allow。
+      tempDir: { tempDir: "/tmp", platform: "linux" },
     });
     assert.equal(effective.dispositionOf(rmrfWith(["/extra/granted"])), "deny");
     assert.equal(effective.dispositionOf(rmrfWith(["/etc/foo"])), "allow");

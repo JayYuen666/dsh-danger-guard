@@ -1,6 +1,15 @@
+import path from "node:path";
+import { createRequire } from "node:module";
 import { defineConfig } from "vitest/config";
-import { viteDecorators } from "./decorator-transform.mjs";
 import { definePackageConfig } from "@jayyuen66/dsh-plugin-shared/config/vitest.base";
+import { viteDecorators } from "@jayyuen66/dsh-plugin-shared/lib/decorator-lowering";
+
+// 装饰器降级要一枚 tsc（同 build-host.mjs）。入口在本仓解析后注入。
+const tscEntry = path.join(
+  path.dirname(createRequire(import.meta.url).resolve("typescript/package.json")),
+  "bin",
+  "tsc",
+);
 
 // 公共配置（test.include / environment / testTimeout / provider / exclude / reporter /
 // reportsDirectory / 四项 100% 阈值）在 shared/config/vitest.base.ts 唯一来源；这里只留本包差异。
@@ -20,8 +29,8 @@ const base = definePackageConfig({
 //
 // 为什么非有它不可：官方 Typert Remote 只能用标准装饰器声明，而流水线的解析器（oxc）不降级它 ——
 // 少了这一步，测试**连文件都加载不了**。为什么是 spawn `tsc` 而不是进程内转换（本仓 TS 7 的
-// JS 面上没有转换 API）：理由全在 decorator-transform.mjs 的文件头。
+// JS 面上没有转换 API）：理由全在 shared/lib/decorator-lowering.ts 的文件头。
 export default defineConfig({
   ...base,
-  plugins: [...(base.plugins ?? []), viteDecorators()],
+  plugins: [...(base.plugins ?? []), viteDecorators({ tscEntry })],
 });

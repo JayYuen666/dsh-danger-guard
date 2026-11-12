@@ -57,6 +57,7 @@ const SKIP_DIRS = new Set([
 
 /** package.json 里与入口有关的形状；其余字段本门禁不关心。 */
 interface Manifest {
+  readonly version?: string;
   readonly main?: string;
   readonly types?: string;
   readonly exports?: Record<string, unknown>;
@@ -296,6 +297,40 @@ function blankStrings(text: string): string {
   return out;
 }
 
+/** 把注释抹成空格、字符串原样保留：JSDoc 里的示例不是说明符。 */
+function blankComments(text: string): string {
+  let out = "";
+  let quote = "";
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i] ?? "";
+    if (quote !== "") {
+      const { next, quote: nextQuote } = stepQuoted(text, i, quote);
+      out += text.slice(i, next);
+      i = next;
+      quote = nextQuote;
+    } else if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      out += ch;
+      i += 1;
+    } else if (ch === "/" && text[i + 1] === "/") {
+      const newline = text.indexOf("\n", i);
+      const end = newline === -1 ? text.length : newline;
+      out += " ".repeat(end - i);
+      i = end;
+    } else if (ch === "/" && text[i + 1] === "*") {
+      const close = text.indexOf("*/", i + 2);
+      const end = close === -1 ? text.length : close + 2;
+      out += text.slice(i, end).replaceAll(/[^\n]/gu, " ");
+      i = end;
+    } else {
+      out += ch;
+      i += 1;
+    }
+  }
+  return out;
+}
+
 /** 提取行注释与块注释（输入里的字符串内容已抹空）。 */
 function commentsOf(code: string): string[] {
   const comments: string[] = [];
@@ -476,7 +511,7 @@ describe("发布形态", () => {
     );
     for (const { file, text } of texts) {
       expect(
-        /from\s+["']\.{1,2}\/[^"']*\.ts["']/u.test(text),
+        /from\s+["']\.{1,2}\/[^"']*\.ts["']/u.test(blankComments(text)),
         `types/${file} 的相对说明符仍指源码 .ts，消费方解析不到：请运行 npm run build:types`,
       ).toBe(false);
     }
@@ -579,5 +614,23 @@ describe("注释与文档没有内部指涉", () => {
         }
       }
     }
+  });
+});
+
+describe("版本与变更记录", () => {
+  it("变更记录顶部版本与 package.json 的 version 一致", async () => {
+    // 只抬 version 不写条目时，发出去的新版本没有变更记录，而其余门禁全绿。
+    const { manifest } = await readSurface();
+    if (manifest.version === undefined) {
+      throw new Error("package.json 没有 version");
+    }
+    const changelog = await readFile(path.join(pkgDir, "CHANGELOG.md"), "utf8");
+    const top = /^## (?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/mu.exec(changelog)?.groups?.[
+      "version"
+    ];
+    if (top === undefined) {
+      throw new Error("CHANGELOG.md 里没有任何版本标题");
+    }
+    expect(top, "CHANGELOG 顶部版本必须与 package.json 的 version 一致").toBe(manifest.version);
   });
 });

@@ -102,8 +102,8 @@ const isAncestorDirOf = (pathApi: PathApi, candidate: string, target: string): b
  * @param policyRaw  `ctx.get("sandboxPolicy")` 的原始值。
  * @param session    会话（逐会话的 `sandbox/mode` 覆盖按它解析）；缺席则用部署默认。
  * @param canonicalize 规范形折法（宿主注入，见模块头）。
- * @param tempDir    平台临时目录（宿主给；lib 不 import `node:os` 也能算，但那会重复
- *                   一次 `os.tmpdir()` 的语义，故由调用方给）。
+ * @param tempRoot   临时区读法：字符串 = 宿主进程平台；对象 = `{ tempDir, platform }`
+ *                   （测试注入平台用；lib 不 import `node:os`，目录由调用方给）。
  */
 
 /**
@@ -166,11 +166,18 @@ function writableRootsOf(
   additionalWritableRoots: readonly string[],
   canonicalize: Canonicalize,
   tempDir: string,
+  platform: NodeJS.Platform,
 ): OsPath[] | undefined {
   let roots: OsPath[] | undefined;
   if (typeof workspaceRoot === "string" && workspaceRoot.length > 0) {
     roots = [];
-    for (const candidate of [workspaceRoot, ...additionalWritableRoots, "/tmp", tempDir]) {
+    // Windows 上额外目录授权**只给文件工具，不给沙箱进程**（宿主 sandbox-policy 的
+    // renderPolicyContext 原话："On Windows, these additional grants apply to file tools
+    // only, not sandboxed processes."）。本模块算的是**终端**灾难删除的覆盖根，把额外目录
+    // 计进来会让指向它们的 rmrf 被判「沙箱允许写、须由本包硬拒」，掐掉宿主沙箱自己的
+    // 拒绝/升级路径；而沙箱进程其实写不进那里，让路给它才是与宿主实际管辖一致的处置。
+    const terminalExtra = platform === "win32" ? [] : additionalWritableRoots;
+    for (const candidate of [workspaceRoot, ...terminalExtra, "/tmp", tempDir]) {
       // 解析不出来时按 `path.resolve` 形保留，**不丢这一枚**：宿主的 `realpathOf` 在整条
       // 前缀都不存在时才回 `undefined`，而灾难目标算出来的路径同样出自 `path.resolve` 的世界，
       // 保留 resolve 形才让两边同世界。丢掉这一枚的后果是**反方向**的：它底下的目标
@@ -201,6 +208,7 @@ function scopeOfResolvedPolicy(
   session: unknown,
   canonicalize: Canonicalize,
   tempDir: string,
+  platform: NodeJS.Platform,
 ): SandboxScope | undefined {
   let scope: SandboxScope | undefined;
   const resolved: unknown = policyRaw.resolve(session === undefined ? {} : { session });
@@ -215,7 +223,7 @@ function scopeOfResolvedPolicy(
       const roots =
         additional === undefined
           ? undefined
-          : writableRootsOf(workspaceRoot, additional, canonicalize, tempDir);
+          : writableRootsOf(workspaceRoot, additional, canonicalize, tempDir, platform);
       // 两处读不全都按"这趟不让路"处理：半份根表推出来的"沙箱盖得住"是放行方向。
       if (roots !== undefined) {
         scope = { mode, roots };
@@ -225,13 +233,22 @@ function scopeOfResolvedPolicy(
   return scope;
 }
 
+/** 临时区读法：字符串 = 宿主进程平台；对象 = 额外指定平台（测试用，避免同一份用例
+ *  在 Windows CI 上按宿主平台换结论）。 */
+export type SandboxTempRoot =
+  | string
+  | { readonly tempDir: string; readonly platform: NodeJS.Platform };
+
 export function sandboxScopeOf(
   shellRaw: unknown,
   policyRaw: unknown,
   session: unknown,
   canonicalize: Canonicalize,
-  tempDir: string,
+  tempRoot: SandboxTempRoot,
 ): SandboxScope | undefined {
+  const tempDir = typeof tempRoot === "string" ? tempRoot : tempRoot.tempDir;
+  const platform = typeof tempRoot === "string" ? process.platform : tempRoot.platform;
+  // `tempRoot` 的两种形都只在这里拆一次；下面一律用拆出来的两枚局部值。
   let scope: SandboxScope | undefined;
   // 两道前提，缺一不让路：① 执行器**自报的默认模式**本身在拦（`danger-full-access`
   // 意味着它不拦文件效应，那种执行器给出的 `resolve()` 无论说什么都不该让我们让路）；
@@ -242,7 +259,7 @@ export function sandboxScopeOf(
     // 本函数的调用点一处在扫描排序的热路径上、一处在同步 guard 谓词里，一次抛错会中断
     // 整趟判定，而两种情况下正确的降级都是"不让路"。
     try {
-      scope = scopeOfResolvedPolicy(policyRaw, session, canonicalize, tempDir);
+      scope = scopeOfResolvedPolicy(policyRaw, session, canonicalize, tempDir, platform);
     } catch {
       scope = undefined;
     }

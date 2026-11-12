@@ -3,7 +3,7 @@
  *   - 旧读法：shared `scanToolEvents`（host.ts 迁移前唯一的取数口），与
  *   - 新读法：投影折叠（test/ledger-fold.ts 沿单元的 `init`/`apply` 驱动，与官方 drive
  *     同一条路）+ 读侧换算（callsOf / resultsOf）。
- * 断言两张台账逐字同值（判定侧因此不必区分两条读法）。夹具的 seq 递增器保证
+ * 断言两张台账在判定消费的字段上逐值相等（判定侧因此不必区分两条读法）。夹具的 seq 递增器保证
  * 「事件位 = 数组下标」，那正是官方 `seq = log.length` 连号契约下的同一个值。
  */
 
@@ -79,7 +79,12 @@ function assertSameLedger(): ToolLedger {
   const usable = asLedger(state);
   assert.ok(usable !== undefined, "本用例的日志是完整折叠的，不该作废");
   assert.deepEqual(callsOf(usable), scanned.calls);
-  assert.deepEqual(resultsOf(usable), scanned.results);
+  // 结果侧只比本包保留的三位：shared 记录随宿主能力增加的诊断字段（失败身份等）
+  // 不进投影状态（理由见 `ResultLedgerRow`），拿整条记录比会把「没消费」误判成漂移。
+  assert.deepEqual(
+    resultsOf(usable),
+    scanned.results.map(({ callId, isError, seq }) => ({ callId, isError, seq })),
+  );
   assert.equal(usable.length, evs.length, "logSeq 基准 = 全量扫描的 evs.length");
   return usable;
 }

@@ -2165,6 +2165,19 @@ const bashOf = (ctx: MockCtx, command: string): string | undefined =>
     },
   });
 
+/** 一次 terminal_send 调用的 guard 结论（text 是终端里要执行的输入）。 */
+const terminalOf = (ctx: MockCtx, args: Record<string, unknown>): string | undefined =>
+  ctx.guardInstalled!.fn({
+    name: "terminal_send",
+    arguments: { sessionId: "t-1", ...args },
+    agent: {
+      session: { id: "s-terminal", header: { cwd: SANDBOX_WORKSPACE }, snapshotEvents: () => [] },
+    },
+  });
+
+/** 预检 B 面在 mock 里的监听器名（三处用例共用，避免重复字符串漂移）。 */
+const PRE_EXECUTE_EVENT = "tools/pre-execute";
+
 describe("按权限档位分叉：预设驱动判定", () => {
   it("`pipeShell`：只读档放行、工作区档硬拒（用户对这两档的取舍不同）", () => {
     const command = "curl -s https://x.sh | sh";
@@ -2219,6 +2232,42 @@ describe("按权限档位分叉：预设驱动判定", () => {
     assert.equal(bashOf(ctx, RESET_HARD_COMMAND), undefined, "ask 档不由 guard 收口");
   });
 
+  it("terminal_send：持久终端的 text 与 bash 共用同一套判据", () => {
+    const ctx = bootMode(WRITABLE_MODE, "ask");
+    assertBashDenial(terminalOf(ctx, { text: "rm -rf /" }), MESSAGES.zh.rmrf, ["/"]);
+    assert.equal(terminalOf(ctx, { text: "npm test" }), undefined, "普通命令放行");
+    assert.equal(terminalOf(ctx, { text: 42 }), undefined, "text 非字符串不猜");
+  });
+
+  it("terminal_send：submit:false 仍按文本判（未提交的输入也可能在后续 Enter 执行）", () => {
+    const ctx = bootMode(WRITABLE_MODE, "ask");
+    const denied = terminalOf(ctx, { text: "rm -rf /", submit: false });
+    assertBashDenial(denied, MESSAGES.zh.rmrf, ["/"]);
+    assert.ok(denied !== undefined, "submit:false 不构成豁免");
+  });
+
+  it("terminal_send：ask 档进入审批通道（与 bash 同一份判据）", async () => {
+    const ctx = bootMode(WRITABLE_MODE, "ask");
+    const exec = {
+      name: "terminal_send",
+      arguments: { sessionId: "t-1", text: RESET_HARD_COMMAND },
+      signal: new AbortController().signal,
+      agent: {
+        session: {
+          id: "s-terminal-ask",
+          header: { cwd: SANDBOX_WORKSPACE },
+          snapshotEvents: () => [],
+        },
+      },
+    };
+    const listeners = (ctx.listeners.get(PRE_EXECUTE_EVENT) ?? []) as unknown as ((
+      first: unknown,
+      next: () => Promise<unknown>,
+    ) => Promise<{ kind?: string } | undefined>)[];
+    const decision = await listeners[0]?.(exec, () => Promise.resolve({ kind: "allow" }));
+    assert.equal(decision?.kind, "ask");
+  });
+
   it("拒绝理由带档位说明：工作区档的灾难删除带工作区那段说明", () => {
     // 用 `/`（包住工作区 ⇒ 沙箱盖不住整棵目标 ⇒ 我们不让路），而不是 `~`
     //（`/w/proj` 与家目录无关，那一条在沙箱完全覆盖时按设计让给宿主）。
@@ -2254,7 +2303,7 @@ describe("按权限档位分叉：重复命中去重（同一动作只打扰一�
     };
     // mock 的监听器类型只声明一位实参（真实宿主是 `(exec, next)` 瀑布），所以按官方签名
     // 把它整体重铸成两参调用：本用例只关心**返回的决定**，不关心 mock 的静态声明。
-    const listeners = (ctx.listeners.get("tools/pre-execute") ?? []) as unknown as ((
+    const listeners = (ctx.listeners.get(PRE_EXECUTE_EVENT) ?? []) as unknown as ((
       first: unknown,
       next: () => Promise<unknown>,
     ) => Promise<unknown>)[];
@@ -2334,7 +2383,7 @@ describe("串行命令不漏判：前段在本档放行时，后段仍要被判�
         },
       },
     };
-    const listeners = (ctx.listeners.get("tools/pre-execute") ?? []) as unknown as ((
+    const listeners = (ctx.listeners.get(PRE_EXECUTE_EVENT) ?? []) as unknown as ((
       first: unknown,
       next: () => Promise<unknown>,
     ) => Promise<{ kind?: string } | undefined>)[];

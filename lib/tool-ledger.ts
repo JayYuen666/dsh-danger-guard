@@ -70,6 +70,19 @@ export interface LedgerResultRow {
   seq: number;
 }
 
+/**
+ * 读侧交回的 result 行：只保留本包判定消费的三位。
+ *
+ * shared 的 `ToolResultRecord` 会随宿主能力增加诊断字段（例如失败身份 `error`）；
+ * 它们不进投影状态：本包不消费，而每加一个状态字段都要求 `stateVersion` 抬版、旧缓存
+ * 整份失效。需要用到某个字段时再单独加并抬版本，读侧换算因此显式只挑这三位。
+ */
+export interface ResultLedgerRow {
+  readonly callId: string | undefined;
+  readonly isError: boolean;
+  readonly seq: number;
+}
+
 /** 投影态：整份 JSON 值（官方单元契约），`stateSchema` 校验每一份回填。 */
 export interface ToolLedger {
   /** tool/call（含 PTC 子调用开始）台账，按 `seq` 升序——内容与 `scanToolEvents` 同源。 */
@@ -167,7 +180,7 @@ function callRecordOf(row: LedgerCallRow): ToolCallRecord {
   };
 }
 
-function resultRecordOf(row: LedgerResultRow): ToolResultRecord {
+function resultRecordOf(row: LedgerResultRow): ResultLedgerRow {
   return {
     callId: row.callId ?? undefined,
     isError: row.isError,
@@ -297,7 +310,7 @@ export function callsOf(ledger: ToolLedger): ToolCallRecord[] {
   return ledger.calls.map(callRecordOf);
 }
 
-/** 台账 → `scanToolEvents` 同形状的 results。 */
-export function resultsOf(ledger: ToolLedger): ToolResultRecord[] {
+/** 台账 → 判定消费的 result 三位（见 {@link ResultLedgerRow}）。 */
+export function resultsOf(ledger: ToolLedger): ResultLedgerRow[] {
   return ledger.results.map(resultRecordOf);
 }

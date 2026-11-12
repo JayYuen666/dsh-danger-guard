@@ -87,6 +87,10 @@ import { effectiveDispositionFactory } from "./lib/effective-disposition.ts";
 import type { DispositionFactory } from "./lib/effective-disposition.ts";
 import { presenceOfAttempt } from "./lib/fs-errors.ts";
 import type { StatAttempt } from "./lib/fs-errors.ts";
+// 拒绝结果的结构化身份：只走 pre-execute 的 deny.info（rc.1/rc.2 都转发这一位）。
+import { FACT_GATE_DENIAL_INFO } from "./lib/denial-info.ts";
+// terminal_send 的调用面归一：text → command，并按终端后端的默认 shell 给方言。
+import { shellFaceOf } from "./lib/shell-face.ts";
 import { mountLedgerReader } from "./lib/projection-reader.ts";
 import type { ProjectionsRegistry } from "./lib/projection-reader.ts";
 // 非法密钥模式的点名上报（去重表与设置条目共用一枚）：判定链这里补报 apply 之后才写进来的值。
@@ -197,14 +201,10 @@ import {
 // 两个 PTC 变体由 @deepseek-ai/dsh-tools/types 官方增强并入）：本文件不再自声明
 // 「最小投影」，按 event.type 分支即收窄 data，宿主换形状就编译不过。
 import { applyPatchTargetsOf, scanToolEvents } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
-import type {
-  SessionEvent,
-  ToolCallRecord,
-  ToolResultRecord,
-} from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
+import type { SessionEvent, ToolCallRecord } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 // 取证台账投影：单元 + 读侧换算 + 采信门（台账不可信 ⇒ undefined ⇒ 回退全量扫描）。
 import { asLedger, callsOf, resultsOf } from "./lib/tool-ledger.ts";
-import type { ToolLedger } from "./lib/tool-ledger.ts";
+import type { ResultLedgerRow, ToolLedger } from "./lib/tool-ledger.ts";
 // 会话只读取接口（SessionLogFace）与日志偏移的类型品牌都对齐到官方声明：`Session` 是
 // @deepseek-ai/dsh-session 的类型（名义比较，故只 Pick 成员而不取整类），
 // `SessionLogOffset` 是带类型品牌的数，`brandNumber` 是它唯一的合法构造口（见文件头）。
@@ -1060,7 +1060,7 @@ interface EvalCtx {
   /** tool/call 台账（投影或全量扫描而来，两者同形状：shared `scanToolEvents` 的产物）。 */
   calls: ToolCallRecord[];
   /** tool/result 台账，同上。 */
-  results: ToolResultRecord[];
+  results: ResultLedgerRow[];
   /** 日志长度（= 全量扫描里的 `evs.length` = 官方 `session.seq`）：logSeq 与外部改动基准用它。 */
   logSeq: number;
   sessKey: string;
@@ -1207,7 +1207,7 @@ function readSessionLog(session: SessionLogFace): readonly SessionEvent[] | unde
 function ledgerRows(
   session: SessionLogFace,
   readLedger: LedgerReader | undefined,
-): { calls: ToolCallRecord[]; results: ToolResultRecord[]; logSeq: number } | undefined {
+): { calls: ToolCallRecord[]; results: ResultLedgerRow[]; logSeq: number } | undefined {
   const ledger = readLedger === undefined ? undefined : readLedger(session);
   if (ledger !== undefined) {
     return { calls: callsOf(ledger), results: resultsOf(ledger), logSeq: ledger.length };
@@ -2875,7 +2875,10 @@ async function preflightOnPreExecute(
         const req = reqOf(exec);
         if (req !== undefined) {
           const reason = await runPreflight(req);
-          decision = reason === undefined ? downstream : { kind: "deny", reason };
+          decision =
+            reason === undefined
+              ? downstream
+              : { kind: "deny", reason, info: FACT_GATE_DENIAL_INFO };
         }
       } else {
         decision = confirm;
@@ -3065,10 +3068,12 @@ function confirmFactory(
     // 否则这里会选出一枚 `deny` 键而不问，guard 随后又把它放行，后段没人看。guard 里
     // 用的也是同一个工厂、同一组宿主服务与同一条 `effectiveCwdOf` 规则，所以两处结论一致。
     const effective = dispositionFactory(exec.agent?.session, cwd, facts);
+    // 与 guard 同一条调用面归一：terminal_send 的 text 折成 command、方言按终端后端平台给。
+    const face = shellFaceOf(exec.name, args);
     const ask = cfg.enabled
       ? askRequestOf(
-          exec.name,
-          args,
+          face.name,
+          face.args,
           { ...bashOptsOf(cfg), severityOf: effective.dispositionOf },
           facts,
           table,
@@ -3225,7 +3230,7 @@ function secretJudgeOf(
  *  → SettingsForms 监听它并 invalidate() → 微任务里 describe() → 对 raw 变化的条目
  *  emit('settings/document-updated', ns, revision)。 */
 function localeMessagesOf(svc: HostCtx): () => DangerGuardMessages {
-  let cachedPreference: unknown = undefined;
+  let cachedPreference: unknown;
   let hasCachedPreference = false;
   svc.on?.("settings/document-updated", (ns: unknown) => {
     if (ns === LOCALE_SETTINGS_NAMESPACE) {
@@ -3417,7 +3422,10 @@ export function apply(ctx: Context): void {
       // 会吞掉"仍要拦的后段"；沙箱覆盖的 rmrf 尤其如此（排序时 deny、处置时 allow）。
       const facts = policyFactsOf(svc, exec.agent?.session, false);
       const effective = dispositionFactory(exec.agent?.session, rt.cwd, facts);
-      const judge = bashJudgeOf(name, args, bashOpts, effective.dispositionOf);
+      // 命令行工具的调用面归一（terminal_send 的 text → command + 终端后端默认 shell 的方言）：
+      // bash 闸与需确认档共用这一份，否则「guard 拦得住、审批看不见」会在新工具名上重演。
+      const face = shellFaceOf(name, args);
+      const judge = bashJudgeOf(face.name, face.args, bashOpts, effective.dispositionOf);
       const sample = (cost: JudgeCost): void => {
         sampleJudge(
           () => reportContextOf(wiring, exec),

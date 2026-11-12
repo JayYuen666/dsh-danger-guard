@@ -27,6 +27,7 @@ import plugin, { BUILTIN_BASE } from "../host.ts";
 import type { Config } from "../host.ts";
 import { SETTINGS_READER } from "../lib/settings-schema.ts";
 import { MESSAGES, fillTemplate } from "../lib/messages.ts";
+import { FACT_GATE_DENIAL_INFO } from "../lib/denial-info.ts";
 // 扫描的两枚上限从 lib 取（用例不许重抄数字：改了上限用例要跟着走，而不是先红）。
 import { PREFLIGHT_MAX_FILES, PREFLIGHT_MAX_FINDINGS } from "../lib/preflight-scan.ts";
 // 会话日志出自官方 SessionEvent夹具构造器（信封必填位与类型品牌都在夹具里补一次）。
@@ -897,8 +898,14 @@ describe("host 预检（Phase 2）：A 面随读取附引用面，B 面盲改带
       const session = fakeSession("s-main", []);
       const agent = fakeAgent(session);
       const args = editArgs(targetMain);
-      const reason = denyReason(await preflightOf(ctx, { name: "edit", arguments: args, agent }));
+      const decision = await preflightOf(ctx, { name: "edit", arguments: args, agent });
+      const reason = denyReason(decision);
       assert.ok(reason !== undefined, "没读就改：这一次被拦下（物理停止仍在 dispatch 之前）");
+      assert.deepEqual(
+        decision.kind === "deny" ? decision.info : undefined,
+        FACT_GATE_DENIAL_INFO,
+        "拒绝带结构化身份（宿主持久化到 error.info）",
+      );
       assert.ok(reason.startsWith(HANDOFF_HEAD), "头部点明证据由插件当场取到、重试即可");
       assert.ok(reason.includes(READ_MARK), "带目标正文块");
       assert.ok(reason.includes(REFS_MARK), "带引用块");

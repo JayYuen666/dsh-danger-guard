@@ -39,6 +39,17 @@ const hostFailure = (): never => {
   throw new Error("host implementation failed");
 };
 
+/** 临时改 process.platform 跑一段（sandboxScopeOf 内部读它）；finally 复原，免泄漏到别的用例。 */
+function withPlatform<Result>(platform: NodeJS.Platform, run: () => Result): Result {
+  const original = process.platform;
+  Object.defineProperty(process, "platform", { value: platform, configurable: true });
+  try {
+    return run();
+  } finally {
+    Object.defineProperty(process, "platform", { value: original, configurable: true });
+  }
+}
+
 /** 判据的主角 mode（收常量：它在本文件里出现十几次，sonarjs 的 no-duplicate-string 盯着）。 */
 const WS_ROOT = "/ws";
 const FULL_ACCESS_MODE = "danger-full-access";
@@ -574,10 +585,13 @@ describe("writableRootsOf：规范化失败的那一枚按 path.resolve 形保�
   });
 });
 
-/** 额外可写根那一族的宿主接口：工作区根 `/ws`，额外根由用例给。 */
+/** 额外可写根那一族的宿主接口：工作区根 `/ws`，额外根由用例给。
+ *  平台缺省 POSIX：这一族钉的是「额外根本身进表」的语义；win32 的收窄由下面单独一条
+ *  显式注入验证，否则同一份用例会在 Windows CI 上按宿主平台换结论。 */
 function scopeWithAdditional(
   additionalWritableRoots: unknown,
   canonicalize: Canonicalize = identity,
+  platform: NodeJS.Platform = "linux",
 ): SandboxScope | undefined {
   return sandboxScopeOf(
     { sandboxMode: WRITABLE_MODE },
@@ -590,7 +604,7 @@ function scopeWithAdditional(
     },
     undefined,
     canonicalize,
-    TEMP_ROOT,
+    { tempDir: TEMP_ROOT, platform },
   );
 }
 
@@ -635,6 +649,15 @@ describe("additionalWritableRoots：显式授予的目录也是可写根", () =>
       absolute === EXTRA_UNRESOLVED ? undefined : absolute,
     );
     assert.deepEqual(scope?.roots, [WS_ROOT, path.resolve(EXTRA_UNRESOLVED), TEMP_ROOT]);
+  });
+
+  it("win32：额外根不计入终端覆盖根（rc.2 的授权只给文件工具）", () => {
+    const scope = scopeWithAdditional([EXTRA_ROOT], identity, "win32");
+    assert.ok(scope !== undefined);
+    // 终端沙箱进程写不进额外根；把它排除后，目标落在根外 ⇒ 让路给宿主沙箱。
+    assert.deepEqual(scope.roots, [WS_ROOT, TEMP_ROOT]);
+    assert.equal(sandboxDropsOf(scope, [asOsPath(EXTRA_ROOT)]), true);
+    assert.equal(sandboxDropsOf(scope, [asOsPath(`${EXTRA_ROOT}/deep`)]), true);
   });
 
   it("额外根之下与其祖先的目标都不算被沙箱完全覆盖", () => {
@@ -787,5 +810,47 @@ describe("sandboxCoveredFacts：只给 rmrf 的灾难目标补覆盖位", () => 
     assert.equal(sandboxCoveredFacts(facts, "rmrf", empty, scope, undefined), facts);
     const windows = { role: "disasterTarget", offending: [String.raw`C:\Windows`] } as const;
     assert.equal(sandboxCoveredFacts(facts, "rmrf", windows, scope, undefined), facts);
+  });
+});
+
+describe("额外目录仅供文件工具：终端覆盖根按平台收窄（Windows）", () => {
+  // 宿主 sandbox-policy 原话："On Windows, these additional grants apply to file tools
+  // only, not sandboxed processes." 终端灾难删除的覆盖根因此不能在 win32 上计入额外目录。
+  const EXTRA_DIR = path.resolve(path.parse(process.cwd()).root, "extra", "grant");
+  const scopeWithExtra = (): SandboxScope | undefined =>
+    sandboxScopeOf(
+      { sandboxMode: WRITABLE_MODE },
+      {
+        resolve: () => ({
+          mode: WS_MODE,
+          workspaceRoot: WORKSPACE,
+          additionalWritableRoots: [EXTRA_DIR],
+        }),
+      },
+      undefined,
+      identity,
+      TEMP_ROOT,
+    );
+  const targetInExtra = asOsPath(path.join(EXTRA_DIR, "sub"));
+
+  it("在 POSIX 上额外目录计入终端可写根 ⇒ 指向它的删除与根相交，不让路", () => {
+    const scope = withPlatform("darwin", scopeWithExtra);
+    assert.ok(scope, "解析得出管辖范围");
+    assert.ok(scope.roots.includes(asOsPath(EXTRA_DIR)), "POSIX 额外目录在终端覆盖根里");
+    assert.equal(sandboxDropsOf(scope, [targetInExtra]), false);
+  });
+
+  it("在 win32 上额外目录排除出终端可写根 ⇒ 指向它的删除让路给沙箱（沙箱进程写不进那里）", () => {
+    const scope = withPlatform("win32", scopeWithExtra);
+    assert.ok(scope, "解析得出管辖范围");
+    assert.ok(!scope.roots.includes(asOsPath(EXTRA_DIR)), "win32 额外目录不在终端覆盖根里");
+    assert.equal(sandboxDropsOf(scope, [targetInExtra]), true);
+  });
+
+  it("在 win32 上工作区根仍计入 ⇒ 工作区内的删除依旧不让路（收窄只针对额外目录）", () => {
+    const scope = withPlatform("win32", scopeWithExtra);
+    assert.ok(scope);
+    const targetInWorkspace = asOsPath(path.join(WORKSPACE, "src"));
+    assert.equal(sandboxDropsOf(scope, [targetInWorkspace]), false);
   });
 });

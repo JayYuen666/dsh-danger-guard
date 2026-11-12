@@ -3,8 +3,8 @@ import { definePluginConfig } from "@jayyuen66/dsh-plugin-shared/config/oxlint";
 export default definePluginConfig({
   // `execFileSync` 的豁免收在该文件内，不做包级登记：包级放行等于把"宿主热路径禁止同步子进程"
   // 这条契约在整个包内关掉（host.ts 的同步契约只覆盖 stat/read 两类 fs 读，见 syncStat 的注释），
-  // 而实际需要它的只有下面这一处 —— decorator-transform.mjs 走 SCRIPTS_OVERRIDES 那一条，
-  // 不归这里管。
+  // 而实际需要它的只有下面这一处 —— 装饰器预转换已收进 shared 的 lib/decorator-lowering.ts
+  // （它的 execFileSync 由 shared 自己的 syncIoScopes 登记），本仓不再有那份脚本。
   // 为什么是同步：这条门禁没有并发需求（两次子进程各 ~50ms，顺序跑），而 async 三种写法
   // 恰好被本仓三条 promise 规则夹死 —— `new Promise`（promise/avoid-new）、回调形
   // （promise/prefer-await-to-callbacks）、`promisify(execFile)`（typescript/strict-void-return）。

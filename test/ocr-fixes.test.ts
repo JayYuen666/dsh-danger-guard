@@ -15,7 +15,7 @@ import { declaredTargets } from "../lib/edit-targets.ts";
 import { MESSAGES } from "../lib/messages.ts";
 import type { PolicyFacts } from "../lib/mode-policy.ts";
 import { UI_MESSAGES } from "../src/ui-messages.ts";
-import { needsDecoratorLowering } from "../decorator-transform.mjs";
+import { needsDecoratorLowering } from "@jayyuen66/dsh-plugin-shared/lib/decorator-lowering";
 
 const ZH = MESSAGES.zh;
 const WORKSPACE: PolicyFacts = {

@@ -14,7 +14,7 @@ import type { BashDenialKey, BashVerdict, Fix } from "./danger-rules.ts";
 import { decideRule } from "./mode-policy.ts";
 import type { PolicyFacts, RuleVerdict } from "./mode-policy.ts";
 import { sandboxCoveredFacts, sandboxScopeOf } from "./sandbox-scope.ts";
-import type { Canonicalize, SandboxScope } from "./sandbox-scope.ts";
+import type { Canonicalize, SandboxScope, SandboxTempRoot } from "./sandbox-scope.ts";
 import { asOsPath } from "./path-format.ts";
 import type { OsPath } from "./path-format.ts";
 
@@ -26,7 +26,7 @@ export interface EffectiveDispositionInput {
   readonly shellRaw: () => unknown;
   readonly policyRaw: () => unknown;
   readonly canonicalize: Canonicalize;
-  readonly tempDir: string;
+  readonly tempDir: SandboxTempRoot;
 }
 
 /** 统一处理侧一次要的两样：最终处置 + 覆盖后的事实（上报里要记是哪一档、沙箱有没有让路）。 */
@@ -50,7 +50,7 @@ export interface EffectiveDispositionHost {
   readonly shellRaw: () => unknown;
   readonly policyRaw: () => unknown;
   readonly canonicalize: Canonicalize;
-  readonly tempDir: string;
+  readonly tempDir: SandboxTempRoot;
 }
 
 /** 一次调用要变的三个输入（会话、cwd、档位事实）。 */

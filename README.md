@@ -12,7 +12,7 @@
   <a href="https://github.com/JayYuen666/dsh-danger-guard/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-danger-guard/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D24.9-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.5-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.2--rc.1-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -31,25 +31,30 @@
 
 ## <img src="https://api.iconify.design/lucide/file-text.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Contents
 
-- [What it does](#what-it-does)
-- [Install](#install)
-- [Verify it is live](#verify-it-is-live)
-- [What it does not provide](#what-it-does-not-provide)
-- [Enabling it in dsh](#enabling-it-in-dsh)
-- [What the rules block](#what-the-rules-block)
-- [Settings](#settings)
-- [What each permission preset blocks](#what-each-permission-preset-blocks)
-- [Known boundaries](#known-boundaries)
-- [Data and privacy](#data-and-privacy)
-- [FAQ](#faq)
-- [Development](#development)
-- [License](#license)
+- [ Contents](#-contents)
+- [ What it does](#-what-it-does)
+  - [How a verdict is decided](#how-a-verdict-is-decided)
+- [ Install](#-install)
+  - [Shared version floor](#shared-version-floor)
+- [ Verify it is live](#-verify-it-is-live)
+- [ What it does not provide](#-what-it-does-not-provide)
+- [ Enabling it in dsh](#-enabling-it-in-dsh)
+- [ What the rules block](#-what-the-rules-block)
+- [ Settings](#-settings)
+- [ What each permission preset blocks](#-what-each-permission-preset-blocks)
+  - [The sandbox deferral, and why only `rmrf` gets one](#the-sandbox-deferral-and-why-only-rmrf-gets-one)
+- [ Known boundaries](#-known-boundaries)
+  - [Extended patterns are the configurer's responsibility](#extended-patterns-are-the-configurers-responsibility)
+- [ Data and privacy](#-data-and-privacy)
+- [ FAQ](#-faq)
+- [ Development](#-development)
+- [ License](#-license)
 
 ## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> What it does
 
 - **It blocks, it does not advise.** The decision lives in the synchronous predicate on `ctx.tools.guard`: returning a string rejects that call. The host turns the reason into the call's error result, so the model reads "why this was refused, and what to write instead" - not a silent failure.
 - **Three defences:**
-  - Dangerous `bash` / `pwsh` commands (`bashVerdictOf` in `lib/danger-rules.ts`): git hook bypass, catastrophic `rm`, download-and-run, long-running dev servers, the git destruction family, and the infrastructure destruction family.
+  - Dangerous `bash` / `pwsh` commands (`bashVerdictOf` in `lib/danger-rules.ts`): git hook bypass, catastrophic `rm`, download-and-run, long-running dev servers, the git destruction family, and the infrastructure destruction family. `terminal_send` from the rc.2 persistent-terminal bundle is folded into the same face: its `text` is judged as a command, with the terminal backend's platform dialect.
   - Credential and secret paths on edit/write/apply_patch tools (`secretPathDeny`) - matched by **argument key shape** for single-target editors, and by the official patch parser for `apply_patch`, never by tool name, because tool names drift with the provider.
     - The editor path face has a **second** refusal key, `opaqueTarget`: a target longer than the judgable length limit is neither confirmed nor cleared as a credential, so it is denied with a "paste the path to the user, do not retry verbatim" message. Same principle as `nestedShellUnconfirmed` on the bash side - **cannot judge is not the same as safe**. (An over-long *command* resolves to `nestedShellUnconfirmed` instead.)
   - The first-edit fact gate (`lib/fact-gate.ts`): an edit that has not read its target, or that touches a risky surface without layer evidence, gets refused with the missing evidence attached. `apply_patch` is judged **per operation target** (a move counts both its source and its destination); an empty patch, one the official parser rejects, or one over `APPLY_PATCH_TARGET_LIMIT` (128) is refused outright instead of partially applied, and that refusal does not depend on `factGateEnabled`.
@@ -57,7 +62,7 @@
     - "Which revision was read" lives in `lib/read-basis.ts`: the observation baseline and the staleness point are one record, and it is committed **only after a successful result** - a failed or blocked read cannot advance the baseline and thereby swallow an external change. Once an external change is attributed it stays in force until a successful read actually lands (or the preflight hands the body over in a deny reason).
 - **Preflight gathers that evidence itself** (two faces on two waterfalls, split by when evidence actually becomes visible):
   - Face A, on `tools/post-execute`: a read-only inspection (`read` / `view` / `str_replace_editor view`) returns its reference surface *with that read's result* (`PostToolDecision.accept{additionalContexts}`), so the model sees "who references this" before its next edit.
-  - Face B, on `tools/pre-execute`: a write that never read its target gets the target content and reference surface written into that call's denial reason (`PreToolDecision.deny{reason}`); an identical retry then passes on the delivery watermark. The physical stop stays before dispatch, so "see it before you change it" is not negotiated away.
+  - Face B, on `tools/pre-execute`: a write that never read its target gets the target content and reference surface written into that call's denial reason (`PreToolDecision.deny{reason}`); an identical retry then passes on the delivery watermark. The physical stop stays before dispatch, so "see it before you change it" is not negotiated away. The denial also carries a structured identity (`info: { name: "DangerGuardError", code: "factGate" }`), which the host persists beside the model-facing text.
   - This is why not `agent.inject()`: that API queues context for the *next* pre-step, while decisions are made per step - evidence would arrive *after* the edit landed.
   - The scan is bounded by hard caps (files, directories, per-file bytes, findings) and merges cancellation with a wall clock; the platform never abandons a pending pre-execute promise, so unbounded work is not an option.
   - **The credential rule**: "the traversal was not truncated" **or** "references were found". A correctly scoped search by the model is itself not exhaustive, so demanding exhaustiveness here would be stricter than the gate. But "zero hits **and** truncated" grants nothing - every false negative lives there, and half an "I looked" is worse than none.
@@ -68,7 +73,7 @@
 
 ### How a verdict is decided
 
-- Only `bash` and `pwsh` command strings are judged; a non-string `command` passes (no guessing). The string is split at `;`, `&&`, `||`, `|`, newline, `&`, `(`, `)`, backtick, with no splitting inside quotes.
+- Only `bash` and `pwsh` command strings are judged, plus `terminal_send`'s `text` (see Known boundaries); a non-string `command` / `text` passes (no guessing). The string is split at `;`, `&&`, `||`, `|`, newline, `&`, `(`, `)`, backtick, with no splitting inside quotes.
 - Segment splitting, word lexing, the structure view and the unclosed-quote check are **four projections of one POSIX state machine** (`lib/command-segments.ts`). Two different machines would give the same string opposite verdicts in different predicates.
 - Wrapper words (`sudo`, `env`, `time`, `nice`, `stdbuf`, `timeout`, `taskset`, `watch`, `setsid`, `doas`, `pkexec`, `nohup`, `exec`, `command`, `xargs`, `parallel`, leading `VAR=x`), binary path prefixes (matched by basename, so `/usr/bin/sudo` is no escape), quoting, and backslash continuations are **not** escape hatches. A quoted flag or quoted command word is a working spelling: `git commit "--no-verify"` really skips the hook, and `"rm" -rf ~` judges like the unquoted form.
 - Because a per-tool option table can never be complete, a wrapper-led segment also treats every following word position as a candidate command head.
@@ -84,7 +89,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 Remove with `dsh plugin --profile web remove @jayyuen66/dsh-danger-guard`. The package is on the public npm registry, so installation needs no credentials and no scoped-registry line.
 
 - **Requires Node.js `>= 24.9`.** This is an ESM-only package; that Node floor is what makes `require()` of an ESM entry work at all, which is why `engines.node` is declared. The number is the host's own floor: every `0.2.2` host from `alpha.2` up declares Node `>= 24.9.0`, so a lower claim here would promise a runtime the host never starts on.
-- **Requires host `dsh` on either the `0.2.1-rc.5` or the `0.2.2-alpha.3` host line.** The highest host version verified at publish time is `0.2.2-rc.1`; that number records when this release was cut, not the upper bound of the range. The requirement the host actually reads is `engines.dsh` (`^0.2.1-rc.5 || ^0.2.2-alpha.3`), and it **decides alone**: `evaluatePluginCompatibility` returns on the `engines.dsh` branch before it ever looks at `peerDependencies`, so the `@deepseek-ai/dsh*` peers are not consulted for compatibility here. Prereleases participate in the comparison. A host between `0.2.1-rc.5` and `<0.3.0` satisfies that range; one on `0.3.0` or later does not, and needs the explicit risk grant `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`. The `@deepseek-ai/dsh*` peers carry the same support-window range because the host supplies the actual copy at runtime, while `@deepseek-ai/schemastery` carries the window `^3.18.5 || ^3.18.6-alpha.1`, which admits the host's own copy on either line (`3.18.5` on the `0.2.1-rc` line, `3.19.0` on the `0.2.2-rc` line); an exact value there is what stops npm's stricter peer resolution at `ERESOLVE` on the other line; the exact pins in `devDependencies` are the separate, compile-time discipline (enforced by `test/publish-manifest.test.ts`): this plugin's types and nominal brands are coupled to the host ABI, and silently following it upward is how a second copy of the host type surface ends up loaded. The support window rolls: at publish time this package is checked against every released host version inside the window — the judgement is the host's `--dump-config` layer line for this package, while the settings card and its namespace calls are verified once in full on the release's development baseline — and re-verified once the window moves, so the version number in this bullet is not a standing promise.
+- **Requires host `dsh` on the `0.2.2-rc.1` host line or later.** The highest host version this release was developed and tested against is `0.2.2-rc.2`; that number records when this release was cut, not the upper bound of the range. The requirement the host actually reads is `engines.dsh` (`^0.2.2-rc.1`), and it **decides alone**: `evaluatePluginCompatibility` returns on the `engines.dsh` branch before it ever looks at `peerDependencies`, so the `@deepseek-ai/dsh*` peers are not consulted for compatibility here. Prereleases participate in the comparison. A host between `0.2.2-rc.1` and `<0.3.0` satisfies that range; one on `0.3.0` or later does not, and needs the explicit risk grant `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`. The `@deepseek-ai/dsh*` peers carry the same support-window range because the host supplies the actual copy at runtime, while `@deepseek-ai/schemastery` carries the window `^3.19.0`, which admits the host's own copy on the `0.2.2-rc` line (`3.19.0`); an exact value there is what stops npm's stricter peer resolution at `ERESOLVE`; the exact pins in `devDependencies` are the separate, compile-time discipline (enforced by `test/publish-manifest.test.ts`): this plugin's types and nominal brands are coupled to the host ABI, and silently following it upward is how a second copy of the host type surface ends up loaded. The support window rolls: at publish time this package is checked against every released host version inside the window — the judgement is the host's `--dump-config` layer line for this package, while the settings card and its namespace calls are verified once in full on the release's development baseline — and re-verified once the window moves, so the version number in this bullet is not a standing promise.
 - **No `@deepseek-ai/*` under `dependencies`, by contract** (`test/publish-manifest.test.ts` enforces it). Consumer profiles install with `nodeLinker: hoisted` and `autoInstallPeers: false`, so a host package under `dependencies` is materialized as a **real directory** next to the copy the running host already loaded. `@deepseek-ai/dsh-tools` keys its tool-runtime scheduler with a plain `Symbol` (not `Symbol.for`), so symbol identity is per module instance: the host reads the scheduler off the profile copy, gets `undefined`, and **every native tool call throws** - while build, typecheck and coverage gates stay green right up to that moment. Peers and devDependencies never enter the profile, so they cannot produce a second copy.
 - **Host packages imported for value stay externalized.** `@deepseek-ai/dsh-brand` and `@deepseek-ai/schemastery` are value imports (`brandNumber`, `import Schema from …`). The externalization list in `build-host.mjs` reads `dependencies` ∪ `peerDependencies`; a devDependencies-only entry would let the bundler inline the official function body, giving this package its own copy of the official constructor. A required peer satisfies both halves: the specifier stays external, and the profile installs nothing extra. `zod` is a plain dependency (imported for value by `lib/tool-ledger.ts` and the settings card's `src/stats-reader.ts`).
 - **The artifact is minified on purpose** (`minify: true` in `build-host.mjs`). `test/build-host.test.ts` pins the bare specifiers in both `host.js` and `settings.js` with whitespace-tolerant regexes (minification yields `from"x"`), and enforces externalization structurally through the chunk's `inlinedModules` list - text checks on function names would be permanently green under mangling.
@@ -203,6 +208,7 @@ Registered honestly, one entry per class, each pinned by a test at its current v
 - **Bare `~user` without a separator is not judged.** Whether `rm -rf ~root` expands depends on the machine's account table, and this guard neither touches the filesystem nor looks up users. The delimited form `~user/…` *is* covered.
 - **A PATH-level interpreter running a code string always asks.** `python3 -c "print(1)"` is benign but still needs confirmation - that is the price of "invisible means not silently allowed".
 - **`bash` redirection writes are outside the fact gate.** The gate hangs on the `edit` / `write` / `apply_patch` tools; `printf > f`, `tee`, `cat >`, `sed -i` bypass the "gather evidence first" requirement. Covering them means parsing shell redirection and in-place editors.
+- **`terminal_send` is judged as shell text, not as terminal state.** The call carries no backend type, so a REPL session's input is scanned with the same shell rules (benign REPL input can be over-blocked), and a command split across multiple sends can evade the lexical check. `submit: false` is not exempted: the text may execute on a later Enter. The user's own typing into a terminal is not seen by the guard at all.
 - **Some `ask`-tier forms are blind.** A bare `git checkout <path>` is lexically indistinguishable from switching branches (the explicit `checkout <rev> <path>` form is judged), and `git push --force` does not resolve its target branch. Writes made through shell redirection and edits to a target that changed outside the session keep a small residual window.
 - **Msys/Cygwin mount forms are not translated.** On a real Windows host `rm -rf /c/Windows/System32` needs a mount table, which is a new dependency plus a new design decision.
 - **Content self-proof stops at 1 MiB.** Attributing an mtime jump to this session's own edit reads the target back and looks for the written text. Above that size the guard returns "unknown" instead of holding the synchronous tool-call path while it reads the whole file, so the change counts as external and one successful read is required before the next edit.

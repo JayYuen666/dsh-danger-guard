@@ -1,3 +1,26 @@
+## 0.1.15
+
+宿主开发基线抬到 `0.2.2-rc.2`，支持窗口收到 `^0.2.2-rc.1`；新增 `terminal_send` 覆盖与 B 面拒绝的结构化 `error.info`；shared 抬到 `^0.2.5`（装饰器降级收进 shared），根 catalog 工具链随之上抬；修复 Windows 上额外目录授权被误计入终端可写根。默认拦截行为不变。
+
+### Added
+
+- **`terminal_send` 纳入 bash 判据**：rc.2 的实验性持久终端 bundle 把命令放在 `text` 里，且后端默认 shell 随平台变（POSIX 加载启动文件的 shell / Windows 优先 pwsh）。`lib/shell-face.ts` 把它折成 `bash` / `pwsh` 与 `command`，guard 与需确认档共用同一份调用面，避免新工具名上重演「guard 拦得住、审批看不见」。`submit: false` 不豁免（文本可能在后续 Enter 时执行）；`text` 非字符串不猜。REPL 输入可能被误拦、跨多次发送拆开的命令可能绕过词法判定，边界写进两份 README。
+- **B 面预检拒绝带结构化身份**：`PreToolDecision.deny.info = { name: "DangerGuardError", code: "factGate" }`，宿主会把它与模型侧文案一起持久化（rc.1 与 rc.2 都转发 `decision.info`）。guard 的拒绝仍返回字符串——rc.1 的 `ToolsService.checkGuards` 只接受字符串，交对象会被插值成 `[object Object]`；要保住 `^0.2.2-rc.1` 窗口，这一位不改。
+
+### Fixed
+
+- **Windows 额外目录不再计入终端覆盖根**：宿主沙箱在 Windows 上把额外目录授权只给文件工具、不给沙箱进程（`sandbox-policy` 原文 "On Windows, these additional grants apply to file tools only, not sandboxed processes."）。`sandbox-scope` 的可写根此前无条件计入 `additionalWritableRoots`，使指向额外目录的 `rm -rf` 被判「沙箱允许写、须本包硬拒」，掐掉宿主沙箱自己的拒绝/升级路径。现按平台收窄：win32 不把额外目录计入终端覆盖根，让路给宿主沙箱（它确实拦得住终端对额外目录的写）；POSIX 行为不变。
+
+### Changed
+
+- **宿主开发基线抬到 `0.2.2-rc.2`**：`devDependencies` 整组 `@deepseek-ai/dsh-*` 抬到 `0.2.2-rc.2`，并补上 rc.2 新增的 `@deepseek-ai/dsh-error`（`dsh-llm` 的精确 peer，`autoInstallPeers: false` 下须显式声明）。
+- **支持窗口收到 `^0.2.2-rc.1`**：`engines.dsh` 与 `@deepseek-ai/dsh*` peer 由 `^0.2.1-rc.5 || ^0.2.2-alpha.3` 改为 `^0.2.2-rc.1`（单条 0.2.2 线）；`@deepseek-ai/schemastery` peer 由 `^3.18.5 || ^3.18.6-alpha.1` 收到 `^3.19.0`。devDependencies 仍精确钉版。
+- **shared 抬到 `^0.2.5`，装饰器降级收进 shared**：`build-host.mjs` 与 `vitest.config.ts` 改从 `@jayyuen66/dsh-plugin-shared/lib/decorator-lowering` 取 `rolldownDecorators` / `viteDecorators`，本地 `decorator-transform.mjs` / `.d.mts` 与 `test/decorator-transform.test.ts` 删除；`tscEntry` 由两个入口按本仓依赖图解析后注入（shared 不替消费方解析它自己没声明的依赖）。`test/artifact-loads.test.ts` 与 `test/ocr-fixes.test.ts` 的导入与注释同源更新。
+- **根 catalog 工具链抬版**：`oxlint` 1.91→1.93、`oxlint-tsgolint` 7.0.2005→7.0.2006、`oxfmt` 0.76→0.78、`rolldown` 1.2.16→1.3.2、`vite` 8.3.6→8.3.8。1.93 新命中的 `unicorn/no-useless-undefined` 两处按代码修：`host.ts` 的 `cachedPreference` 去掉无用的 `= undefined` 初值，`test/effective-disposition.test.ts` 的桩函数去掉显式 `return undefined`。
+- **发布清单判据补齐**：`test/publish-manifest.test.ts` 新增「CHANGELOG 顶部版本 = package.json `version`」；声明说明符门禁先遮蔽注释再判——shared 0.2.5 起 JSDoc 示例不再被改写，旧判据会把注释里的 `from "../host.ts"` 误报成未改写的说明符。
+- **Windows CI 回归**：`sandbox-scope` 与 `effective-disposition` 的额外根用例此前按宿主平台读 `process.platform`，Windows 上把「额外目录不计入终端覆盖根」的正确收窄误判成漂移（根表少了额外根、`sandboxDropsOf` 与档位结论翻转）。`sandboxScopeOf` 与 `EffectiveDispositionHost.tempDir` 改为可注入平台（字符串 = 宿主进程平台；对象 = `{ tempDir, platform }`），用例默认按 POSIX 验额外根，另加一条 win32 收窄用例，同一份用例不再随 CI 平台换结论。
+- **rc.2 接口核对**：`tools.guard` 的字符串返回仍被 rc.2 接受（宿主包装成 `{ reason }`），可选的 `ToolGuardDenial.info` 未采用；`Session.append` 批量重载、`AgentRegistry` 移除 `roots()`/`isOwnedBy()`、`sandboxPolicy.registerWritableRoot` 都不影响本包现有接线。typecheck 与 1283 条测试在 rc.2 安装态全绿。
+
 ## 0.1.14
 
 修复 0.1.13 引入的 web 启动隐患：设置卡组件收回 `client.js` 内联，移除对 `@jayyuen66/dsh-plugin-shared/client` 的模块表外置与 `cordis.patch.yml` 里的 shared 供应行。默认配置与拦截行为不变。

@@ -7,21 +7,31 @@
 // 编排（依赖段外部化、输出守卫、region 路径规范化、moduleIds 结构性判据）统一实现在
 // @jayyuen66/dsh-plugin-shared/lib/build-host，一处可改；本文件只声明产物表、生成头与本仓
 // 的两件取舍：minify（装载器只 import() 文本，注释与空白是真实装载成本）与装饰器预转换
-// （为什么必须有：见 decorator-transform.mjs 的文件头）。
+// （为什么必须有：见 shared/lib/decorator-lowering.ts 的文件头）。
 // minify 下 `//#region` 标记不再出现，规范化是空操作但保留（压的是「cwd 泄漏进产物」这条
 // 性质，rolldown 一旦恢复标记就立刻重新需要）；内联体的函数名会被 mangle，任何「某函数体
 // 没被内联」的文本判据都会无条件通过，跨包外部化的门禁因此走**结构性判据**：buildHostReport /
 // buildSettingsReport 交回 chunk 的内联模块 id 清单，由用例对着 package.json 的依赖表判
 // 「一个都没进来」。
 // 不产 .d.ts：插件包对外没有 TS API——dsh 按包名载入运行，没有人 import 它。
+import path from "node:path";
+import { createRequire } from "node:module";
 import { rolldown } from "rolldown";
-import { rolldownDecorators } from "./decorator-transform.mjs";
+import { rolldownDecorators } from "@jayyuen66/dsh-plugin-shared/lib/decorator-lowering";
 import { buildHostEntries } from "@jayyuen66/dsh-plugin-shared/lib/build-host";
 import { invokedDirectly, writeArtifact } from "@jayyuen66/dsh-plugin-shared/lib/build-artifacts";
 
 export { singleEntryChunk } from "@jayyuen66/dsh-plugin-shared/lib/build-artifacts";
 
 const root = import.meta.dirname;
+
+// 装饰器降级要一枚 tsc：接受标准装饰器语法的只有 tsc 自己（rolldown 原样保留 `@Remote(…)`
+// 写出非法 JS）。入口在本仓解析后注入 —— shared 不能替消费方解析它自己没声明的依赖。
+const tscEntry = path.join(
+  path.dirname(createRequire(import.meta.url).resolve("typescript/package.json")),
+  "bin",
+  "tsc",
+);
 
 /** 两个产物的写到磁盘名（构建、查表与门禁多处共用，钉成常量防漂移）。 */
 const HOST_OUTPUT = "host.js";
@@ -57,7 +67,7 @@ async function buildAll() {
     root,
     rolldown,
     minify: true,
-    plugins: [rolldownDecorators()],
+    plugins: [rolldownDecorators({ tscEntry })],
     entries: ENTRIES,
   });
   return cachedBuild;

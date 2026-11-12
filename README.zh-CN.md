@@ -12,7 +12,7 @@
   <a href="https://github.com/JayYuen666/dsh-danger-guard/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-danger-guard/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D24.9-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.5-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.2--rc.1-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -44,6 +44,7 @@
 - [ 四个权限预设各拦什么](#-四个权限预设各拦什么)
   - [与沙箱的让路，以及为什么只有 `rmrf` 有](#与沙箱的让路以及为什么只有-rmrf-有)
 - [ 已知边界](#-已知边界)
+  - [扩展模式由配置者自负](#扩展模式由配置者自负)
 - [ 数据与隐私](#-数据与隐私)
 - [ 常见问题](#-常见问题)
 - [ 开发](#-开发)
@@ -53,7 +54,7 @@
 
 - **它拦截，不是建议。** 判定挂在 `ctx.tools.guard` 的同步谓词上：返回字符串即拒绝该次调用。宿主把理由变成这次调用的错误结果，所以模型读到的是"为什么被拒、改成什么写法"，不是静默失败。
 - **三条防线：**
-  - `bash` / `pwsh` 危险命令（`lib/danger-rules.ts` 的 `bashVerdictOf`）：git 钩子绕过、灾难性 `rm`、下载即执行、长驻 dev server、git 破坏族、基础设施破坏族。
+  - `bash` / `pwsh` 危险命令（`lib/danger-rules.ts` 的 `bashVerdictOf`）：git 钩子绕过、灾难性 `rm`、下载即执行、长驻 dev server、git 破坏族、基础设施破坏族。rc.2 持久终端 bundle 的 `terminal_send` 也折进同一调用面：`text` 当命令判定，方言按终端后端的平台给。
   - 编辑/写类工具上的凭据与密钥路径（`secretPathDeny`）——单目标编辑器按**参数键形**识别，`apply_patch` 走官方补丁解析器取目标，**不看工具名**，因为工具名会随 provider 漂移。
     - 输入区还有**第二枚**拒绝键 `opaqueTarget`：目标路径长到超出可判定上限时，既没确认为凭据、也没确认不是，所以判拒绝，文案是"别原样重试、把路径贴给用户确认"。与 bash 侧 `nestedShellUnconfirmed` 同一个原则——**判不了不等于安全**。（超长的**命令**走的是 `nestedShellUnconfirmed`。）
   - 首次编辑事实门（`lib/fact-gate.ts`）：没读过目标就改，或碰了高风险范围却没有层证据，会被拒，并把缺的证据一并附上。`apply_patch` **按每个操作目标逐枚过门**（move 的源与目的都算）；空补丁、官方解析器不接受的补丁、或目标数超出 `APPLY_PATCH_TARGET_LIMIT`（128）时整条拒绝而不是部分生效，且这条拒绝**不受 `factGateEnabled` 影响**。
@@ -61,7 +62,7 @@
     - 「读到的是哪一版」在 `lib/read-basis.ts`：观测基线与失效点同一条记录，且**只在拿到成功结果之后**才提交——一次失败或被拦的读不会把基线推向前而吞掉中间发生的外部改动；外部改动判出来之后一直有效，直到真的补上一次成功读取（或预检把正文当场递进结果里）。
 - **预检自己把那份证据取到手**（两边挂两条瀑布，分工按"证据在什么时刻才真的算被看见"定）：
   - A 面挂 `tools/post-execute`：只读检视（`read` / `view` / `str_replace_editor view`）查到的**引用证据**随这次读取的结果一起交出去（`PostToolDecision.accept{additionalContexts}`），于是模型下一次编辑之前就看得见"谁引用它"。
-  - B 面挂 `tools/pre-execute`：模型**没读就改**时，当场取到的目标正文与引用证据写进这一次的拒绝理由（`PreToolDecision.deny{reason}`）；原样重试即凭发送水位放行。物理停止仍在 dispatch 之前，"改之前先看清它"这条一个字没让。
+  - B 面挂 `tools/pre-execute`：模型**没读就改**时，当场取到的目标正文与引用证据写进这一次的拒绝理由（`PreToolDecision.deny{reason}`）；原样重试即凭发送水位放行。物理停止仍在 dispatch 之前，"改之前先看清它"这条一个字没让。拒绝同时带结构化身份（`info: { name: "DangerGuardError", code: "factGate" }`），宿主把它与模型侧文案一起持久化。
   - 为什么不是 `agent.inject()`：那个 API 把上下文排在**下一个 pre-step**，而决定是按 step 做的——证据会在编辑生效**之后**才读到。
   - 扫描有硬上限（文件数、目录数、单文件字节、命中条数；超限文件**跳过**），取消信号与墙钟合流。平台不会放弃一枚挂起的 pre-execute promise，所以无界工作不是一个选项。
   - **凭证判据**："遍历未被截断" **或** "找到了引用"。门禁认可模型自己那次作用域正确的检索当凭证，而那次检索**也不是穷尽的**——要求这趟扫描穷尽比门禁自己还严。但"**零命中 + 被截断**"仍然**不给**凭证：假阴性全住在那一种里，半份"我探过了"比不给更糟。
@@ -72,7 +73,7 @@
 
 ### 判定是怎么做出来的
 
-- 只判 `bash` 与 `pwsh` 的命令串；`command` 非字符串则放行（不猜）。按 `;`、`&&`、`||`、`|`、换行、`&`、`(`、`)`、反引号分段，引号内不切段。
+- 只判 `bash` 与 `pwsh` 的命令串，以及 `terminal_send` 的 `text`（边界见「已知边界」）；`command` / `text` 非字符串则放行（不猜）。按 `;`、`&&`、`||`、`|`、换行、`&`、`(`、`)`、反引号分段，引号内不切段。
 - 断段、切词、结构视图、引号是否闭合**四个出口共用一台 POSIX 状态机**（`lib/command-segments.ts`）。两台机器会让同一串在不同判据下结论相反。
 - 包装词（`sudo`、`env`、`time`、`nice`、`stdbuf`、`timeout`、`taskset`、`watch`、`setsid`、`doas`、`pkexec`、`nohup`、`exec`、`command`、`xargs`、`parallel` 与前导 `VAR=x`）、bin 路径前缀（按 basename 比对，所以 `/usr/bin/sudo` 也不是逃逸口）、引号、反斜杠续行**都不是**逃逸口。引号包裹的旗标或命令头**是生效写法**：`git commit "--no-verify"` 确实跳过钩子，`"rm" -rf ~` 与不加引号同判。
 - 因为按工具维护的 option 表按定义补不完，包装词领头的段还会把其后**每个词位**都当候选命令头各判一遍。
@@ -88,7 +89,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 卸载：`dsh plugin --profile web remove @jayyuen66/dsh-danger-guard`。包在公共 npm 上，安装不需要凭据，也不需要配作用域源。
 
 - **要求 Node.js `>= 24.9`。** 本包是纯 ESM；正是这个下限让 ESM 入口的 `require()` 形式可用，所以声明了 `engines.node`。这个数字取自宿主自己的下限：`0.2.2` 系列从 `alpha.2` 起每一版宿主都声明 Node `>= 24.9.0`，把这里写得更低等于承诺一个宿主起不来的运行时。
-- **要求宿主 `dsh` 满足 `engines.dsh` 的 `^0.2.1-rc.5 || ^0.2.2-alpha.3`（覆盖 `0.2.1-rc.5` 与 `0.2.2-alpha.3` 两条宿主线，上限仍是 `<0.3.0`）。** `0.2.2-rc.1` 只是发布时点已取证的最高版本，不是区间上限。宿主真正读的是 `engines.dsh`（`^0.2.1-rc.5 || ^0.2.2-alpha.3`），而且它**单独决定**：`evaluatePluginCompatibility` 在 `engines.dsh` 那一支就返回了，根本走不到读 `peerDependencies` 的那段——所以 `@deepseek-ai/dsh*` 那几枚 peer 在这里不参与兼容判定。预发布版本参与范围比较。宿主在 `0.2.1-rc.5` 到 `<0.3.0` 之间都满足；`0.3.0` 及以后不满足，要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。`@deepseek-ai/dsh*` 那几枚 peer 写同一条支持窗口范围，因为运行期那几份由宿主提供；`@deepseek-ai/schemastery` 写窗口 `^3.18.5 || ^3.18.6-alpha.1`，两条宿主线各自的副本都收得下（`0.2.1-rc` 线是 `3.18.5`，`0.2.2-rc` 线解析到 `3.19.0`）；在这里钉一个精确值，正是 npm 更严格的 peer 解析在另一条线上止步 `ERESOLVE` 的原因。`devDependencies` 里的精确钉版才是那条**独立的编译期纪律**（由 `test/publish-manifest.test.ts` 钉住）：本插件的类型与 brand 标记类型都和宿主 ABI 耦合，"自动跟上去"正是宿主类型上被装出第二份的那条路。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证（判据是宿主 `--dump-config` 里本包的层行；设置卡与它的命名空间调用另在发布基线上全量取证一次），窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
+- **要求宿主 `dsh` 满足 `engines.dsh` 的 `^0.2.2-rc.1`（覆盖 `0.2.2-rc.1` 起的 `0.2.2` 预发布与 `0.2.x`，上限仍是 `<0.3.0`）。** `0.2.2-rc.2` 是本版开发与测试取证到的最高宿主版本，不是区间上限。宿主真正读的是 `engines.dsh`（`^0.2.2-rc.1`），而且它**单独决定**：`evaluatePluginCompatibility` 在 `engines.dsh` 那一支就返回了，根本走不到读 `peerDependencies` 的那段——所以 `@deepseek-ai/dsh*` 那几枚 peer 在这里不参与兼容判定。预发布版本参与范围比较。宿主在 `0.2.2-rc.1` 到 `<0.3.0` 之间都满足；`0.3.0` 及以后不满足，要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。`@deepseek-ai/dsh*` 那几枚 peer 写同一条支持窗口范围，因为运行期那几份由宿主提供；`@deepseek-ai/schemastery` 写窗口 `^3.19.0`，收得下 `0.2.2-rc` 线宿主自己的副本（`3.19.0`）；在这里钉一个精确值，正是 npm 更严格的 peer 解析止步 `ERESOLVE` 的原因。`devDependencies` 里的精确钉版才是那条**独立的编译期纪律**（由 `test/publish-manifest.test.ts` 钉住）：本插件的类型与 brand 标记类型都和宿主 ABI 耦合，"自动跟上去"正是宿主类型上被装出第二份的那条路。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证（判据是宿主 `--dump-config` 里本包的层行；设置卡与它的命名空间调用另在发布基线上全量取证一次），窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **`dependencies` 里不放任何 `@deepseek-ai/*`，这是约定**（`test/publish-manifest.test.ts` 钉着）。消费方的 profile 用 `nodeLinker: hoisted` 且 `autoInstallPeers: false` 安装，于是写在 `dependencies` 里的宿主包会被落成**真实目录**，与运行中的宿主已加载的那份并存。`@deepseek-ai/dsh-tools` 的工具运行期调度键是普通 `Symbol`（不是 `Symbol.for`），符号身份按模块实例算：宿主从 profile 副本上读那个键拿到 `undefined`，于是**每一次原生工具调用都抛**——而构建、类型检查、覆盖率检查在此之前全部照绿。peer 与 devDependencies 都不会进 profile，所以都物化不出第二份。
 - **按值导入的宿主包必须保持外部化。** `@deepseek-ai/dsh-brand` 与 `@deepseek-ai/schemastery` 是值导入（`brandNumber`、`import Schema from …`）。外部化名单读 `dependencies` ∪ `peerDependencies`；只写 `devDependencies` 会被打包器把官方函数体内联进产物，本包就各持一份官方构造器。必需 peer 同时满足两件事：说明符仍是外部的，而消费方 profile 不多装任何东西。`zod` 是普通依赖（由 `lib/tool-ledger.ts` 与设置卡的 `src/stats-reader.ts` 值导入）。
 - **产物刻意压缩**（`build-host.mjs` 的 `minify: true`）。`test/build-host.test.ts` 用容忍空白的正则钉住 `host.js` 与 `settings.js` 里的裸说明符（压缩后写作 `from"x"`），外部化本身则走 chunk 的 `inlinedModules` 清单做结构性判据——按函数名做文本断言在 mangle 之后会永远变绿。
@@ -207,6 +208,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 - **词尾没有分隔符的 `~user` 不收。** `rm -rf ~root` 展开成什么取决于本机账号表，而本闸既不碰文件系统也不查用户。**带分隔符的 `~user/…` 已收**。
 - **PATH 上的解释器跑代码串一律需确认。** `python3 -c "print(1)"` 是良性的，也仍要确认——这是"看不见就不会静默放行"的定价。
 - **`bash` 重定向写入不在事实门覆盖面。** 门禁挂在 `edit` / `write` / `apply_patch` 三类工具上；`printf > f`、`tee`、`cat >`、`sed -i` 绕过"先取证"这条。纳入它要解析 shell 重定向与就地编辑器。
+- **`terminal_send` 按 shell 文本判，不按终端状态判。** 调用里没有后端类型，所以 REPL 会话的输入也走同一套 shell 规则（正常的 REPL 输入可能被误拦），命令拆成多次发送时可以绕过词法判定；`submit: false` 不豁免——文本可能在后续 Enter 时执行。用户自己往终端里敲的内容完全不经过这道闸。
 - **少数 `ask` 档形态是盲问。** 只给一个参数、不带 `--` 的 `git checkout <path>` 与"切分支"在词法上不可分（显式的 `checkout <rev> <path>` 会判），`git push --force` 不解析目标分支。经 shell 重定向落笔的改动、以及目标在会话外被改动的残窗，同理。
 - **MSYS/Cygwin 挂载形态不折算。** 真实 Windows 宿主上 `rm -rf /c/Windows/System32` 要一张挂载表，那是新依赖加新设计决定。
 - **内容自证上限为 1 MiB。** 把一次 mtime 跳变归因给本会话自己那次编辑，要把目标读回来找写入的文本。超过这个大小就把结论记为「不知」，不在同步的工具调用主路径上整份读入，于是这次改动按外部改动处理：下一次编辑之前需要一次成功的 read。
