@@ -38,6 +38,14 @@ export interface UiMessages {
   readonly revert: string;
   /** 保存失败前缀（后接错误摘要）。 */
   readonly saveFailed: string;
+  /**
+   * 有字段越界时的状态条文案。
+   *
+   * 为什么需要它：`NumberField` 对越界草稿**不调 `onChange`**（越界值根本进不了 `touched`），
+   * 所以只看草稿变化的保存门禁会认为「没改过」或「改的是别的合法字段」，照样提交 ——
+   * 用户会在有非法输入的情况下把别的字段一起存下去。这条文案是那道门禁的唯一可见出口。
+   */
+  readonly invalidFields: string;
   /** 宿主回 `false`（拒绝 / 表单已销毁 / 写入被跳过）时的失败摘要。 */
   readonly saveRejected: string;
   /** 词表输入框的默认占位（未显式给 placeholder 的行）。 */
@@ -174,6 +182,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     saving: "保存中…",
     revert: "撤销",
     saveFailed: "保存失败：",
+    invalidFields: "有字段超出范围，先修正或撤销后再保存。",
     saveRejected: "宿主未受理这次写入",
     listPlaceholder: "逗号分隔，如 turbopack, remix",
     refToolsEmpty: "（当前名单为空：任何检索都不计入引用取证）",
@@ -246,6 +255,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     saving: "Saving…",
     revert: "Revert",
     saveFailed: "save failed: ",
+    invalidFields: "Some fields are out of range; fix them or revert before saving.",
     saveRejected: "the host did not accept the write",
     listPlaceholder: "comma separated, e.g. turbopack, remix",
     refToolsEmpty: "(the list is empty: no search counts towards reference evidence)",

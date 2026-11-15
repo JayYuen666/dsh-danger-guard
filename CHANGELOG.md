@@ -1,3 +1,30 @@
+## 0.1.17
+
+market 热挂与 bundle 层双路径装载时第二份 `apply` 整份让路（此前会静默挂两份 guard 与两套监听）；设置卡接「有字段越界就不许保存」那道门禁；shared 抬到 `^0.2.9`，输入框不再撑出容器、小节内补上纵向间距；宿主 peer 窗口抬到 `^0.2.2-rc.2`。默认配置与拦截行为不变。
+
+### Added
+
+- **单实例判据 `lib/instance-guard.ts`**：`claimSingleInstance(svc)` 用 shared 的 `claimInstance` 抢一个只有本包会用到的私有服务名，抢不到就让本次装配整份让路。判据抽成独立文件而不写在 `host.ts` 里，是因为那个文件正卡在 `eslint/max-lines`（2000）与 `max-lines-per-function`（120）的余量边缘，而这里要带一段完整成因说明。`INSTANCE_LOCK_KEY = "@jayyuen66/dsh-danger-guard/instance"` 刻意不带随机后缀——随机后缀等于谁都能抢到。
+- **`console.warn` 让路告知**：让路那一份不抛错（`tools.guard` 是 `append`、事件监听也只是各挂一份，所以第二遍本来就**不会**失败），只在控制台留一行「本次装配让路，拦截与统计由在册的那一份提供」。静默的重复比启动失败更难发现，这一行是它唯一的可见出口。
+- **回归测试 `test/instance-guard.test.ts`（6 条）**：空作用域抢到且锁名落进服务表 / 已有一份在册时让路返回 `false` 且**不再尝试 provide** / `provide` 抛错时同样只让路、不把异常抛给调用方 / 没有 `get` 面按能力缺席放行 / 没有 `reflect` 面同样放行 / 两份先后装配时第一份抢到、第二份让路。`test/host.test.ts` 另加一条装配级用例：同一 `ctx` 跑两次 `apply`，第二遍不挂第二份 guard、不重复登记监听，且 `warn` 恰好一次。
+
+### Changed
+
+- **两处逐字重复收进 shared**：`lib/messages.ts` 的 `fillTemplate()` 换成 shared 的 `fillPlaceholders`（本文件那条 `PLACEHOLDER_SHAPE` 正则与单趟替换正文一并删除，语义不变：缺值保留原文）；`lib/edit-targets.ts` 的私有 `isRecord` 换成 shared 的 `lib/record`（本包那份与 shared 同义，行为不变）。
+- **运行时依赖 shared 抬到 `^0.2.9`**：`pnpm-workspace.yaml` 的 catalog 由根 `sync` 投影，`client.js` 按新 shared 重建。
+- **宿主 peer 窗口 `^0.2.2-rc.1` → `^0.2.2-rc.2`**（四枚 `@deepseek-ai/dsh*` peer 与 `engines.dsh` 一起抬），两份 README 的徽章跟着改。
+
+### Fixed
+
+- **越界数字草稿会被静默丢掉**：`NumberField` 对越界草稿**不调 `onChange`**，于是它根本不进 `touched` —— 只看「草稿 vs 已提交值」的保存门禁会以为什么都没改：用户在一个字段填了越界值、改另一个合法字段再保存，其余字段写出去、越界那一格悄悄丢掉。三个数字字段（`maxDenies` / `smallEditChars` / `bigEditChars`）现在都接 `onInvalidChange` 上报「本字段非法」，卡片据此把保存按钮灰掉、并在保存条上点名「有字段超出范围，先修正或撤销后再保存。」（`src/ui-messages.ts` 的 `invalidFields`）；`resetToken` 在保存/撤销后把框里的非法草稿清回已提交值。
+- **越界时连撤销也点不动**：0.1.16 只按「有未保存改动」决定保存条，而越界草稿不进 `touched`，于是只填了非法值时保存与撤销一起灰着——撤销正是越界状态的出路。现在 `SaveBar` 分开算：保存被 `blocked` 拦下，撤销保持可点。
+- **输入控件撑出容器**（shared 侧，九仓一并受益）：`.dsu-input` 是 `width:100%` + 左右各 12px padding + 1px 边框，默认 `content-box` 让每个输入框比容器宽 26px；`.dsu-form` 整棵子树现在统一 `border-box`（含 `::before`/`::after`）。
+- **小节内相邻元素间距为 0**（shared 侧）：`.dsu-field` 之外的元素（说明文字、宽行输入框、按钮行）相邻间距原本是 0，textarea 的下边框直接贴着按钮。现在 `.dsu-form .dsu-section>*+*` 给 10px，`.dsu-sectionHint` 保持 4px，`.dsu-field` 之间仍是 0（它们自带 `padding:12px 0` 与上边框），`.dsu-savebar` 保持 24px。
+
+### Not changed, deliberately
+
+- 让路那一份**不做任何降级装配**：两份的装配参数来自同一份配置，功能完全由先到的那一份提供，让路不丢任何能力。锁随那一份的 fiber 卸载自动释放，卸载后下一份仍能抢到。
+
 ## 0.1.16
 
 设置卡的下拉候选与说明浮层不再漂到浏览器最左边；shared 抬到 `^0.2.8`（含运行时几何自检），CI 的 action 钉版升到最新。默认配置与拦截行为不变。

@@ -10,7 +10,6 @@
 import { createElement, useEffect, useState } from "react";
 import { z } from "zod";
 import {
-  CARD_UI_CSS,
   CardForm,
   ListField,
   NumberField,
@@ -18,7 +17,9 @@ import {
   Section,
   ToggleField,
   diffTouched,
+  ensureCardUiCss,
   splitHint,
+  useInvalidFields,
 } from "@jayyuen66/dsh-plugin-shared/client";
 import type { ReactNode } from "react";
 import type { Context } from "@deepseek-ai/cordis";
@@ -188,7 +189,7 @@ function buildBlockSection(props: SectionInputs): ReactNode {
 
 /** 判定与放行小节：统计开关、放行次数、严格模式。 */
 function buildJudgeSection(props: SectionInputs): ReactNode {
-  const { t, writable, eff, setField } = props;
+  const { t, writable, eff, setField, resetToken, reportInvalid } = props;
   const disabled = !writable;
   const judgeStats = createElement(ToggleField, {
     label: t("statsLabel"),
@@ -210,6 +211,10 @@ function buildJudgeSection(props: SectionInputs): ReactNode {
     unit: t("unitTimes"),
     invalidHint: t("outOfRange"),
     disabled,
+    resetToken,
+    onInvalidChange: (invalid: boolean): void => {
+      reportInvalid("maxDenies", invalid);
+    },
     onChange: (next: number | undefined): void => {
       setField("maxDenies", next);
     },
@@ -227,43 +232,71 @@ function buildJudgeSection(props: SectionInputs): ReactNode {
   return createElement(Section, { title: t("judgeSection") }, judgeStats, maxDenies, strict);
 }
 
+/**
+ * 一格「字符数阈值」输入框：分级规则小节的两行（小幅/大幅写入阈值）用它。
+ *
+ * 抽出来是因为两行的形状逐字相同、只差字段名与上下界 —— 连 `resetToken` /
+ * `onInvalidChange` 这两根线都要一模一样地接，抄两遍就会漏一处。
+ *
+ * @param props - 三个小节共用入参
+ * @param spec - 这一行的字段名、标签、提示、兜底值与上下界
+ * @returns 挂好越界上报与重置信号的那一格
+ */
+function charThresholdField(
+  props: SectionInputs,
+  spec: {
+    readonly field: "smallEditChars" | "bigEditChars";
+    readonly label: string;
+    readonly hint: string;
+    readonly fallback: number;
+    readonly schema: z.ZodNumber;
+    readonly max: number;
+  },
+): ReactNode {
+  const { t, writable, eff, setField, resetToken, reportInvalid } = props;
+  const min = spec.schema.minValue;
+  return createElement(NumberField, {
+    label: spec.label,
+    ...splitHint(spec.hint),
+    field: spec.field,
+    value: numberValue(eff(spec.field), spec.fallback, spec.schema),
+    ...(min === null ? {} : { min }),
+    max: spec.max,
+    step: 1,
+    unit: t("unitChars"),
+    invalidHint: t("outOfRange"),
+    disabled: !writable,
+    resetToken,
+    onInvalidChange: (invalid: boolean): void => {
+      reportInvalid(spec.field, invalid);
+    },
+    onChange: (next: number | undefined): void => {
+      setField(spec.field, next);
+    },
+  });
+}
+
 /** 分级规则小节：两份写入阈值 + 六份名单/词表。 */
 function buildRulesSection(props: SectionInputs): ReactNode {
   const { t, writable, eff, setField } = props;
   const disabled = !writable;
-  const smallHint = t("smallHint", { chars: DEFAULT_SMALL_EDIT_CHARS });
-  const bigHint = t("bigHint", { chars: DEFAULT_BIG_EDIT_CHARS });
   const refToolsHint = t("refToolsHint", { tools: DEFAULT_REF_SEARCH_TOOLS.join("/") });
   const listPlaceholder = t("listPlaceholder");
-  const small = createElement(NumberField, {
-    label: t("smallLabel"),
-    ...splitHint(smallHint),
+  const small = charThresholdField(props, {
     field: "smallEditChars",
-    value: numberValue(eff("smallEditChars"), DEFAULT_SMALL_EDIT_CHARS, SMALL_EDIT_CHARS_SCHEMA),
-    ...(SMALL_EDIT_CHARS_SCHEMA.minValue === null ? {} : { min: SMALL_EDIT_CHARS_SCHEMA.minValue }),
+    label: t("smallLabel"),
+    hint: t("smallHint", { chars: DEFAULT_SMALL_EDIT_CHARS }),
+    fallback: DEFAULT_SMALL_EDIT_CHARS,
+    schema: SMALL_EDIT_CHARS_SCHEMA,
     max: 2000,
-    step: 1,
-    unit: t("unitChars"),
-    invalidHint: t("outOfRange"),
-    disabled,
-    onChange: (next: number | undefined): void => {
-      setField("smallEditChars", next);
-    },
   });
-  const big = createElement(NumberField, {
-    label: t("bigLabel"),
-    ...splitHint(bigHint),
+  const big = charThresholdField(props, {
     field: "bigEditChars",
-    value: numberValue(eff("bigEditChars"), DEFAULT_BIG_EDIT_CHARS, BIG_EDIT_CHARS_SCHEMA),
-    ...(BIG_EDIT_CHARS_SCHEMA.minValue === null ? {} : { min: BIG_EDIT_CHARS_SCHEMA.minValue }),
+    label: t("bigLabel"),
+    hint: t("bigHint", { chars: DEFAULT_BIG_EDIT_CHARS }),
+    fallback: DEFAULT_BIG_EDIT_CHARS,
+    schema: BIG_EDIT_CHARS_SCHEMA,
     max: 100_000,
-    step: 1,
-    unit: t("unitChars"),
-    invalidHint: t("outOfRange"),
-    disabled,
-    onChange: (next: number | undefined): void => {
-      setField("bigEditChars", next);
-    },
   });
   const refTools = createElement(ListField, {
     label: t("refToolsLabel"),
@@ -346,12 +379,22 @@ function buildRulesSection(props: SectionInputs): ReactNode {
   );
 }
 
-/** 三个小节的入参。 */
+/**
+ * 三个小节的入参。
+ *
+ * `resetToken` 与 `reportInvalid` 是 shared 的 `NumberField` 这一轮多出来的两个口：
+ * 前者在「保存/撤销」后把越界草稿清回已提交值（父值没变时，组件内那个「保留输入中的草稿」
+ * 分支会把非法值一直留在框里），后者把「本字段现在非法」上报给卡片，让保存门禁能拦住
+ * **越界草稿不进 touched** 那种情形 —— 只看草稿变化的话，用户可以在一个字段填了越界值、
+ * 改另一个合法字段然后保存，越界那一格就被悄悄丢掉了。
+ */
 interface SectionInputs {
   t: Translate;
   writable: boolean;
   eff: (field: string) => unknown;
   setField: (field: string, value: unknown) => void;
+  resetToken: number;
+  reportInvalid: (field: string, invalid: boolean) => void;
 }
 
 /** 一条读数的形状：`面名 12 · 键名 3`（各行的取值都过这里）。 */
@@ -518,15 +561,22 @@ function DgCard(props: DgCardProps): ReactNode {
   const [touched, setTouched] = useState<Record<string, unknown>>({});
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // 越界草稿**不进 touched**（NumberField 对非法值不调 onChange），所以它们另记一份：
+  // 保存门禁要同时看「改了什么」与「哪一格现在是非法输入」。这套状态机住在 shared 里。
+  const invalid = useInvalidFields();
   const eff = (field: string): unknown => (field in touched ? touched[field] : value[field]);
   const dirtyKeys = diffTouched(touched, value);
-  const dirty = dirtyKeys.length > 0;
+  const { blocked, resetToken, reportInvalid } = invalid;
   const setField = (field: string, val: unknown): void => {
     setTouched((prev) => ({ ...prev, [field]: val }));
   };
   const save = async (): Promise<void> => {
     // 提交期间字段仍可编辑（`busy` 只拦保存按钮），所以这里以**提交那一刻**的草稿为准：
     // 成功/失败只清掉「已结算且期间未被再改」的键，其余（新编辑、失败键）留在 touched 里。
+    // 有越界字段时整张卡不给保存：越界草稿不进 touched，只看 diff 会以为「没什么要存的」。
+    if (blocked) {
+      return;
+    }
     const submitted = { ...touched };
     const keys = diffTouched(submitted, value);
     if (keys.length === 0) {
@@ -563,6 +613,8 @@ function DgCard(props: DgCardProps): ReactNode {
       return remaining;
     });
     if (failed.size === 0) {
+      // 成功：清掉越界标记并把草稿重置回已提交值（否则非法输入会一直留在框里）。
+      invalid.clear();
       return;
     }
     setSaveError(
@@ -573,21 +625,28 @@ function DgCard(props: DgCardProps): ReactNode {
   const discard = (): void => {
     setTouched({});
     setSaveError(null);
+    invalid.clear();
   };
-  const inputs: SectionInputs = { t, writable, eff, setField };
+  const inputs: SectionInputs = { t, writable, eff, setField, resetToken, reportInvalid };
   const block = buildBlockSection(inputs);
   const judge = buildJudgeSection(inputs);
   const rules = buildRulesSection(inputs);
   const stats = createElement(StatsBlock, { t, read: props.readStats });
+  // 越界字段也算「有未保存的修改」：不这么算的话，用户只在一个字段填了非法值、
+  // 没改别的，保存条会显示「无未保存的修改」，那个非法输入就无声无息地消失了。
+  // 与 touched 取并集而不是直接相加：同一字段可能先有合法草稿、又被改成越界值。
+  const pendingCount = new Set([...dirtyKeys, ...invalid.fields]).size;
   const saveBar = createElement(SaveBar, {
-    dirty,
+    dirty: pendingCount > 0,
+    blocked,
     busy,
     writable,
-    error: saveError,
+    // 越界提示优先于上一次的保存失败：blocked 时 save 会早退，旧错误不会被新状态覆盖。
+    error: blocked ? t("invalidFields") : saveError,
     saveLabel: t("save"),
     savingLabel: t("saving"),
     revertLabel: t("revert"),
-    dirtyLabel: t("dirtyCount", { count: dirtyKeys.length }),
+    dirtyLabel: t("dirtyCount", { count: pendingCount }),
     cleanLabel: t("statusClean"),
     readOnlyLabel: t("statusReadOnly"),
     onSave: () => {
@@ -706,12 +765,14 @@ const inject = ["slots", "configForms", "locale"];
 
 function apply(ctx: ClientCtx): void {
   ctx.effect(() => {
+    const disposeShared = ensureCardUiCss();
     const tag = document.createElement("style");
     tag.id = "dsh-card-ui-css-danger-guard";
-    tag.textContent = `${STATS_CSS}\n${CARD_UI_CSS}`;
+    tag.textContent = STATS_CSS;
     document.head.append(tag);
     return () => {
       tag.remove();
+      disposeShared();
     };
   }, "danger-guard-card: styles");
   // 0.1.7：表单按 **profile 条目 id** 取，而本包的条目 id == 设置命名空间 `SETTINGS_NS`

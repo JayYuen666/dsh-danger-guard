@@ -12,7 +12,7 @@
   <a href="https://github.com/JayYuen666/dsh-danger-guard/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-danger-guard/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D24.9-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.2--rc.1-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.2--rc.2-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -89,7 +89,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 卸载：`dsh plugin --profile web remove @jayyuen66/dsh-danger-guard`。包在公共 npm 上，安装不需要凭据，也不需要配作用域源。
 
 - **要求 Node.js `>= 24.9`。** 本包是纯 ESM；正是这个下限让 ESM 入口的 `require()` 形式可用，所以声明了 `engines.node`。这个数字取自宿主自己的下限：`0.2.2` 系列从 `alpha.2` 起每一版宿主都声明 Node `>= 24.9.0`，把这里写得更低等于承诺一个宿主起不来的运行时。
-- **要求宿主 `dsh` 满足 `engines.dsh` 的 `^0.2.2-rc.1`（覆盖 `0.2.2-rc.1` 起的 `0.2.2` 预发布与 `0.2.x`，上限仍是 `<0.3.0`）。** `0.2.2-rc.2` 是本版开发与测试取证到的最高宿主版本，不是区间上限。宿主真正读的是 `engines.dsh`（`^0.2.2-rc.1`），而且它**单独决定**：`evaluatePluginCompatibility` 在 `engines.dsh` 那一支就返回了，根本走不到读 `peerDependencies` 的那段——所以 `@deepseek-ai/dsh*` 那几枚 peer 在这里不参与兼容判定。预发布版本参与范围比较。宿主在 `0.2.2-rc.1` 到 `<0.3.0` 之间都满足；`0.3.0` 及以后不满足，要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。`@deepseek-ai/dsh*` 那几枚 peer 写同一条支持窗口范围，因为运行期那几份由宿主提供；`@deepseek-ai/schemastery` 写窗口 `^3.19.0`，收得下 `0.2.2-rc` 线宿主自己的副本（`3.19.0`）；在这里钉一个精确值，正是 npm 更严格的 peer 解析止步 `ERESOLVE` 的原因。`devDependencies` 里的精确钉版才是那条**独立的编译期纪律**（由 `test/publish-manifest.test.ts` 钉住）：本插件的类型与 brand 标记类型都和宿主 ABI 耦合，"自动跟上去"正是宿主类型上被装出第二份的那条路。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证（判据是宿主 `--dump-config` 里本包的层行；设置卡与它的命名空间调用另在发布基线上全量取证一次），窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
+- **要求宿主 `dsh` 满足 `engines.dsh` 的 `^0.2.2-rc.2`（覆盖 `0.2.2-rc.2` 起的 `0.2.2` 预发布与 `0.2.x`，上限仍是 `<0.3.0`）。** `0.2.2-rc.2` 是本版开发与测试取证到的最高宿主版本，不是区间上限。宿主真正读的是 `engines.dsh`（`^0.2.2-rc.2`），而且它**单独决定**：`evaluatePluginCompatibility` 在 `engines.dsh` 那一支就返回了，根本走不到读 `peerDependencies` 的那段——所以 `@deepseek-ai/dsh*` 那几枚 peer 在这里不参与兼容判定。预发布版本参与范围比较。宿主在 `0.2.2-rc.2` 到 `<0.3.0` 之间都满足；`0.3.0` 及以后不满足，要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。`@deepseek-ai/dsh*` 那几枚 peer 写同一条支持窗口范围，因为运行期那几份由宿主提供；`@deepseek-ai/schemastery` 写窗口 `^3.19.0`，收得下 `0.2.2-rc` 线宿主自己的副本（`3.19.0`）；在这里钉一个精确值，正是 npm 更严格的 peer 解析止步 `ERESOLVE` 的原因。`devDependencies` 里的精确钉版才是那条**独立的编译期纪律**（由 `test/publish-manifest.test.ts` 钉住）：本插件的类型与 brand 标记类型都和宿主 ABI 耦合，"自动跟上去"正是宿主类型上被装出第二份的那条路。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证（判据是宿主 `--dump-config` 里本包的层行；设置卡与它的命名空间调用另在发布基线上全量取证一次），窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **`dependencies` 里不放任何 `@deepseek-ai/*`，这是约定**（`test/publish-manifest.test.ts` 钉着）。消费方的 profile 用 `nodeLinker: hoisted` 且 `autoInstallPeers: false` 安装，于是写在 `dependencies` 里的宿主包会被落成**真实目录**，与运行中的宿主已加载的那份并存。`@deepseek-ai/dsh-tools` 的工具运行期调度键是普通 `Symbol`（不是 `Symbol.for`），符号身份按模块实例算：宿主从 profile 副本上读那个键拿到 `undefined`，于是**每一次原生工具调用都抛**——而构建、类型检查、覆盖率检查在此之前全部照绿。peer 与 devDependencies 都不会进 profile，所以都物化不出第二份。
 - **按值导入的宿主包必须保持外部化。** `@deepseek-ai/dsh-brand` 与 `@deepseek-ai/schemastery` 是值导入（`brandNumber`、`import Schema from …`）。外部化名单读 `dependencies` ∪ `peerDependencies`；只写 `devDependencies` 会被打包器把官方函数体内联进产物，本包就各持一份官方构造器。必需 peer 同时满足两件事：说明符仍是外部的，而消费方 profile 不多装任何东西。`zod` 是普通依赖（由 `lib/tool-ledger.ts` 与设置卡的 `src/stats-reader.ts` 值导入）。
 - **产物刻意压缩**（`build-host.mjs` 的 `minify: true`）。`test/build-host.test.ts` 用容忍空白的正则钉住 `host.js` 与 `settings.js` 里的裸说明符（压缩后写作 `from"x"`），外部化本身则走 chunk 的 `inlinedModules` 清单做结构性判据——按函数名做文本断言在 mangle 之后会永远变绿。
@@ -130,6 +130,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
   - 行里的显式 `undefined` 不覆盖底座；非法数值（如 `maxDenies: 0`）回落内置默认——`0` 等于把事实门整道关掉。
   - 写在拦截那一行的默认值是无效的：那个条目根本不收 `config` 参数。
 - 装载失败的方向是保守的。严格 schema 只挂设置行，所以一行被改坏的用户配置只让**那个条目**失败；拦截条目回落内置底座并告警一次。`apply` 只在设置面本身缺件时抛错。缺 `tools` 服务不抛错（注册走可选链），但 `tools` 在 `inject` 里，于是 cordis 根本不激活该条目，启动诊断会点名它——"闸门没装，且宿主说了"。
+- **market 热挂与 bundle 层同时装载时只有一份生效。** dshmarket 运行期热装会在同一个进程里把本包的 `host.js` 再挂一次；第二份 `apply` 检到本包已在同一作用域内注册，整份让路并在控制台留一行说明——拦截与统计由在册的那一份提供，不重复挂 guard、不重复登记监听。锁随在册那一份的 fiber 卸载释放，下一份仍能接上。
 
 ## <img src="https://api.iconify.design/lucide/ban.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 规则拦什么
 

@@ -48,6 +48,7 @@ const SWITCH_SELECTOR = 'button[role="switch"]';
 /** 严格模式开关的字段选择器（多处用例按它定位，抽常量避免同串重复）。 */
 const STRICT_SELECTOR = '[data-field="strictMode"]';
 const SAVE_BUTTON_SELECTOR = '[data-field="save"]';
+const STATUS_ERROR_SELECTOR = ".dsu-statusError";
 /** 取证检索工具词表输入框（两条外部值同步用例共用）。 */
 const EXTRA_WORDS_SELECTOR = '[data-field="extraDevServerWords"]';
 
@@ -996,9 +997,23 @@ describe("b11：danger-guard 设置卡", () => {
     });
     assert.equal(calls.length, 0, "低于 min 的值不暂存");
 
-    // 点「保存」：三个暂存字段一次写入
     const save = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR);
     assert.ok(save, "保存按钮存在");
+    // 有字段越界时**整张卡不提交**：越界草稿不进 touched，只看 diff 会以为没什么要存的，
+    // 于是其余三个字段会被写出去、越界这一格被静默丢掉。保存条上那句提示是唯一出口。
+    await act(async () => {
+      save.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    assert.equal(calls.length, 0, "有字段越界 → 一次都不写");
+    assert.match(container.textContent, /超出范围/u, "保存条上点名越界（不能只在输入框里发红）");
+
+    // 改回合法值 → 越界解除，保存照常把那三个差异字段写出去。
+    await act(async () => {
+      propsOf(numSmall).onChange({ target: { value: "80" } });
+    });
     await act(async () => {
       save.click();
     });
@@ -1285,7 +1300,7 @@ describe("b11：danger-guard 设置卡", () => {
     await act(async () => {
       save.click();
     });
-    const err = container.querySelector<HTMLElement>(".dsu-statusError");
+    const err = container.querySelector<HTMLElement>(STATUS_ERROR_SELECTOR);
     assert.ok(err, "传输失败呈现为可见错误");
     assert.match(err.textContent, /保存失败/u, "错误文案取 saveFailed 键");
     assert.match(err.textContent, /wire down/u, "底层原因原样带出");
@@ -1293,6 +1308,26 @@ describe("b11：danger-guard 设置卡", () => {
       container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)?.disabled,
       false,
       "草稿留住：保存失败后仍可重试（touched 未被清空）",
+    );
+    // 越界提示优先于旧的保存失败：blocked 时 save 早退，若沿用 saveError，用户会看到
+    // 上一次的失败原因、看不到「本轮为什么存不了」。
+    const maxDenies = container.querySelector<HTMLInputElement>('[data-field="maxDenies"]');
+    assert.ok(maxDenies, "maxDenies 数字框已渲染");
+    await act(async () => {
+      propsOf(maxDenies).onChange({ target: { value: "9" } });
+    });
+    const blockedStatus = container.querySelector<HTMLElement>(STATUS_ERROR_SELECTOR);
+    assert.ok(blockedStatus, "越界同样走错误样式");
+    assert.match(blockedStatus.textContent, /超出范围/u, "越界提示覆盖上一次的保存失败");
+    assert.equal(
+      container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)?.disabled,
+      true,
+      "越界时保存被拦下",
+    );
+    assert.equal(
+      container.querySelector<HTMLButtonElement>('[data-field="discard"]')?.disabled,
+      false,
+      "撤销仍可点：它是越界状态的出路",
     );
   });
 
@@ -1339,7 +1374,7 @@ describe("b11：danger-guard 设置卡", () => {
       save.click();
     });
     assert.match(
-      container.querySelector<HTMLElement>(".dsu-statusError")?.textContent ?? "",
+      container.querySelector<HTMLElement>(STATUS_ERROR_SELECTOR)?.textContent ?? "",
       /保存失败/u,
       "部分失败照实呈现",
     );

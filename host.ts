@@ -87,7 +87,7 @@ import { effectiveDispositionFactory } from "./lib/effective-disposition.ts";
 import type { DispositionFactory } from "./lib/effective-disposition.ts";
 import { presenceOfAttempt } from "./lib/fs-errors.ts";
 import type { StatAttempt } from "./lib/fs-errors.ts";
-// 拒绝结果的结构化身份：只走 pre-execute 的 deny.info（rc.1/rc.2 都转发这一位）。
+// 拒绝结果的结构化身份：只走 pre-execute 的 deny.info（rc.2 转发这一位）。
 import { FACT_GATE_DENIAL_INFO } from "./lib/denial-info.ts";
 // terminal_send 的调用面归一：text → command，并按终端后端的默认 shell 给方言。
 import { shellFaceOf } from "./lib/shell-face.ts";
@@ -223,6 +223,7 @@ import type { ContextFormed, UserMessage } from "@deepseek-ai/dsh-llm";
 import { reportDeny, reportPass, sampleJudge } from "./lib/lesson-report.ts";
 import type { ReportContext } from "./lib/lesson-report.ts";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
+import { claimSingleInstance } from "./lib/instance-guard.ts";
 
 /** 事实门教训的类别级稳定签名：lesson-loop 规则卡按
  *  该签名归并，而非按目标文件路径——值须与 lesson-store 的类别级稳定签名表保持同源
@@ -3318,6 +3319,11 @@ export function apply(ctx: Context): void {
     throw new Error("[danger-guard] required services (settings/effect) missing");
   }
   const svc: HostCtx = ctx;
+  // 0. 单实例：market 热挂与 bundle 层各跑一次 apply，第二遍会把 guard 与各条事件监听各挂一份。
+  //    判据在 lib/instance-guard.ts（`tools.guard` 是 append、不抛错，所以这里不会失败只会重复）。
+  if (!claimSingleInstance(svc)) {
+    return;
+  }
 
   // 页面策略（configure({ auto: false })）归**设置条目**声明：它才是表单的 owner，
   // 而宿主按 fiber 记录页面策略（settings/index.ts:311 presentations.get(entry.fiber)）。

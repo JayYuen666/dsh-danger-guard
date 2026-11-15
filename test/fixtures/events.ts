@@ -20,7 +20,34 @@
 import { beforeEach } from "vitest";
 import { brandNumber, brandString } from "@deepseek-ai/dsh-brand";
 import type { MessageId, ToolCallId } from "@deepseek-ai/dsh-llm";
-import type { SessionEvent, SessionSeq } from "@deepseek-ai/dsh-session";
+// 事件类型与生产代码（host.ts）同源：官方判别联合由 shared 具名 re-export。
+// `SessionSeq` 是无增强依赖的 brand 类型，直接从宿主包取。
+import type {
+  PtcDispatchEventData,
+  PtcDispatchStartEventData,
+  SessionEvent,
+} from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
+import type { SessionSeq } from "@deepseek-ai/dsh-session";
+
+// 这里必须再做一次 `SessionEventMap` 增强，不能只靠 shared 那份。
+//
+// shared 的 `dist/types/tool-events.d.ts` 里那条 `declare module "@deepseek-ai/dsh-session/types"`
+// 增强，是从 **shared 包自己所在的位置**解析 `@deepseek-ai/dsh-session/types` 的。伞根链接态下
+// shared 有自己的 `node_modules`，于是它解析到 `dsh-plugin-shared/node_modules/.pnpm/...` 那一份，
+// 而本仓 `tsc` 解析到根 `node_modules/.pnpm/...` 那一份 —— 同一版本、两个物理目录，TypeScript 按
+// 文件路径认模块身份，增强因此落不到本仓这一侧：PTC 两个事件类型从联合里消失，夹具一写就
+// TS2322。实测连「从本文件按相对路径直接 import shared 那一份 types.d.ts」也拿不到增强，
+// 说明这不是导入写法的问题，是两侧模块身份不同。
+//
+// 所以本文件把 shared 声明的**同一批载荷类型**再增强一次（借 shared 已导出的那两个 interface，
+// 不重写字段），本地这份增强与本地解析到的 `dsh-session` 天然同身份。字段仍只有一处真源；
+// 若宿主改了字段形状，shared 的 `test/tool-events-host-parity.ts` 与本仓 typecheck 会一起红。
+declare module "@deepseek-ai/dsh-session/types" {
+  interface SessionEventMap {
+    "tool/ptc-dispatch-start": PtcDispatchStartEventData;
+    "tool/ptc-dispatch": PtcDispatchEventData;
+  }
+}
 
 /** 夹具事件的下标即扫描器看到的流序；递增器保证与书写顺序一致。 */
 let nextSeq = 0;

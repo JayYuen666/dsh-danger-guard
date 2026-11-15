@@ -13,6 +13,7 @@
 // 带变量的文案用 `{name}` 占位符（与官方 client-locale 同字形），由本模块的 fillTemplate 填充；
 // 两语模板的占位符集合是否一致由测试比对（翻译漏掉插值是这类改造最容易静默发生的错）。
 import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
+import { fillPlaceholders } from "@jayyuen66/dsh-plugin-shared/lib/placeholder";
 // 形状唯一来源在零依赖的 ./fix.ts（**不能**从 ./danger-rules.ts 借：那会把它拖进客户端的
 // 类型程序，而它导的是 node:os/node:path —— 实测 TS2591 `Cannot find name 'node:os'`）。
 // 这里只为了类型编译期绑住「角色 → 模板」那张表。
@@ -24,25 +25,22 @@ import type { Fix, FixRole } from "./fix.ts";
  */
 export type MessageSlots = Readonly<Record<string, string>>;
 
-/** 占位符字形：一层花括号包住的键名。只用于 {@link fillTemplate} 的单趟替换。 */
-const PLACEHOLDER_SHAPE = /\{[^{}]+\}/gu;
-
 /**
  * `{key}` 占位符填充：按**原模板**一次扫描，替换进去的值不再被二次解释。
  *
- * 逐槽位 split/join 时，槽位值里若含另一个占位符字形（源码行原文里 `${file}` 这类很常见），
- * 会被后续槽位误伤；单趟替换把填充结果与模板本身分开，值里的花括号原样保留。
+ * 实现已收进 shared 的 `@jayyuen66/dsh-plugin-shared/lib/placeholder`。六个插件此前各写一遍
+ * 同一个函数，其中两处「缺值保留原文」、四处「缺值替空串」——统一到前者（写错占位符时原文
+ * 照出、一眼可见，也不会让一句文案悄悄塌成残句），单趟替换的必要性（值里的 `${file}` 不能
+ * 被后续占位符再吃一遍）也记在那个模块的头注释里。
  *
- * 未出现在槽位表里的占位符原样留在输出里：写错占位符时原文照出，肉眼可见。
+ * 本包这一层只剩签名适配：槽位表在这里固定成 `Record<string, string>`（值一律先文本化），
+ * 调用点因此不必关心值域。
  * @param template - 含 `{key}` 占位符的文案。
- * @param slots - 槽位表；未出现的占位符不受影响。
+ * @param slots - 槽位表；未出现的占位符原样留在输出里。
  * @returns 填充后的文本。
  */
 export function fillTemplate(template: string, slots: MessageSlots): string {
-  return template.replaceAll(PLACEHOLDER_SHAPE, (token) => {
-    const key = token.slice(1, -1);
-    return Object.hasOwn(slots, key) ? (slots[key] ?? token) : token;
-  });
+  return fillPlaceholders(template, slots);
 }
 
 /** 本包 host 侧产出的全部模型可读文案。 */

@@ -11,6 +11,7 @@
 // `Object.freeze` 是运行期的：`readonly string[]` 只挡编译期，而这份账本的可信度取决于
 // 它不被就地改动（push/splice 会让未认领的日志悄悄变成"已认领"）。
 export const LOG_TEMPLATES: readonly string[] = Object.freeze([
+  "[danger-guard] 检测到本插件已在同一作用域内装载：",
   "[danger-guard] fact-gate:",
   "[danger-guard] judge stats (",
   "[danger-guard] slow judge (",

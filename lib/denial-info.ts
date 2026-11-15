@@ -1,9 +1,8 @@
 // lib/denial-info.ts —— 拒绝结果的结构化身份（官方 `ToolErrorInfo`）。
 //
-// 只给 `tools/pre-execute` 的 deny 用：rc.1 与 rc.2 的流水线都读 `decision.info`，
-// 这条通道在支持窗口的两端都成立。**guard 不返回结构化对象**——rc.1 的
-// `ToolsService.checkGuards` 只接受字符串，返回 `{ reason, info }` 会把它当拒绝理由
-// 插值成 `[object Object]`；要保住 `^0.2.2-rc.1` 窗口，guard 必须继续交字符串。
+// 只给 `tools/pre-execute` 的 deny 用：rc.2 的流水线读 `decision.info`。
+// **guard 仍返回字符串**（rc.2 的 `checkGuards` 会把它包成 `{ reason }`）：结构化身份
+// 只挂在预检拒绝上，guard 这一路不带 `info`。
 
 import type { ToolErrorInfo } from "@deepseek-ai/dsh-tools";
 

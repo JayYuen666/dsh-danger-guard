@@ -8,6 +8,7 @@
 // 官方 `dsh-fs-patch` 的同一实现，避免这里自己抄一套会与宿主漂移的补丁文法。
 
 import { applyPatchTargetsOf } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
+import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 /** 标量目标键。 */
 const TARGET_PATH_KEYS = [
@@ -77,11 +78,6 @@ const snakeKeyOf = (key: string): string =>
 const WRITE_PAYLOAD_SNAKE_SET: ReadonlySet<string> = new Set(
   WRITE_PAYLOAD_KEYS.map((key) => snakeKeyOf(key)),
 );
-
-/** 普通对象判定（不认 null、不认数组）。 */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 /**
  * 该键的取值是否携带写载荷。

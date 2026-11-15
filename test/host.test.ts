@@ -262,8 +262,17 @@ function createMockCtx(): MockCtx {
     // lib/stats-remote.ts）。真宿主里 `reflect` 恒在，手写 mock 里补一枚最小替身就够 ——
     // 与下面 `effect` / `provide` 那几位的待遇一致。
     reflect: {
-      provide: () => (): void => {
-        void 0;
+      // 复刻 cordis 的真语义：`provide` 写进**同一张服务表**（`get` 读的就是它），且重复注册抛错。
+      // 只写不读的替身会漏掉一整类判据——第二份装配读不到第一份留下的锁，于是"让路"永远不发生，
+      // 而单测照样全绿（那正是 `lib/instance-guard.ts` 这条判据唯一的失效形态）。
+      provide: (name: string, value?: unknown): (() => void) => {
+        if (Object.hasOwn(ctx.extraServices, name)) {
+          throw new Error(`service "${name}" has been registered`);
+        }
+        ctx.extraServices[name] = value;
+        return (): void => {
+          Reflect.deleteProperty(ctx.extraServices, name);
+        };
       },
     },
     effects: [],
@@ -1431,6 +1440,42 @@ describe("装配失败与降级（闸门绝不能因宿主接口缺失而消失�
         },
       });
     });
+  });
+
+  it("同一作用域第二次装配让路：不挂第二份 guard、不重复登记监听（market 热挂 + bundle 层）", () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const guardAfterFirst = ctx.guardInstalled;
+    const listenersAfterFirst = Array.from(
+      ctx.listeners,
+      ([event, list]) => `${event}:${String(list.length)}`,
+    );
+    const effectsAfterFirst = ctx.effects.length;
+    const warnings: string[] = [];
+    const capture = (line: unknown): void => {
+      warnings.push(typeof line === "string" ? line : JSON.stringify(line));
+    };
+    vi.spyOn(console, "warn").mockImplementation(capture);
+    try {
+      assert.doesNotThrow(() => {
+        applyPlugin(ctx);
+      });
+    } finally {
+      vi.restoreAllMocks();
+    }
+    assert.equal(
+      ctx.guardInstalled,
+      guardAfterFirst,
+      "第二份不该把 guard 换掉（append 会再挂一份）",
+    );
+    assert.deepEqual(
+      Array.from(ctx.listeners, ([event, list]) => `${event}:${String(list.length)}`),
+      listenersAfterFirst,
+      "第二份不该再登记任何事件监听",
+    );
+    assert.equal(ctx.effects.length, effectsAfterFirst, "第二份不该再挂任何 effect");
+    assert.equal(warnings.length, 1, "让路时大声说明一次");
+    assert.match(warnings[0] ?? "", /检测到本插件已在同一作用域内装载/u);
   });
 
   it("tools 服务缺失：不挂 guard、不抛错（页面策略照常登记）", () => {
