@@ -25,3 +25,9 @@ Nothing it cannot supply itself — no external CLI, interpreter or credential. 
 ## Further detail
 
 The rule vocabulary, the permission-preset behaviour, the sandbox deferral and the known boundaries are in the package README (`README.md` / `README.zh-CN.md`).
+
+## Feedback
+
+Issues and pull requests are welcome: [https://github.com/JayYuen666/dsh-danger-guard/issues](https://github.com/JayYuen666/dsh-danger-guard/issues).
+
+If a plugin fails to boot, include the dsh host version, the profile install shape, and the browser console line. The `missed the module table` line is especially useful: it tells us whether the shared client row was materialized.

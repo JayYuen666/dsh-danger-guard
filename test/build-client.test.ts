@@ -211,7 +211,14 @@ describe("单文件产物的输出守卫", () => {
 
 describe("外部化判据：客户端运行时只放行宿主 seed 表真有的那些", () => {
   it("登记过的说明符外置", () => {
-    for (const id of ["react", "react/jsx-runtime", "react-dom", "react-dom/client", "zod"]) {
+    for (const id of [
+      "react",
+      "react/jsx-runtime",
+      "react-dom",
+      "react-dom/client",
+      "zod",
+      "@jayyuen66/dsh-plugin-shared/client",
+    ]) {
       assert.equal(isExternalModule(id), true, `${id} 应外置`);
     }
   });
@@ -228,5 +235,22 @@ describe("外部化判据：客户端运行时只放行宿主 seed 表真有的�
     for (const id of ["@jayyuen66/dsh-plugin-shared", "./local.ts", "lodash"]) {
       assert.equal(isExternalModule(id), false, `${id} 应打包进产物`);
     }
+  });
+
+  it("shared 客户端行在 manifest、patch 与产物三处同源", async () => {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+      dsh?: { client?: { external?: unknown } };
+    };
+    assert.deepEqual(pkg.dsh?.client?.external, ["@jayyuen66/dsh-plugin-shared/client"]);
+    const patch = readFileSync(new URL("../cordis.patch.yml", import.meta.url), "utf8");
+    assert.match(patch, /^\s*-\s+id:\s*dsh-plugin-shared\s*$/mu);
+    assert.match(patch, /^\s+name:\s*"@jayyuen66\/dsh-plugin-shared"\s*$/mu);
+    assert.match(patch, /必须保持开启/u);
+    const text = await clientBundleText();
+    assert.match(
+      text,
+      /require\([`"']@jayyuen66\/dsh-plugin-shared\/client[`"']\)/u,
+      "client.js 必须保留 shared 客户端行的外部请求",
+    );
   });
 });

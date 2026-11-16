@@ -48,6 +48,7 @@
 - [ Data and privacy](#-data-and-privacy)
 - [ FAQ](#-faq)
 - [ Development](#-development)
+- [ Feedback](#feedback)
 - [ License](#-license)
 
 ## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> What it does
@@ -123,7 +124,7 @@ Worth knowing before you look for them:
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Enabling it in dsh
 
 - Bundle form: `dsh.bundle.patch` in `package.json` points at `cordis.patch.yml`, and `dsh plugin add/remove` maintains the assembly layer.
-- The patch carries the **bulkhead pair** — `- id: danger-guard` (the guard half, **no `Config`**, name points at the package root) and `- id: danger-guard-settings` (the settings half, strict schema, name points at the `./settings` subpath). The card components are bundled into `client.js` (only `react` / `zod` stay external to the host's module table), so the card does not depend on a second package being loaded.
+- The patch carries the **bulkhead pair** — `- id: danger-guard` (the guard half, **no `Config`**, name points at the package root) and `- id: danger-guard-settings` (the settings half, strict schema, name points at the `./settings` subpath) — plus a `- id: dsh-plugin-shared` supplier row (keep it enabled; disabling it removes the cards' shared component supply). The card components come from the shared client row, externalized as `@jayyuen66/dsh-plugin-shared/client`; the host module table provides `react`, `zod` and that shared row.
   - Only the guard line brings up the card: the host scans `dsh.client` on **bare package-name** entries only, so the settings line's subpath name is deliberate rather than an oversight.
   - The card loads on the web platform only, as "danger-guard danger block" in the settings plugin list.
 - Deployment defaults sit on the **settings row's** `config:`; precedence is settings-card runtime value > row config > the built-in base (`BUILTIN_BASE` in `lib/settings-schema.ts`).
@@ -252,6 +253,12 @@ pnpm test          # vitest, with coverage
   - The division between the last two is a measured fact, not a preference: executing a tool directly does not append to the session log, so "the model read or searched it" can only be credited in the point-to-point layer.
 - Coverage thresholds are **100%** across four metrics, so a new branch needs cases that reach it.
 - Assertions use discriminative markers that skip a **shared prefix** - the action-checklist and attached-evidence texts both begin with the same tag, so "take the first word as the marker" would make two mutually exclusive assertions true at once. The marker helpers live in one place.
+
+## Feedback
+
+Issues and pull requests are welcome: [https://github.com/JayYuen666/dsh-danger-guard/issues](https://github.com/JayYuen666/dsh-danger-guard/issues).
+
+If a plugin fails to boot, include the dsh host version, the profile install shape, and the browser console line. The `missed the module table` line is especially useful: it tells us whether the shared client row was materialized.
 
 ## <img src="https://api.iconify.design/lucide/scale.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> License
 

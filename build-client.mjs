@@ -23,13 +23,12 @@ export { singleEntryChunk } from "@jayyuen66/dsh-plugin-shared/lib/build-artifac
 // 不复用 shared 的默认清单，也不 import 它的新导出：消费者 CI 装的是 registry 上那份 shared，
 // 新导出在它发布之前不存在；这里只用 shared 已经发布的 `REACT_RUNTIME_MODULES` 做基座。
 //
-// shared 的 `./client` 刻意**不**外置：外置的供应方是另一份包的 client 产物，要靠宿主把
-// 那份包装载成模块表条目才兑现；它只作为传递依赖装进 profile 时（`dsh plugin add` 的
-// 正常结果），宿主侧可能既不报错也不把它的 client 产物排进启动图，设置卡的
-// require("@jayyuen66/dsh-plugin-shared/client") 就在页面启动时落进
+// shared 的 `./client` 由 cordis.patch.yml 插入的固定 id 供应行（`- id: dsh-plugin-shared`）装载成
+// 模块表条目；package.json 的 dsh.client.external 同步声明这一条，供宿主按依赖边排序。
+// 历史教训：只作为传递依赖安装、宿主没把 shared 排进启动图时，页面启动会落进
 // "missed the module table"（dsh-ocr-review 仓 issue #2，宿主 0.2.2-rc.1 dsh desktop）。
-// 内联之后产物自足，react / zod 仍经模块表取宿主的唯一实例，不产生第二份身份。
-const CLIENT_EXTERNALS = [...REACT_RUNTIME_MODULES, "zod"];
+// 本仓现在显式启用供应行，并接受「shared 必须作为 client row 被宿主装载」这一前提。
+const CLIENT_EXTERNALS = [...REACT_RUNTIME_MODULES, "zod", "@jayyuen66/dsh-plugin-shared/client"];
 
 // 外置判据（构建与测试同一份）：登记过的精确说明符外置，react 家族里没登记的构建期失败。
 export const isExternalModule = clientExternalPredicate(CLIENT_EXTERNALS);

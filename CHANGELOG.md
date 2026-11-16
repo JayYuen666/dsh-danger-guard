@@ -1,3 +1,18 @@
+## 0.1.19
+
+设置卡组件不再打进 `client.js`，改回外置 shared 客户端行，由 `cordis.patch.yml` 新增的固定 id 供应行装载；`@jayyuen66/dsh-plugin-shared` 抬到 `^0.2.10`，吸底保存条的暗带与旧固定 id 样式冲突随 shared 修复。client 产物随外置降到实测 21,488 B，预算收紧到 22,000 B。拦截规则与默认配置不变。
+
+### Changed
+
+- **client 产物外置 `@jayyuen66/dsh-plugin-shared/client`，供应行回到补丁里**：`package.json` 的 `dsh.client.external` 声明该说明符，`cordis.patch.yml` 插入 `- id: dsh-plugin-shared` 固定 id 供应行（必须保持开启；停用后设置卡失去 shared 组件供应，多个插件共用同一 id 时宿主把开关标成「无法唯一定位」并禁用）。0.1.14 的「内联自足」取舍就此反转：内联本是 shared 未随 profile 物化时对 issue #2（`missed the module table`）的绕路，本版显式接受「shared 必须作为 client row 被宿主装载」这一前提，`build-client.mjs` 的 `CLIENT_EXTERNALS` 与两份 README 的组合包说明同步改口径。
+- **shared 运行时依赖抬到 `^0.2.10`**（catalog 由根 `sync` 投影）：保存条在宿主「设置」对话框里不再凹出一条比四周更暗的横带；旧版插件占住固定 id `dsh-card-ui-css` 时新样式改注入覆盖样式，不再被旧 bundle 压回去。
+- **client 产物预算收紧**：shared card-ui 的字节不再计入本产物，`test/dist-size.test.ts` 的 client 预算由 40,000 B 收紧到 22,000 B。
+- **README 与 DETAIL 增加反馈入口**：随 shared 0.2.10 的口径——启动失败时请附宿主版本、profile 安装形态与浏览器控制台原文，`missed the module table` 一行能直接说明 shared 客户端供应行有没有被物化。
+
+### Tests
+
+- `test/build-client.test.ts` 新增三处同源判据：manifest 的 `dsh.client.external`、patch 的固定 id 供应行（含「必须保持开启」提醒）、client.js 产物里保留的 `require("@jayyuen66/dsh-plugin-shared/client")` 三者一致；外置判据用例补该说明符。
+
 ## 0.1.18
 
 首次编辑事实门不再在 `tools/pre-execute` 里代读目标、代记 read 水位：盲改由同步 guard 给出行动清单，模型必须自己 `read`；A 面（读取后随结果附引用面）保留。这样模型不会再看到“原样重试即放行”后直接重试、跳过事实。

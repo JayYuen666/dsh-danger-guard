@@ -16,12 +16,16 @@
 # 行按裸包名引用本包（client-modules 只扫描裸包名条目的 dsh.client 声明）。
 # 注意 pnpm ≥12.3.0：12.0.0 的 add 本地目录有 #14437 bug。
 #
-# 两行 = bulkhead（隔舱）：0.1.7 的 cordis 在 apply **之前**按条目自己的 Config 校验
+# 两行 bulkhead（隔舱）+ 一行 shared 供应：0.1.7 的 cordis 在 apply **之前**按条目自己的 Config 校验
 # 配置（vendor/cordis/src/fiber.ts:50、:641-664），越界值即让该条目 FAILED。
 #   · danger-guard           —— 拦截半，**没有 Config**：用户配置怎么写都杀不掉闸门。
 #   · danger-guard-settings  —— 设置半，持有那份严格 schema（= 设置卡的命名空间）。
 # 设置半 FAILED 时拦截半读不到它的投影，回落内置默认底座并告警（host.ts settingsConfig）。
 - insert:
+    # 固定 id：该供应行必须保持开启；停用后本包设置卡会失去 shared 客户端供应。
+    # 多个插件共用同一个 id，宿主会把开关标成“无法唯一定位”并禁用。
+    - id: dsh-plugin-shared
+      name: "@jayyuen66/dsh-plugin-shared"
     - id: danger-guard
       name: "@jayyuen66/dsh-danger-guard"
     - id: danger-guard-settings

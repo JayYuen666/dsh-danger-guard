@@ -48,6 +48,7 @@
 - [ 数据与隐私](#-数据与隐私)
 - [ 常见问题](#-常见问题)
 - [ 开发](#-开发)
+- [ 反馈](#反馈)
 - [ 许可](#-许可)
 
 ## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 它做什么
@@ -123,7 +124,7 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 在 dsh 里启用
 
 - 组合包形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，由 `dsh plugin add/remove` 维护装配层。
-- 补丁带**隔舱那两行（bulkhead）**：`- id: danger-guard`（拦截半，**没有 `Config`**，name 指向包本体）与 `- id: danger-guard-settings`（设置半，严格 schema，name 指向 `./settings` 子路径）。设置卡组件直接打进 `client.js`（只有 `react` / `zod` 外置给宿主模块表），卡片不依赖第二份包被装载。
+- 补丁带**隔舱那两行（bulkhead）**：`- id: danger-guard`（拦截半，**没有 `Config`**，name 指向包本体）与 `- id: danger-guard-settings`（设置半，严格 schema，name 指向 `./settings` 子路径），另加一条 `- id: dsh-plugin-shared` 供应行（必须保持开启；停用后卡片会失去 shared 组件供应）。设置卡组件来自 shared 的客户端行，以 `@jayyuen66/dsh-plugin-shared/client` 外置；宿主模块表提供 `react`、`zod` 与这条 shared 供应。
   - 卡片只由拦截那一行带出：宿主只对**裸包名**条目扫 `dsh.client`，所以设置行写成子路径是有意的，不是漏改。
   - 卡片只在 web 平台装载，位置是设置页插件列表里的「danger-guard 危险拦截」。
 - 部署默认值写在**设置那一行**的 `config:` 上；优先级是 设置卡运行时值 > 行 config > 内置底座（`lib/settings-schema.ts` 的 `BUILTIN_BASE`）。
@@ -252,6 +253,12 @@ pnpm test          # vitest，带覆盖率
   - 后两层的分工是测出来的事实，不是偏好：直接执行一次工具不写会话日志，所以"模型自己读过/搜过"这类凭证只能在点对点层成立。
 - 覆盖率四项阈值都是 **100%**，所以新增分支必须有能走到它的用例。
 - 断言用的判别标记必须跳过**共用前缀**——行动清单与随读取附上两条文案开头相同，所以"取首词当标记"会让两条互斥的断言同时为真。取法统一收在一处。
+
+## 反馈
+
+欢迎提 issue 和 PR：[https://github.com/JayYuen666/dsh-danger-guard/issues](https://github.com/JayYuen666/dsh-danger-guard/issues)。
+
+插件启动失败时，请附上 dsh 宿主版本、profile 安装形态和浏览器控制台原文。`missed the module table` 这一行尤其有用：它能直接说明 shared 客户端供应行有没有被物化。
 
 ## <img src="https://api.iconify.design/lucide/scale.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 许可
 

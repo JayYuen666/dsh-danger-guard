@@ -25,3 +25,9 @@
 ## 更完整的说明
 
 规则词表、四种权限预设的差别、沙箱让位边界都写在随包的 README（`README.md` / `README.zh-CN.md`）。
+
+## 反馈
+
+欢迎提 issue 和 PR：[https://github.com/JayYuen666/dsh-danger-guard/issues](https://github.com/JayYuen666/dsh-danger-guard/issues)。
+
+插件启动失败时，请附上 dsh 宿主版本、profile 安装形态和浏览器控制台原文。`missed the module table` 这一行尤其有用：它能直接说明 shared 客户端供应行有没有被物化。
