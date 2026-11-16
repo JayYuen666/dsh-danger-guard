@@ -27,7 +27,7 @@
 //      被别的会话改过，该做的事完全不同。给不出具体路径与文件名的提示等于没说。
 //
 // 内存：会话分片数上限 maxSessions；每会话两张台账（pending / released）各 maxFiles，
-// 各自按访问型 LRU 淘汰（`check` 命中即 touch；`releasedFor` 保持只读不 touch）——单会话
+// 各自按访问型 LRU 淘汰（`check` 命中即 touch）——单会话
 // 上界约 maxSessions × 2 × maxFiles 个文件条目。dropSession() 由 host 接线到官方
 // `session/disposed` 事件主动回收分片（host.ts apply()）；LRU 淘汰只是兜底。
 
@@ -49,7 +49,7 @@ export type FactNeed =
   // 文档层触达探查（该层存在时要求）
   | "docs";
 
-/** 逐层探查项：被引用与 read 有各自的发送/产物一致性规则，不参与 layerSeqs。 */
+/** 逐层探查项：被引用与 read 有各自的发送/产物一致性规则，不参与发送水位。 */
 export type LayerNeed = Exclude<FactNeed, "read" | "refs">;
 
 /** 为什么缺——决定该给什么指令（核心：不同成因不同提示）。 */
@@ -104,41 +104,26 @@ export interface FactEvidenceInput {
   ctx?: FactGapContext;
 }
 
-/** 预检的发送水位：两项各自的**发送位次**（-1 = 这一项从未发送）。
- *  拆成两位而不是 `{seq, read, refs}` 一枚：A 面只投 refs、B 面可能只投 read，两者先后落在
- *  同一个键上——合一位要么覆盖掉对方那一项，要么把 read 的新鲜度按 refs 的位次重算，而
- *  read 的判据要的正是**它自己那次**发送的位次（与 `staleBase` 比）。 */
+/** 预检 A 面的发送水位：refs 的**发送位次**（-1 = 从未发送）。
+ *  A 面把引用面随读取结果交给模型；read 不再由预检代记——写类调用必须自己 read。 */
 export interface DeliveryWatermark {
-  readonly readSeq: number;
   readonly refsSeq: number;
-  /** 层探查（test/e2e/docs）各自的发送位次：与 refs 同理由拆位——一次 B 面可能只覆盖其中
-   *  两层（第三层不在扫描覆盖里），合一位就会把"已发送"扩散到没覆盖的那层上。 */
-  readonly layerSeqs: Readonly<Partial<Record<LayerNeed, number>>>;
 }
 
-/** 没有发送时的缺省水位：两位皆 -1——与"从未发送"在比较与短路下同形（比较永远不成立）。
+/** 没有发送时的缺省水位：refs 为 -1——与"从未发送"在比较与短路下同形（比较永远不成立）。
  *  运行时也冻结：它被多个模块当共享常量传递，冻结让"谁把它改了一格"当场暴露。 */
 export const NO_DELIVERY: DeliveryWatermark = Object.freeze({
-  readSeq: -1,
   refsSeq: -1,
-  layerSeqs: Object.freeze({}),
 });
 
-/** 无法判定证据时的退化输入：只按 read/refs 两项起步，**不探层**——历史不可得时 host
- *  也没有可归因的层结论，所以这条退化路径不看 `layerSeqs`。
- *  预检的发送水位不在"没做过"之列——那是插件自己的记录（B 面当场递过正文、A 面随读取
- *  附过引用面），**不依赖会话日志**。不剔除它就会出现"预检补完 → guard 仍按不可判定缺项
- *  拒 → 再补 → 再拒"的死循环（配额放行只是把死循环换成免检，不是解）。
- *  `done` 那格照本模块的规则带上，让拒绝文案能说清"已经给过的不再要求"。
- *  两项都已发送 ⇒ gaps 为空，`check` 直接放行（首拒/交互确认都不再发生）。 */
+/** 无法判定证据时的退化输入：**read 永远要求**（历史不可得时没有东西能证明模型读过），
+ *  refs 可由 A 面的发送水位豁免——那是插件自己的记录，不依赖会话日志。
+ *  不剔除 refs 就会出现"预检补完 → guard 仍按不可判定缺项拒 → 再补 → 再拒"的死循环
+ *  （配额放行只是把死循环换成免检，不是解）。
+ *  `done` 那格照本模块的规则带上，让拒绝文案能说清"已经给过的不再要求"。 */
 export function undeterminable(delivered: DeliveryWatermark): FactEvidenceInput {
-  const gaps: FactGap[] = [];
+  const gaps: FactGap[] = [{ need: "read", why: "never" }];
   const done: FactNeed[] = [];
-  if (delivered.readSeq >= 0) {
-    done.push("read");
-  } else {
-    gaps.push({ need: "read", why: "never" });
-  }
   if (delivered.refsSeq >= 0) {
     done.push("refs");
   } else {
@@ -232,9 +217,9 @@ const EDIT_TOOLS = new Set(["edit", "write", "str_replace_editor", "apply_patch"
  *  test/ 目录**不再跳过**（收紧）：原 SKIP_PATH_RE 让模型可把改动挂到
  *  test/ 下躲过取证——旁路已堵，测试文件编辑同样过门。
  *  不对称是故意的：改文档零摩擦，但改代码要探文档层。
- *  **导出**是给 host 侧的预检用（`runPreflight` 与 `attachRefsOnRead` 两个触发点共用这同一道
- *  跳过判据）：预检要在门禁之前就决定"这次的编辑面根本不判"，两处各写一份正则迟早会漂——
- *  漂了就是"门禁不判、预检却代跑了一次扫描"（或反过来：模型以为预检覆盖了，实际门禁照拒）。 */
+ *  **导出**是给 host 侧 A 面用的（`attachRefsOnRead` 与门禁共用这同一道跳过判据）：
+ *  A 面要在 attach 之前就决定"这次的读取面根本不判"，两处各写一份正则迟早会漂——
+ *  漂了就是"门禁不判、A 面却代跑了一次扫描"（或反过来：模型以为 A 面覆盖了，实际门禁照拒）。 */
 export const SKIP_EXT_RE = /\.(?:md|markdown|rst|adoc)$/iu;
 
 /** 会话分片数上限（与 maxFiles 分离——旧实现同一常量两用，实际界是二次方）。 */
@@ -406,38 +391,16 @@ export class FactGate {
     }
   }
 
-  /**
-   * 只读查询：该目标此刻是否处于**配额放行**态（防死锁承诺）。
-   * 判据与 `tryRelease` 唯一来源（`releaseValid`），但**一个状态都不改**：不建分片、不 touch、
-   * 不删过期项——那些留给真正的 `check()`。
-   * 当前**可判定地**仍缺 `read` 时一律返回 false：配额只免上层探查，不能让预检在
-   * "模型还没看过当前版本"时替门禁让路。不可判定态沿用旧配额（交互确认是那条路的出口）。
-   * 存在的理由：预检的「带证据拦一次」（host.ts 的 B 面）跑在 `tools/pre-execute`，而
-   * guard 在其之后才跑。已经熬满 maxDenies 拿到免检的目标若被预检再停一次，等于把
-   * 「防死锁」换成「插件自己新加的拒绝」——那是这道配额存在的反面。预检先问这一句，
-   * 命中就整趟让路。
-   */
-  public releasedFor(sessionId: unknown, filePath: string, input: FactEvidenceInput): boolean {
-    return FactGate.releaseValid(
-      this.sessions.get(FactGate.keyOf(sessionId))?.released.get(filePath),
-      input,
-    );
-  }
-
   /** 清空全部记忆（插件停用时）。 */
   public reset(): void {
     this.sessions.clear();
   }
 
   /**
-   * 放行判据的**唯一来源**（`releasedFor` 与 `tryRelease` 共用，两处各写一遍迟早漂成
-   * "预检让路、门禁仍拒"或反过来的两张皮）：条目在、可判定态不缺 `read`、
-   * 外部改动水位**严格早于**放行水位。只读，不做任何状态更新。
+   * 配额放行判据：可判定态不缺 `read`、外部改动水位**严格早于**放行水位。
+   * 只读，不做任何状态更新；调用方已经确认放行条目存在。
    */
-  private static releaseValid(releaseSeq: number | undefined, input: FactEvidenceInput): boolean {
-    if (releaseSeq === undefined) {
-      return false;
-    }
+  private static releaseValid(releaseSeq: number, input: FactEvidenceInput): boolean {
     if (input.determinate && input.gaps.some((gap) => gap.need === "read")) {
       // 配额只免上层探查：可判定的 read 缺项不能让旧配额替它开门；不可判定态沿用旧配额，
       // 因为"历史读不到"本身不证明模型没读过这一版（交互确认是那条路的出口）。
@@ -449,8 +412,7 @@ export class FactGate {
   /**
    * 配额放行判定：命中判据才放行；否则记入过期并回到正常过门。
    * 「外部改动水位」由 host 提供，host 只在确属外部改动时抬升它（见 SessionState.released
-   * 的不变式说明）——这里不做任何 fs/会话推断。命中时刷新 released 的 LRU 位次；
-   * `releasedFor` 的只读查询不走这里，因此不会 touch。
+   * 的不变式说明）——这里不做任何 fs/会话推断。命中时刷新 released 的 LRU 位次。
    */
   private tryRelease(st: SessionState, filePath: string, input: FactEvidenceInput): boolean {
     const releaseSeq = st.released.get(filePath);

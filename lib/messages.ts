@@ -168,22 +168,16 @@ export interface DangerGuardMessages {
   readonly gapNarrowScope: string;
   /** host：层目录提示（槽位 dir）。 */
   readonly gapLayerDir: string;
-  // ── 预检（Phase 2：证据在编辑**之前**就到模型手里，见 host.ts 的 A/B 两个触发点）──────
+  // ── 预检（Phase 2：引用面随读取结果提前交给模型，见 host.ts 的 A 面）──────────────
   // 这一组不是"缺什么"的指令，而是"已经补上了"的**证据正文**：它的读者是模型（改主意前先看
   // 事实），与上面那组指令共用同一份双语字典，理由也相同——host 侧没有官方 i18n 面。
   /** A 面头部：引用面随本次**读取结果**一起给出（post-execute 的 additionalContexts），
    *  于是模型下一次编辑前就看得见它，而不是被拒后再自己去查。 */
   readonly preflightAttach: string;
-  /** B 面头部：盲改（没 read 过就写）被当场停下，正文与引用面写在这一次的拒绝理由里。
-   *  尾句是"原样重试同一次编辑"——水位已记，重试即放行。 */
-  readonly preflightHandoff: string;
   /** 引用块·有命中（槽位 root/scanned/hits）。 */
   readonly preflightRefsHead: string;
   /** 引用块·零命中且**整趟扫完**（槽位 root/scanned）：空列表不是结论，这句话才是。 */
   readonly preflightRefsNone: string;
-  /** 引用块·零命中但**未扫完**（槽位 root/scanned/limit）：全称结论此刻不成立，
-   *  说出来就是在骗模型——它据此删掉一个仍有引用者的文件比没给证据更糟。 */
-  readonly preflightRefsNonePartial: string;
   /** 引用块的一行命中（槽位 file/line/text）。 */
   readonly preflightRefsLine: string;
   /** 引用块·遍历被文件/目录预算截断的说明行（槽位 limit）。 */
@@ -201,12 +195,6 @@ export interface DangerGuardMessages {
   readonly preflightRefsQuarantined: string;
   /** 扫完但有文件没读成正文（超大 / 读不动）：命中情况不是全部。 */
   readonly preflightRefsUnread: string;
-  /** 层探查一行（槽位 layer/dir/hits）：与引用面**同一次**扫描派生，不另花 I/O。 */
-  readonly preflightLayerLine: string;
-  /** 目标内容块头（槽位 name/bytes）。 */
-  readonly preflightReadHead: string;
-  /** 目标内容超单文件上限的说明行（槽位 bytes）。 */
-  readonly preflightReadTruncated: string;
   /** A 面注入消息的 `source.summary`（官方要求 notice 形必须带一行说明，≤120 字）。 */
   readonly preflightSummary: string;
   // ── 权限档位说明（同一枚规则键在不同预设下成因不同，见 lib/mode-policy.ts）──────────
@@ -385,16 +373,10 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
     preflightAttach:
       "[fact-gate] 本次读取的引用面已由插件一并探好，随这条结果一起给你——后续编辑该文件时" +
       "不必再自行检索引用。",
-    preflightHandoff:
-      "[fact-gate] 这次编辑先停下：以下是门禁本就要求你在改动**之前**看到的事实，插件已当场取到。" +
-      "请**原样重试同一次编辑**（无需改动参数），重试即放行。",
     preflightRefsHead:
       "[引用探查] 起点 `{root}`，扫过 {scanned} 个文件，{hits} 处命中（按目标文件名与其词干匹配）：",
     preflightRefsNone:
       "[引用探查] 起点 `{root}`，扫过 {scanned} 个文件，零命中——即目标没有任何引用者。",
-    preflightRefsNonePartial:
-      "[引用探查] 起点 `{root}`，扫过 {scanned} 个文件（达 {limit} 上限即停，**未扫完**），" +
-      "已扫范围内零命中——这并不等于「目标没有任何引用者」。",
     preflightRefsLine: "· {file}:{line}: {text}",
     preflightRefsPartial:
       "注意：遍历在 {limit} 处上限停下，未覆盖整个 `{root}`——以上只是已扫范围内的结论。",
@@ -409,10 +391,6 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "注意：本次扫描按本包规则未读 {count} 个凭据面文件，命中面可能不止以上这些。",
     preflightRefsUnread:
       "注意：另有 {count} 个文件走到了但没能读正文（超大 / 读不动），命中面可能不止以上这些。",
-    preflightLayerLine:
-      "[层探查] {layer}：`{dir}` 内 {hits} 处命中（与上面同一次扫描，不必再去那层搜一遍）",
-    preflightReadHead: "[目标内容] `{name}`（{bytes} 字节）：",
-    preflightReadTruncated: "[已截断] 原文超过单文件上限 {bytes} 字节，以上仅是开头部分。",
     preflightSummary: "danger-guard 预检：随本次读取附上目标的引用面",
     noteReadOnly:
       "[档位] 当前是「仅可查看」：文件写入由宿主的只读沙箱统一拒绝，这一层不重复拦写。" +
@@ -631,20 +609,12 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "[fact-gate] The plugin has probed the reference surface for the file you just read and " +
       "attaches it to this result — you will not need to search for references again before " +
       "editing it.",
-    preflightHandoff:
-      "[fact-gate] This edit is paused: below are the facts the gate requires you to see " +
-      "**before** changing anything; the plugin gathered them for you on the spot. Retry the " +
-      "exact same edit (do not change the arguments) — the retry will be allowed.",
     preflightRefsHead:
       "[reference probe] root `{root}`, {scanned} file(s) scanned, {hits} hit(s) (matched " +
       "against the target's file name and stems):",
     preflightRefsNone:
       "[reference probe] root `{root}`, {scanned} file(s) scanned, zero hits — i.e. nothing " +
       "references the target.",
-    preflightRefsNonePartial:
-      "[reference probe] root `{root}`, {scanned} file(s) scanned (the {limit}-file budget was " +
-      "exhausted, so the tree is NOT fully covered), zero hits within what was scanned — which " +
-      "does not mean nothing references the target.",
     preflightRefsLine: "· {file}:{line}: {text}",
     preflightRefsPartial:
       "Note: the walk stopped at its {limit} budget and did not cover all of `{root}` — the " +
@@ -665,13 +635,6 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
     preflightRefsUnread:
       "Note: {count} more file(s) were reached but their text could not be read (too large or " +
       "unreadable), so the surface above may not list every reference.",
-    preflightLayerLine:
-      "[layer probe] {layer}: {hits} hit(s) under `{dir}` (from the same scan as above — no " +
-      "separate search needed there)",
-    preflightReadHead: "[target content] `{name}` ({bytes} bytes):",
-    preflightReadTruncated:
-      "[truncated] the original is larger than the {bytes}-byte per-file limit; only its head is " +
-      "shown above.",
     preflightSummary: "danger-guard preflight: reference surface attached to this read result",
     noteReadOnly:
       '[mode] This is "read-only": the host\'s read-only sandbox refuses every file write, so this ' +

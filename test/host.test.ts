@@ -2220,7 +2220,7 @@ const terminalOf = (ctx: MockCtx, args: Record<string, unknown>): string | undef
     },
   });
 
-/** 预检 B 面在 mock 里的监听器名（三处用例共用，避免重复字符串漂移）。 */
+/** `tools/pre-execute` 在 mock 里的监听器名（三处用例共用，避免重复字符串漂移）。 */
 const PRE_EXECUTE_EVENT = "tools/pre-execute";
 
 describe("按权限档位分叉：预设驱动判定", () => {

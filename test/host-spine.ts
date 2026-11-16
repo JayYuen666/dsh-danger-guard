@@ -54,7 +54,6 @@ import { brandString } from "@deepseek-ai/dsh-brand";
 import { LOCALE_SETTINGS_NAMESPACE } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 
 import guardPlugin from "../host.ts";
-import { PREFLIGHT_MAX_DIRS } from "../lib/preflight-scan.ts";
 import settingsPlugin from "../settings-host.ts";
 
 /** 本包真实装配出来的两条 fiber 名（与 cordis.patch.yml 里的条目 id 同名）。 */
@@ -168,20 +167,6 @@ export async function readDisk(file: string): Promise<string> {
  *  @returns 绝对路径 */
 export async function addSource(spine: Spine, name: string, body = ALPHA_BODY): Promise<string> {
   return writeDisk(path.join(spine.project.root, "src", name), body);
-}
-
-/** 把引用扫描的遍历预算吃光（目录数超过 `PREFLIGHT_MAX_DIRS`）。只有"扫不完"的那一趟，
- *  B 面才答不出 refs / 层证据而整趟让路给 guard 的行动清单——两层用例都要用它才能读到
- *  「清单点了哪些检索工具」，以及让事实门的拒绝轮次真的推进（配额那条判据的唯一入口）。 */
-/** 吃光预算时要多造的目录数：只需比 `PREFLIGHT_MAX_DIRS` 大，留一点余量是为了让「按预算截断」
- *  这件事与目录命名顺序无关（遍历顺序变了也仍然超）。不取更大的数：那是几百次瞬时 mkdir。 */
-const CAP_OVERFLOW_DIRS = 44;
-
-export async function capTree(spine: Spine): Promise<void> {
-  const dirs = Array.from({ length: PREFLIGHT_MAX_DIRS + CAP_OVERFLOW_DIRS }, (_unused, index) =>
-    mkdir(path.join(spine.project.root, `cap${String(index)}`), { recursive: true }),
-  );
-  await Promise.all(dirs);
 }
 
 /**
@@ -704,7 +689,7 @@ export const MID_BLIND_NEW_STRING = `const padded = "${"x".repeat(230)}";`;
 
 /** mid 档的盲改参数（写入 >200 字节、两侧都不碰导出名单/签名关键字）。
  *  ⚠ old_string 里出现 `export`/`function` 会因"替换掉一枚导出"而升 high 档——那是真判据
- *  （改导出名单确实更危险），但 mid 档的用例就会莫名其妙走清单而不是递证据。 */
+ *  （改导出名单确实更危险），但 mid 档的用例就会莫名其妙升到 high 档、多要 test/e2e/docs 层证据。 */
 export function midBlind(filePath: string): Record<string, unknown> {
   return {
     file_path: filePath,
@@ -713,9 +698,8 @@ export function midBlind(filePath: string): Record<string, unknown> {
   };
 }
 
-/** 高一档的盲改：触及导出名单 ⇒ high ⇒ 缺项里多出"层"（test/e2e/docs）。B 面如今从**同一次**
- *  扫描派生层结论，所以这一档照样带证据拦；只有扫描跑不完时（见 capTree）才让路给行动清单——
- *  要读"指令点了哪些检索工具"、或要让事实门的拒绝轮次真推进，都得先把遍历预算吃光。 */
+/** 高一档的盲改：触及导出名单 ⇒ high ⇒ 缺项里多出"层"（test/e2e/docs）。
+ *  事实门给行动清单，模型补齐（read + 层检索）后重试。 */
 /** high 档盲改写进磁盘的导出行；`tag` 与 highBlind 同一取值。 */
 export function highBlindNewString(tag: string): string {
   return `export const probe${tag} = 1;`;
@@ -729,21 +713,10 @@ export function highBlind(filePath: string, tag: string): Record<string, unknown
   };
 }
 
-/** 带独占标签的文案（`[引用探查]` / `[目标内容]` / `[层探查]` / `[已截断]`）：标签本身就够判别，
- *  取到第一个空格为止。写在这里而不是各层各抄一份——抄开的两份正是下面那个坑的成因。 */
-export const markOf = (template: string): string => {
-  const at = template.indexOf(" ");
-  if (at === -1) {
-    // 没有空格 = 模板漂移：`slice(0, -1)` 会悄悄丢末字符，断言随之失配在别处。
-    throw new Error(`模板没有标签分隔空格：${template.slice(0, 60)}`);
-  }
-  return template.slice(0, at);
-};
-
-/** `[fact-gate]` 那三种规则的判别段。⚠ 前缀是**共用**的（行动清单 / 当场递证据 / 随读取附上
- *  都以 `[fact-gate] ` 开头），所以拿 `markOf` 去判等于什么都没断言：本轮真踩过——「走清单」与
+/** `[fact-gate]` 那两种规则的判别段。⚠ 前缀是**共用**的（行动清单与随读取附上
+ *  都以 `[fact-gate] ` 开头），所以取首词去判等于什么都没断言：曾踩过——「走清单」与
  *  「递证据」两条互斥的断言同时为真，一层用例因此在错误的分支上全绿。
- *  跳过前缀取到第一个标点为止，那一句才是三种规则各自独有的话。 */
+ *  跳过前缀取到第一个标点为止，那一句才是两种规则各自独有的话。 */
 export function gateMarkOf(template: string): string {
   const space = template.indexOf(" ");
   if (space === -1) {

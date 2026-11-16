@@ -1,6 +1,6 @@
 // test/agent-loop-e2e.test.ts —— **点对点层**：真 AgentLoop 跑完整回合，断言"模型到底看见了什么"。
 //
-// 这一层是 A/B 混合改造的**唯一实证**。原因很具体：预检的全部论点是一句话——
+// 这一层是预检 A 面（以及事实门行动清单）的**唯一实证**。原因很具体：预检的全部论点是一句话——
 // "证据在模型**下一次动手之前**就出现在它的上下文里"。这在单元层只能测到"我们往结果的类型上挂了
 // 一块 additionalContexts"，而挂上去 ≠ 看得见：官方的链是
 //   post-execute 收下 additionalContexts → agent-loop 排到 **next-step** 边界 → 下一次
@@ -18,7 +18,6 @@ import type { Agent } from "@deepseek-ai/dsh-agent";
 
 import { MESSAGES } from "../lib/messages.ts";
 import {
-  ALPHA_BODY,
   MID_BLIND_NEW_STRING,
   PREFLIGHT_SOURCE_KIND,
   SECRET_TOKEN,
@@ -28,7 +27,6 @@ import {
   addSource,
   bootSpine,
   callResultOf,
-  capTree,
   createAgent,
   disposeSpine,
   gateMarkOf,
@@ -50,8 +48,7 @@ import type { Spine } from "./host-spine.ts";
 import { loggedText } from "./setup-logs.ts";
 
 const { zh } = MESSAGES;
-// 判别段的取法见 host-spine.ts：`[fact-gate]` 是三种规则共用的前缀，拿它当标记等于没断言。
-const HANDOFF_MARK = gateMarkOf(zh.preflightHandoff);
+// 判别段的取法见 host-spine.ts：`[fact-gate]` 是多种规则共用的前缀，拿它当标记等于没断言。
 const ATTACH_MARK = gateMarkOf(zh.preflightAttach);
 const LIST_MARK = gateMarkOf(zh.headFirst);
 /** 缺项清单里「引用探查」那一条的开头（从模板派生，文案改了这里跟着走）。 */
@@ -146,12 +143,13 @@ describe("agent-loop 点对点：真回合里的实证", () => {
     });
   });
 
-  describe("预检 B 面的实证：带证据的拒绝在真回合里一轮就够", () => {
-    it("盲改被拦一次并把正文与引用面写进理由，模型原样重试即放行", async () => {
+  describe("事实门的实证：盲改先给行动清单，read 之后才放行", () => {
+    it("盲改被行动清单拒绝；read 后 A 面补引用面，再重试才放行", async () => {
       const { spine, agent } = await staged();
       const file = await addSource(spine, "blind.ts");
       const model = registerModel(spine, [
         toolCallReply("e1", TOOL_EDIT, midBlind(file)),
+        toolCallReply("r1", TOOL_READ, { file_path: file }),
         toolCallReply("e2", TOOL_EDIT, midBlind(file)),
         textReply("done"),
       ]);
@@ -159,28 +157,20 @@ describe("agent-loop 点对点：真回合里的实证", () => {
 
       const first = callResultOf(agent, "e1");
       assert.equal(first.isError, true);
-      assert.ok(first.text.includes(HANDOFF_MARK));
-      assert.ok(first.text.includes(ALPHA_BODY.trim()), "正文当场给了");
-      assert.equal(
-        first.text.includes(REFS_GAP_MARK),
-        false,
-        "引用面已作为证据给出，就不该再以缺项的形式重复要求",
-      );
-      assert.equal(callResultOf(agent, "e2").isError, false, "重试凭水位放行");
-      // 请求按历史累积，条数增长恒成立；要证的是那次拒绝已经作为工具结果到达模型。
+      assert.ok(first.text.includes(LIST_MARK), "盲改拿到行动清单");
+      assert.ok(first.text.includes(REFS_GAP_MARK), "清单要求引用探查");
+
+      const deciding = preflightOfRequest(model, 2);
       assert.ok(
-        visibleAt(model, 2).some(
-          (message) => message.role === "tool" && message.text.includes(HANDOFF_MARK),
-        ),
-        "第一次拒绝的理由已作为工具结果进入下一次请求 ⇒ 回合在往前走",
+        deciding.some((text) => text.includes(ATTACH_MARK)),
+        "read 的结果里带 A 面引用面 ⇒ 模型在下一次编辑前看得见被引用",
       );
+      assert.equal(callResultOf(agent, "e2").isError, false, "read + A 面引用面 ⇒ 放行");
+      assert.match(await readDisk(file), /const padded/u, "放行即落盘");
     });
 
     it("清单点名的检索规则可以照做：read 加 grep(pattern,path) 之后重试放行", async () => {
       const { spine, agent } = await staged();
-      // 要读到"清单"就得让 B 面答不出证据（它答得出就当场递证据、不给清单）：吃光扫描预算。
-      // 于是这一枚用例证的正是集成层证不到的那一半——凭证来自**会话日志里模型自己的**读与搜。
-      await capTree(spine);
       const file = await addSource(spine, "follow.ts");
       registerModel(spine, [
         toolCallReply("e1", TOOL_EDIT, highBlind(file, "1")),
@@ -220,7 +210,7 @@ describe("agent-loop 点对点：真回合里的实证", () => {
       assert.match(await readDisk(file), /const padded/u, "编辑确实执行了");
     });
 
-    it("同一步里先改后读：判定那一刻还没有任何成功读取 ⇒ 拦下来递证据", async () => {
+    it("同一步里先改后读：判定那一刻还没有任何成功读取 ⇒ 拦下给清单", async () => {
       const { spine, agent } = await staged();
       const file = await addSource(spine, "batch-edit-first.ts");
       registerModel(spine, [
@@ -233,15 +223,12 @@ describe("agent-loop 点对点：真回合里的实证", () => {
       await runTurn(spine, agent, "把改放在读前面");
       const batched = callResultOf(agent, "e1");
       assert.equal(batched.isError, true, "改在读取之前 ⇒ 那一刻就是盲改");
-      assert.ok(batched.text.includes(HANDOFF_MARK));
+      assert.ok(batched.text.includes(LIST_MARK));
       assert.doesNotMatch(await readDisk(file), /const padded/u, "拦下来就没有落盘");
     });
 
-    it("配额用尽：第二次放行并留下一条警告（真轮次、真事件序）", async () => {
+    it("配额用尽：缺 read 时扣下配额，read 之后才兑现", async () => {
       const { spine, agent } = await staged({ maxDenies: 1 });
-      // 配额是 guard 的记录下来，只有走**行动清单**的那条路才推进轮次；B 面递证据拦的那一趟不计。
-      // 所以先把扫描预算吃光，让 high 档的层证据答不出来（正向的递证据路径见上面几枚用例）。
-      await capTree(spine);
       const file = await addSource(spine, "quota.ts");
       registerModel(spine, [
         toolCallReply("e1", TOOL_EDIT, highBlind(file, "a")),

@@ -1,7 +1,7 @@
 // lib/preflight-scan.ts —— 预检的取证 I/O 与证据渲染。
 //
-// 这一族从 host.ts 拆出来的理由是**职责而不是行数**：host.ts 管"这一次调用该不该拦、
-// 缺哪几项、水位记在哪一格"（要读设置、读会话台账、读 fs 存在性）；本文件只管"把证据取出来、
+// 这一族从 host.ts 拆出来的理由是**职责而不是行数**：host.ts 管"要不要附、缺哪几项、
+// 水位记在哪一格"（要读设置、读会话台账、读 fs 存在性）；本文件只管"把证据取出来、
 // 再把它渲染成模型读得懂的文本"——纯 I/O + 纯文案，不碰会话键、不碰状态机。
 // 拆开后两边各自可测：本文件的预算/截断/二进制判据可以拿真实临时目录直接钉（不必再从
 // 监听器绕进来），host 侧只需断言接线与水位。
@@ -13,16 +13,14 @@
 //    引用签名同一条规则（全名命中，或任一词干 ≥ MIN_STEM 命中），两处各写一份迟早会漂。
 //  - 文档扩展名的跳过判据在 lib/fact-gate.ts 的 `SKIP_EXT_RE`，由调用方判。
 //
-// 有界是本族的第一要求，不是优化：平台的 `tools/pre-execute` 契约不会放弃一枚挂起的
-// promise（installed dsh-tools/lib/types/index.d.ts:39-42），一次卡死的扫描会把整次工具
-// 调用永久挂住。所以下面每一处循环都带预算，并保证循环体里至少有一次 `await` 作为
-// 取消/墙钟的中断检查点；顺序读而不是 `Promise.all`（并发读会一次打开成百上千个 fd，
-// 而 macOS 默认 ulimit 是 256）。
+// 有界是本族的第一要求，不是优化：平台不会放弃一枚挂起的工具策略 promise，一次卡死的
+// 扫描会把整次工具调用永久挂住。所以下面每一处循环都带预算，并保证循环体里至少有一次
+// `await` 作为取消/墙钟的中断检查点；顺序读而不是 `Promise.all`（并发读会一次打开
+// 成百上千个 fd，而 macOS 默认 ulimit 是 256）。
 
-// `node:path` 留在这里只做**字符串**活（取 basename 报给模型）：它不碰 fs，因此不携带
-// "本地盘就是执行世界"那层假定——远程后端给的 displayPath 是 URI 也一样能取出末段。
+// `node:path` 留在这里只做**字符串/路径拼接**活：它不碰 fs，因此不携带
+// "本地盘就是执行世界"那层假定。
 import path from "node:path";
-import type { LayerNeed } from "./fact-gate.ts";
 import type { PathApi } from "./path-format.ts";
 import { fillTemplate } from "./messages.ts";
 import type { DangerGuardMessages } from "./messages.ts";
@@ -56,7 +54,7 @@ export const PREFLIGHT_MAX_FILES = 256;
 /** 目录展开预算：列一层目录本身就是一次 await 加一堆返回项，文件预算管不到它。没有这一枚，
  *  "最多读 256 个文件"会退化成"最多列几万层目录然后照样超时"——大仓里正是这个形状。 */
 export const PREFLIGHT_MAX_DIRS = 256;
-/** 单文件字节上限：扫描**跳过**更大的文件，目标内容读取只**定长读**这一段（两种取舍各见其函数注释）。 */
+/** 单文件字节上限：扫描**跳过**更大的文件（命中行本身另按 `PREFLIGHT_LINE_CHARS` 截断）。 */
 export const PREFLIGHT_MAX_BYTES = 64_000;
 /** 引用命中最多列多少处（列表是给模型的证据，不是全文导出）。 */
 export const PREFLIGHT_MAX_FINDINGS = 40;
@@ -104,41 +102,18 @@ export interface RefScan {
   readonly complete: boolean;
   readonly hitsCapped: boolean;
   readonly quarantined: number;
-  /** **真展开过**的目录（相对扫描起点；起点自身是 ""）。层探查结论要靠它判覆盖：
-   *  预算截断时"这层没命中"与"这层根本没走到"是两件不同的事，说错就是骗模型。
-   *  ⚠ 它只回答"进没进去过"，**不回答"里面读完没有"**——判后者看 `complete` 与 `unread`。 */
+  /** **真展开过**的目录（相对扫描起点；起点自身是 ""）。它只回答"进没进去过"，
+   *  **不回答"里面读完没有"**——判后者看 `complete` 与 `unread`。 */
   readonly dirs: readonly string[];
   /** 遍历**走到了、但正文没读**的文件（相对起点）：超大文件与凭据面隔离两类。
-   *  「某层零命中」是一条全称结论，只要那一层里还有没读过的文件，它就不成立——
+   *  「零命中」是一条全称结论，只要还有没读过的文件，它就不成立——
    *  那几份完全可能写着引用，只是没进结果。`complete` 只能说明遍历没被预算截断，
-   *  说明不了这件事（见 layerConclusionsOf 的判据）。 */
+   *  说明不了这件事（见 renderRefsBlock 的零命中判断）。 */
   readonly unread: readonly string[];
   /** `unread` 里**不是**因凭据面规则被跳过的那些（超大 / 读不动 / 二进制）。
    *  与 `quarantined` 分开报，是因为两者的零命中语气不同：隔离是「这层我们不看」，
    *  这一档是「这层我们看了但没读到」——后者连"按规则排除"这个说法都不成立。 */
   readonly unreadNotQuarantined: readonly string[];
-}
-
-/** 一枚层的结论：目录（相对起点）、该目录内的命中数，以及这次扫描是否覆盖它。 */
-export interface LayerFinding {
-  readonly layer: LayerNeed;
-  readonly dir: string;
-  readonly hits: number;
-}
-
-/** 目标内容（read 证据）：`bytes` 是实际带上的字节数，`truncated` 表示原文更长。 */
-export interface TargetContent {
-  readonly text: string;
-  readonly bytes: number;
-  readonly truncated: boolean;
-}
-
-/** 一次带证据拦截可能出现的两块证据：按需出现，两块都没有时调用方根本不拦。 */
-export interface PreflightEvidence {
-  readonly scan: RefScan | undefined;
-  readonly content: TargetContent | undefined;
-  /** 从同一次扫描派生的层结论（high 档的 test/e2e/docs）。空数组 = 这一趟没有层缺项。 */
-  readonly layers: readonly LayerFinding[];
 }
 
 /** 扫描队列的一项：目录要展开、文件要读一遍。
@@ -195,7 +170,7 @@ interface ScanCtx {
 }
 
 /** 一次引用扫描的入参（收成一个对象而不是四五个位置参数：加"隔离判据"这一步
- *  本来会顶到 max-params 的上限，而调用点两个（A/B 面）传的其实是同一份东西）。 */
+ *  本来会顶到 max-params 的上限；调用点只有 A 面一处）。 */
 export interface ScanRequest {
   /** 归一化后的目标绝对路径（自身不进结果）。 */
   readonly targetN: string;
@@ -378,7 +353,7 @@ async function scanOneFile(ctx: ScanCtx, item: ScanItem): Promise<boolean> {
   const text = await scannableText(ctx, item);
   if (text === undefined) {
     // 读不动 / 二进制：这一份也没进结果。抛错那支已由 scannableText 置位 capped，
-    // 这里记进 unread 是为了让"这一层里还有没读的"在层结论里说得出来。
+    // 这里记进 unread 是为了让零命中结论能说明还有没读正文的文件。
     ctx.state.unread.push(item.rel);
     ctx.state.unreadNotQuarantined.push(item.rel);
     return true;
@@ -611,94 +586,10 @@ export async function scanReferences(request: ScanRequest): Promise<RefScan | un
       };
 }
 
-/** 目标身份二选一：调用方（预检 B 面）已经 resolve 过就用那一枚，没 resolve 成才现解一次。
- *  本地后端下省的是一个 syscall，远端/沙箱后端下省的是**一次往返**——同一枚目标在一次盲改里
- *  会被正文读取与版本探测各要一次，不复用就是三次。
- * ⚠ 写成两条 `return` 而不是 `resolved ?? await fs.resolve(...)`（也不是三元）：把 await 放进
- *  逻辑/条件表达式的那一条分支里，v8 → istanbul 的区间归并会把**紧随其后的语句**算进这条没走到
- *  的分支，于是"正文确实读到了"的用例跑过之后那一行仍报 0 次（实测如此）。本包的覆盖率门是
- *  100%，测量骗人比多写两行贵得多；lint 的 `prefer-nullish-coalescing` 想改回 `??` 时别听它的。 */
-export async function targetOrResolveOf(
-  fs: PreflightFs,
-  targetN: string,
-  signal: AbortSignal,
-  resolved: FsTarget | undefined,
-): Promise<FsTarget> {
-  if (resolved !== undefined) {
-    return resolved;
-  }
-  return fs.resolve(targetN, { signal });
-}
-
-/** 定长读出目标开头（`resolve` → 一次 `readByteRange`）。
- *  为什么不能用"整读再截"：那条路先把**整个文件**读进内存再切，于是 64KB 只管得到
- *  "投出去多少"，管不到"读进来多少"——门禁判的是模型要改的那枚路径，而它可以是任意大的
- *  生成物（锁文件、数据集、日志导出）。官方把上界放在这个接缝上（`readBytes` 超限直接抛
- *  `FS_TOO_LARGE`，`readByteRange` 才是"窗口即上界"的那一位），所以这里读
- *  PREFLIGHT_MAX_BYTES **+ 1**：多出的那一枚字节就是"原文更长"的实证，不必另开一次 stat。
- *  非普通文件（目录 / FIFO / 设备节点）在后端就抛，落进同一个 catch —— 那没有
- *  "这份文件现在的正文"这回事。
- *  **任何**失败都只表示"这一趟拿不到正文"（不存在 / 无权限 / 越界被拒 / 后端 IO 故障），
- *  一律塌成 undefined：调用方据此**不记凭证**，于是门禁照旧要求模型自己去读——方向保守，
- *  而不必为"这条错误码我们没见过"再养一条测不到的分支（本包的覆盖率阈值是 100%，
- *  按码白名单的写法必然留下一条永远走不到的"非预期码"支路）。
- *  也不出声：edit 打在缺席目标上（新建文件）时这条路径每次都会走，告警只会把真问题淹在
- *  每次都出现的常规信息里，而模型此刻看得见的结果是"仍需取证"，不是静默放行。 */
-async function readHeadBytes(
-  fs: PreflightFs,
-  targetN: string,
-  signal: AbortSignal,
-  resolved: FsTarget | undefined,
-): Promise<Uint8Array | undefined> {
-  let head: Uint8Array | undefined;
-  try {
-    // 调用方（预检 B 面）已经把这枚目标 resolve 过一次时就用那一枚；undefined = 那次没解成
-    //（新建路径、越界被拒、后端故障），这里才自己解一次——失败仍然只落进下面那个 catch。
-    const target = await targetOrResolveOf(fs, targetN, signal, resolved);
-    head = await fs.readByteRange(target, { offset: 0, length: PREFLIGHT_MAX_BYTES + 1 }, signal);
-  } catch {
-    // 空 catch 是有意的（见函数注释）：任何失败都只表示"这一趟拿不到正文"，而 `head` 的
-    // 初值就是全部要做的事。真问题不会被静默：模型随后仍会被门禁要求自己去读。
-  }
-  return head;
-}
-
-/** 读到的头部 → 证据（正文 + 实际字节数 + 是否还有更多）。
- *  多读的那 1 字节只用于判截断：`text` 与 `bytes` 都必须停在 `PREFLIGHT_MAX_BYTES`，
- *  否则正文比说明多一字节，模型会按 `bytes` 误判自己拿到了完整长度。 */
-const targetContentOf = (head: Uint8Array): TargetContent => {
-  const truncated = head.length > PREFLIGHT_MAX_BYTES;
-  const visible = truncated ? head.subarray(0, PREFLIGHT_MAX_BYTES) : head;
-  return {
-    text: decodeText(visible),
-    bytes: visible.length,
-    truncated,
-  };
-};
-
-/** 目标内容（read 证据）。回 undefined = 这一项拿不到（已取消 / 不存在 / 无权限 /
- *  非普通文件 / 二进制）。
- *  二进制（NUL 字节）不进上下文：与扫描侧同一条规则，理由也相同——一屏乱码既不是证据，
- *  也白吃模型的一段上下文预算。
- *  与扫描侧相反的选择（那里是**跳过**大文件）：门禁要的是"改之前先看清这份内容"，
- *  给一半并加一句说明仍然成立；给零则这条证据就是空话。
- *  @param targetN 归一后的目标路径（`resolved` 缺席时用它现解一次身份）。
- *  @param signal 取消信号（调用方信号 ⊕ 墙钟的合流）。
- *  @param fs 宿主 fs 面。
- *  @param resolved 调用方已经 resolve 过的同一枚 target；给了就不再问一次身份。 */
-export async function readTargetContent(
-  targetN: string,
-  signal: AbortSignal,
-  fs: PreflightFs,
-  resolved?: FsTarget,
-): Promise<TargetContent | undefined> {
-  const head = signal.aborted ? undefined : await readHeadBytes(fs, targetN, signal, resolved);
-  return head === undefined || head.includes(0) ? undefined : targetContentOf(head);
-}
-
-/** 零命中那一支的选句与计数字段：扫完了没引用 / 没扫完 / 扫完了但有几份不许读 /
+/** 零命中那一支的选句与计数字段：扫完了没引用 / 扫完了但有几份不许读 /
  *  扫完了但有几份没读到。后两者都不能给全称结论：`complete` 只说明遍历没被预算截断，
- *  说明不了「都读过了」——全称结论在这一支是假话，而模型会据它删文件。 */
+ *  说明不了「都读过了」——全称结论在这一支是假话，而模型会据它删文件。
+ *  调用方只在 `refsCreditable` 为真时渲染这块：未扫完且零命中的那一态根本到不了这里。 */
 function refsNoneLineOf(messages: DangerGuardMessages, scan: RefScan): string {
   const slots = {
     root: scan.root,
@@ -706,9 +597,6 @@ function refsNoneLineOf(messages: DangerGuardMessages, scan: RefScan): string {
     limit: String(PREFLIGHT_MAX_FILES),
     count: String(scan.quarantined),
   };
-  if (!scan.complete) {
-    return fillTemplate(messages.preflightRefsNonePartial, slots);
-  }
   if (scan.unreadNotQuarantined.length > 0) {
     return fillTemplate(messages.preflightRefsNoneUnread, {
       ...slots,
@@ -778,52 +666,8 @@ export function renderRefsBlock(messages: DangerGuardMessages, scan: RefScan): s
   return lines.join("\n");
 }
 
-/** 渲染目标内容块（截断时补一行说明，不静默截断）。 */
-export function renderContentBlock(
-  messages: DangerGuardMessages,
-  targetN: string,
-  content: TargetContent,
-): string {
-  const head = fillTemplate(messages.preflightReadHead, {
-    name: path.basename(targetN),
-    bytes: String(content.bytes),
-  });
-  const tail = content.truncated
-    ? `\n${fillTemplate(messages.preflightReadTruncated, { bytes: String(PREFLIGHT_MAX_BYTES) })}`
-    : "";
-  return `${head}\n${content.text}${tail}`;
-}
-
 /** A 面的注入正文：一句头 + 引用块。
  *  目标正文**不在**这里给——模型这一次就在读它，结果里已经有了；再抄一遍只是白刷上下文，
  *  而"每次 read 都塞一整份文件内容"正是本节旧形态被否掉的原因之一。 */
 export const renderAttach = (messages: DangerGuardMessages, scan: RefScan): string =>
   `${messages.preflightAttach}\n\n${renderRefsBlock(messages, scan)}`;
-
-/** B 面的拒绝理由：头部（含"原样重试即放行"）+ 当场取到的证据块。
- *  这一串走的是官方 `PreToolDecision.deny{reason}`，宿主把它 materialize 成本次调用的
- *  错误结果（installed dsh-tools `prepareExecution`：`content:[{type:'text',
- *  text:'Error: '+reason}]`）——所以模型是在**这次**调用的结果里读到正文的，不是下一步。 */
-export function renderHandoff(
-  messages: DangerGuardMessages,
-  targetN: string,
-  evidence: PreflightEvidence,
-): string {
-  const blocks = [messages.preflightHandoff];
-  if (evidence.content !== undefined) {
-    blocks.push(renderContentBlock(messages, targetN, evidence.content));
-  }
-  if (evidence.scan !== undefined) {
-    blocks.push(renderRefsBlock(messages, evidence.scan));
-  }
-  for (const layer of evidence.layers) {
-    blocks.push(
-      fillTemplate(messages.preflightLayerLine, {
-        layer: layer.layer,
-        dir: layer.dir,
-        hits: String(layer.hits),
-      }),
-    );
-  }
-  return blocks.join("\n\n");
-}

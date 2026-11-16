@@ -112,8 +112,8 @@ describe("防回归：仓库里不许再出现写死分隔符的前缀比较", (
   // 只扫产品源码（lib/ 与 host.ts）：`lib/danger-rules.ts` **未列入扫描清单**（它按 posix 语义
   // 解析 shell 命令文本，不是宿主路径判据）；其余位置出现 `startsWith(..."/")` 形式就是漏改。
   // ⚠ 这是一份硬编码清单：新增带前缀比较的产品文件时必须评估是否入单。
-  // `lib/target-paths.ts` 必须入单：`isInside` / `isAncestorDirOf` / `toPosixRelative` / `underLayer`
-  // 这四个跨平台判据已从 host.ts 搬到那里，清单不跟着走就等于把最该扫的四个函数漏在扫描范围之外。
+  // `lib/target-paths.ts` 必须入单：`isInside` / `isAncestorDirOf` 两个跨平台判据
+  // 已从 host.ts 搬到那里，清单不跟着走就等于把最该扫的函数漏在扫描范围之外。
   const PRODUCT = [
     "host.ts",
     "lib/confirm.ts",
@@ -122,25 +122,15 @@ describe("防回归：仓库里不许再出现写死分隔符的前缀比较", (
     "lib/target-paths.ts",
   ];
 
-  /** 允许写死 `/` 的**唯一**一类：两枚入参都已经是 `toPosixRelative` 的产物（统一 `/` 形）。
-   *
-   *  `underLayer(rel, file)` 的两侧都由 `path.relative(...).split(path.sep).join("/")` 折过，
-   *  于是这里的 `/` 不是"平台分隔符假设"，而是那个函数的**输出契约**。换成 `path.sep`
-   *  反而会错——它拿 `/` 形的串去比 `\` 形的前缀。 */
-  const ALLOWED_LINES = ["underLayer"];
-
   it("产品源码里做前缀包含比较时，补分隔符必须走平台 API", () => {
     const offenders: string[] = [];
     for (const file of PRODUCT) {
       const text = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
       // 形如 `${x}/` 或 `${x}${"/"}` 直接拼在 startsWith 里的写法
       const lines = text.split("\n");
-      for (const [index, line] of lines.entries()) {
+      for (const line of lines) {
         const suspicious = line.includes("startsWith(") && /\$\{[^}]+\}\//u.test(line);
-        // 该行所属函数的签名在上文几行里（本仓约定：函数注释在签名之前），按函数名判白名单。
-        const context = lines.slice(Math.max(index - 3, 0), index).join(" ");
-        const allowlisted = ALLOWED_LINES.some((name) => context.includes(name));
-        if (suspicious && !allowlisted) {
+        if (suspicious) {
           offenders.push(`${file}: ${line.trim()}`);
         }
       }

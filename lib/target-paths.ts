@@ -1,9 +1,9 @@
 // lib/target-paths.ts —— 目标路径的两种"不是模型字面量"的形：**归一形**与**官方真实路径形**。
 //
-// 为什么单列一枚模块：这两种形的写口与读口分属两个世界——写口在 async 的一侧（预检 B 面、
-// `fs/observed` 监听器），读口在**同步**的 `tools.guard` 谓词里。官方那条真实路径通道
-// （`ctx.fs.resolve` → `processPath`）是 async 的，"拦截那一刻"没法 await，所以只能由 async
-// 的一侧先记下来、同步的一侧现读。键形必须逐字同源，而"逐字同源"这件事没法靠类型保证
+// 为什么单列一枚模块：这两种形的写口与读口分属两个世界——写口在 `fs/observed` 事件里
+// （后端每观察一枚目标就报一次，`FsTarget` 已是它自己的解析结果），读口在**同步**的
+// `tools.guard` 谓词里。官方的 `fs.resolve` 是 async，"拦截那一刻"没法 await，所以只能由
+// 事件那一侧先记下来、同步的一侧现读。键形必须逐字同源，而"逐字同源"这件事没法靠类型保证
 // （少一次 `path.resolve` 不会编译报错，只会让官方那一形永远读不到），于是收进这一枚模块。
 //
 // ⚠ 本模块不 import `node:fs`：本机 `realpathSync` 那一形由 host.ts 注入（它是同步谓词当场
@@ -37,10 +37,8 @@ export const resolveTarget = (value: string, cwd: string | undefined): string =>
 };
 
 /** **官方通道**交出的目标真实路径（`归一后的目标 → 该执行世界里的绝对路径`）。
- *  两处写、一处读：
- *   - `fs/observed`（后端每观察一枚目标就报一次，`FsTarget` 是它自己的解析结果 ⇒ 零额外 I/O）；
- *   - 预检 B 面（async 的一站：`fs.resolve` + `fs.processPath`，写在密钥检查让路判定之前，
- *     于是**同一次调用**随后同步跑的 guard 就吃得到）。
+ *  写口是 `fs/observed`（后端每观察一枚目标就报一次，`FsTarget` 是它自己的解析结果 ⇒
+ *  零额外 I/O）。
  *  读口是同步的（本模块的 `resolvedFormsOf`）——`tools.guard` 是同步谓词而官方 `resolve`
  *  是 async，miss 就只剩本机 `realpathSync` 那一形（照旧并列参与）。
  *  陈旧只是**多一形**（判定取并集）：软链被重新指向后旧值仍在，最坏是多拦一次；漏拦的方向
@@ -92,8 +90,8 @@ function processPathOf(fs: PreflightFs, target: FsTarget): string | undefined {
  *  ⚠ 这是 **emit** 模式的事件，官方明说监听器必须同步、**抛错会让那次工具调用失败**
  *  （dsh-fs 的 `fs/observed` 注释："throws fail the tool call"）——本包绝不能成为别人
  *  写盘失败的原因，所以整趟包在 try 里：载荷不像官方 `FsTarget` 时什么都不记就是了，
- *  少一形从来不是放行。（`processPathOf` 自己那道 try 服务的是 async 那条调用路径：那里抛出去
- *  会让整趟预检退化成"没有证据"，而不只是"少一形"。）
+ *  少一形从来不是放行。（`processPathOf` 自己那道 try 是第二道保险：后端拒绝 `processPath`
+ *  时只丢这一形。）
  *  只记**绝对**的 `displayPath`：相对形与远端 URI 没有 cwd 就归一不了，而键形必须与读侧
  *  逐字同源（见 officialPaths 的注释），猜一种归一等于造一枚永远读不到的键。 */
 export function rememberObservedPath(fs: PreflightFs | undefined, target: FsTarget): void {
@@ -104,59 +102,6 @@ export function rememberObservedPath(fs: PreflightFs | undefined, target: FsTarg
   } catch {
     // 见上：这里抛出去，代价是别人那次工具调用失败。
   }
-}
-
-/** 问一次官方通道：`resolve` 定身份（按后端规则归一、跟软链）。任何失败（目标不存在 /
- *  越界被拒 / 后端 IO / 取消）都塌成 undefined——与本机那一形同一个规则：缺席一形只是少看到
- *  一个角度，声明形与本机形照判。
- *  ⚠ 交回的是**已 resolve 的 target**而不是一个字符串：同一次调用随后还要读正文、探版本，
- *  本地后端下那是几个 syscall，而远端/沙箱后端下是**几次往返**——一枚目标只问一次是这个
- *  函数存在的理由（`PreflightFs` 那边因此都收可选的 pre-resolved target）。 */
-export async function officialTargetOf(
-  fs: PreflightFs,
-  target: string,
-  cwd: string | undefined,
-  signal: AbortSignal,
-): Promise<FsTarget | undefined> {
-  let resolved: FsTarget | undefined;
-  try {
-    // 条件展开而不是 `{ cwd, signal }`：官方那一位是 `cwd?: string`，而本包的读法允许
-    // "会话目录不可得"（undefined）——`exactOptionalPropertyTypes` 下送 undefined 是类型错，
-    // 语义上也不该送：缺席时让后端按它自己的默认基准归一，比替它猜一个目录诚实。
-    resolved = await fs.resolve(target, { ...(cwd === undefined ? {} : { cwd }), signal });
-  } catch {
-    resolved = undefined;
-  }
-  return resolved;
-}
-
-/** 一次调用最多向官方通道问多少枚目标。声明目标来自模型可写的参数，条数没有上界；
- *  逐枚并发时整批会同时打到后端（远端/沙箱那一边每枚是一次往返）。超出上限的部分按"官方
- *  那一形缺席"处理——它仍会走本机形与声明形，只是不额外挣这一形。 */
-const MAX_OFFICIAL_RESOLVE_TARGETS = 64;
-
-/** 把这一次调用声明的每枚目标问一遍官方通道：真实路径记进缓存，同时把**已 resolve 的
- *  target** 按声明形交回调用方复用（预检随后读正文、探版本都吃这一枚，不再各付一次往返）。
- *  逐枚**并发**而不是串行 await：常规调用的声明目标是个位数，而每枚 resolve 在远端后端上
- *  可能是一次往返——串行会把那 3 秒墙钟吃光，反而让唯一挣得到手的一形也赔进去。
- *  解析不成的那枚**不进**表（调用方据此回落到自己 resolve 的旧路径，行为与改造前逐字一致）。 */
-export async function rememberOfficialTargetsOf(
-  fs: PreflightFs,
-  targets: readonly string[],
-  cwd: string | undefined,
-  signal: AbortSignal,
-): Promise<ReadonlyMap<string, FsTarget>> {
-  const resolvedByTarget = new Map<string, FsTarget>();
-  await Promise.all(
-    targets.slice(0, MAX_OFFICIAL_RESOLVE_TARGETS).map(async (target) => {
-      const resolved = await officialTargetOf(fs, target, cwd, signal);
-      if (resolved !== undefined) {
-        rememberOfficialPath(target, cwd, processPathOf(fs, resolved));
-        resolvedByTarget.set(target, resolved);
-      }
-    }),
-  );
-  return resolvedByTarget;
 }
 
 /** 卸载兜底：插件换代时作废全部官方形——换代之间软链可能被重新指向、后端可能整个换掉，
@@ -234,16 +179,3 @@ export function isInside(root: string, candidate: string): boolean {
  *  「门禁教模型去搜的位置，门禁自己又不认」——模型怎么照做都攒不满凭证。 */
 export const isAncestorDirOf = (candidate: string, target: string): boolean =>
   candidate !== target && isInside(candidate, target);
-
-/** 起点内的层目录 → 相对起点的 POSIX 形（结果里的 `file` 用的就是这一形，比对才不用两边各 normalize）。
- *  收在路径模块里：它产出的就是 `underLayer` 的输入契约（统一 `/` 形）。 */
-export function toPosixRelative(root: string, dir: string): string {
-  return path.relative(root, dir).split(path.sep).join("/");
-}
-
-/** 这一项是不是那层（或层更深）里的命中。层就是起点自身时（rel = ""）整棵都在层内。
- *  两侧都是 `toPosixRelative` 的产物，所以这里的 `/` 是那个函数的输出契约，不是平台分隔符假设
- *  （换成 `path.sep` 反而会错：拿 `/` 形的串去比 `\` 形的前缀）。 */
-export function underLayer(rel: string, file: string): boolean {
-  return rel.length === 0 || file === rel || file.startsWith(`${rel}/`);
-}

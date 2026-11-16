@@ -1,3 +1,15 @@
+## 0.1.18
+
+首次编辑事实门不再在 `tools/pre-execute` 里代读目标、代记 read 水位：盲改由同步 guard 给出行动清单，模型必须自己 `read`；A 面（读取后随结果附引用面）保留。这样模型不会再看到“原样重试即放行”后直接重试、跳过事实。
+
+### Changed
+
+- **删除预检 B 面**：`tools/pre-execute` 只剩需确认档；盲改不再由插件代读正文、代写发送水位（`delivered.readSeq`）。模型必须自己 `read`，`read` 之后 A 面仍把引用面附在读取结果上。`read` 缺项在配额放行里仍不被豁免。
+- **`preflightEnabled` 语义收窄**：只控制 A 面附加上下文；关掉只少引用面，判据一条不减。
+- **只服务 B 面的代码与文案一并删除**：`lib/denial-info.ts`、`readTargetContent` / `renderHandoff` / `renderContentBlock`、`layerConclusionsOf` / `handedOnly` 一族、`FactGate.releasedFor`、`clearStaleness`、`rememberOfficialTargetsOf`，以及 `preflightHandoff` / `preflightReadHead` / `preflightReadTruncated` / `preflightLayerLine` 四条文案。`DeliveryWatermark` 收窄为 `{ refsSeq }`，`undeterminable()` 在历史不可得时永远要求 `read`。
+- **测试改为钉住新行为**：盲改得到行动清单、`read` 后 A 面附引用面才放行；原先“带证据拒绝 + 原样重试”一组用例按新语义重写，扫描/官方路径用例改从 A 面与 `fs/observed` 出口观察。
+- **文档与注释同步**：两份 README 的预检、数据面与测试层说明改到 A 面口径；`preflightEnabled` 的 schema 注释与路径模块的官方通道说明去掉 B 面残留。
+
 ## 0.1.17
 
 market 热挂与 bundle 层双路径装载时第二份 `apply` 整份让路（此前会静默挂两份 guard 与两套监听）；设置卡接「有字段越界就不许保存」那道门禁；shared 抬到 `^0.2.9`，输入框不再撑出容器、小节内补上纵向间距；宿主 peer 窗口抬到 `^0.2.2-rc.2`。默认配置与拦截行为不变。

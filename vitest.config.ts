@@ -17,7 +17,29 @@ const tscEntry = path.join(
 // 会整体替换公共层同名键。约束随之而来——公共层若将来新增 setupFiles（全局 mock、env 注入），
 // 必须同步把那份名单并进这里，不能指望自动追加。
 const base = definePackageConfig({
+  // `lib/fix.ts` 与 `lib/stats-shape.ts` 是**只有类型**的零依赖叶子模块（没有任何可执行
+  // 语句）：v8 的 include 会把它们列成 0%，而它们本来就不该有运行期覆盖。显式排除，
+  // 理由写在这里而不是改共享阈值。
   coverageInclude: ["host.ts", "settings-host.ts", "lib/**/*.ts"],
+  coverage: {
+    // 共享层默认排除表是**整块替换**的（工厂里的 spread 是浅合并），所以这里要连它一起抄；
+    // 末尾两枚是**只有类型**的零依赖叶子模块（没有任何可执行语句），v8 的 include 会把它们
+    // 列成 0%，而它们本来就不该有运行期覆盖。
+    exclude: [
+      "test/**",
+      "node_modules/**",
+      "**/test/**",
+      "**/node_modules/**",
+      "build-client*",
+      "client.js",
+      "agents/**",
+      "scripts/**",
+      "**/*.d.ts",
+      "**/*.d.mts",
+      "lib/fix.ts",
+      "lib/stats-shape.ts",
+    ],
+  },
   test: {
     setupFiles: ["test/setup-logs.ts"],
   },

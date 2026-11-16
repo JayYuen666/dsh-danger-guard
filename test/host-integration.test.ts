@@ -28,7 +28,7 @@ import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import type { ContextFormed } from "@deepseek-ai/dsh-llm";
 
 import { MESSAGES } from "../lib/messages.ts";
-import { PREFLIGHT_MAX_BYTES, scanReferences } from "../lib/preflight-scan.ts";
+import { scanReferences } from "../lib/preflight-scan.ts";
 import {
   ALPHA_BODY,
   TOOL_BASH,
@@ -36,18 +36,14 @@ import {
   TOOL_READ,
   addSource,
   bootSpine,
-  capTree,
   createAgent,
   dispatch,
   disposeSpine,
   gateMarkOf,
   highBlind,
-  markOf,
   midBlind,
-  readDisk,
   registerModel,
   runTurn,
-  sessionEventCount,
   textReply,
   toolCallReply,
   writeDisk,
@@ -64,12 +60,9 @@ declare module "@deepseek-ai/dsh-llm" {
 }
 
 const { zh } = MESSAGES;
-// 判别段的取法见 host-spine.ts：`[fact-gate]` 是三种规则共用的前缀，拿它当标记等于没断言。
-const HANDOFF_MARK = gateMarkOf(zh.preflightHandoff);
+// 判别段的取法见 host-spine.ts：`[fact-gate]` 是多种规则共用的前缀，拿它当标记等于没断言。
 const ATTACH_MARK = gateMarkOf(zh.preflightAttach);
 const LIST_MARK = gateMarkOf(zh.headFirst);
-const READ_HEAD_MARK = markOf(zh.preflightReadHead);
-const REFS_HEAD_MARK = markOf(zh.preflightRefsHead);
 
 /** 别的插件留下的痕迹：多条用例都按这一枚标记认「那句话不是我写的」，所以只写一遍。 */
 const OTHER_PLUGIN_MARK = "[other-plugin]";
@@ -104,11 +97,9 @@ function modelText(result: Awaited<ReturnType<typeof dispatch>>): string {
     .join(" ");
 }
 
-/** 一条必定走**清单**的盲改：先把扫描预算吃光（capTree），B 面才答不出 refs / 层证据而让路，
- *  于是拒绝理由里逐条点名检索规则——想读"指令点了哪些工具"必须走这一档，
- *  mid 档与没截断的 high 档都会被 B 面当场递证据，压根不给清单。 */
+/** 一条必定走**清单**的盲改：事实门对盲改给行动清单，逐条点名检索规则——
+ *  想读"指令点了哪些工具"必须走这一档。 */
 async function refsLine(spine: Spine, agent: Agent, callId: string): Promise<string> {
-  await capTree(spine);
   const file = await addSource(spine, `${callId}-probe.ts`);
   const result = await dispatch(spine, agent, callId, TOOL_EDIT, highBlind(file, callId));
   const text = modelText(result);
@@ -138,7 +129,7 @@ describe("真实 spine 下的接线与物化", () => {
     assert.ok(modelText(result).includes(zh.rmrf), "理由正文就是本包那条 rmrf 文案");
   });
 
-  it("guard 拿到的是模型字面量：相对路径按会话 cwd 归一到真实目标并交出真正文", async () => {
+  it("guard 拿到的是模型字面量：相对路径按会话 cwd 归一到真实目标", async () => {
     const { spine, agent } = await stage();
     const absolute = await dispatch(
       spine,
@@ -147,15 +138,13 @@ describe("真实 spine 下的接线与物化", () => {
       "edit",
       midBlind(await addSource(spine, "abs.ts")),
     );
-    assert.ok(modelText(absolute).includes(HANDOFF_MARK), "绝对形：B 面带证据拦");
+    assert.ok(modelText(absolute).includes(LIST_MARK), "绝对形：盲改拿到行动清单");
+    assert.ok(modelText(absolute).includes("abs.ts"), "清单点名目标文件");
 
     await addSource(spine, "rel.ts");
     const relative = await dispatch(spine, agent, "a2", TOOL_EDIT, midBlind("src/rel.ts"));
-    assert.ok(modelText(relative).includes(HANDOFF_MARK), "相对形同样认得出来");
-    assert.ok(
-      modelText(relative).includes(ALPHA_BODY),
-      "相对路径按会话 cwd 解析到了真实内容，而不是拿一条不存在的路径去读",
-    );
+    assert.ok(modelText(relative).includes(LIST_MARK), "相对形同样走行动清单");
+    assert.ok(modelText(relative).includes("rel.ts"), "相对路径按会话 cwd 解析到目标");
   });
 
   it("软链指到密钥文件仍按密钥检查拦，且正文一个字都不出现在理由里", async () => {
@@ -172,7 +161,7 @@ describe("真实 spine 下的接线与物化", () => {
     assert.doesNotMatch(modelText(result), /sk-test-sentinel/u, "正文一旦进理由就是凭据外泄");
   });
 
-  it("密钥目标整趟不进 B 面：既不给插件取到的证据，也不给事实门清单", async () => {
+  it("密钥目标不给事实门让路：密钥闸直接拦，不出现 fact-gate 清单", async () => {
     const { spine, agent } = await stage();
     const result = await dispatch(spine, agent, "s2", TOOL_EDIT, {
       file_path: spine.project.envFile,
@@ -204,9 +193,7 @@ describe("真实 spine 下的接线与物化", () => {
 
   it("pre-execute 里被拦下的调用不进 guard ⇒ 事实门的轮次不推进", async () => {
     const { spine, agent } = await stage();
-    // 轮次是 guard 的记录下来，只有走**行动清单**那条路才推进；先把扫描预算吃光，B 面才让路
-    // （否则它当场递证据并写下水位，q3 就直接放行了，这条用例什么也测不到）。
-    await capTree(spine);
+    // 轮次是 guard 的记录：pre-execute 被别的插件截住的那两趟根本走不到 guard。
     const stopper = spine.ctx.on("tools/pre-execute", async (_exec, next) => {
       // oxlint-disable-next-line node/callback-return -- 同上：next() 的结果就是本层的决定依据
       const downstream = await next();
@@ -224,29 +211,6 @@ describe("真实 spine 下的接线与物化", () => {
     assert.doesNotMatch(modelText(after), /第 [2-9] 轮/u, "被截住的那两趟不该推进轮次");
   });
 
-  it("预检 B 面：证据取自真实磁盘（目标正文 + 真引用面），原样重试即放行", async () => {
-    const { spine, agent } = await stage();
-    const file = await addSource(spine, "handed.ts");
-    // 造一个真实引用者，让"引用面"不是空话
-    await writeDisk(
-      path.join(spine.project.root, "test", "handed.test.ts"),
-      "import 'src/handed';\n",
-    );
-    const args = midBlind(file);
-    const first = await dispatch(spine, agent, "h1", TOOL_EDIT, args);
-    const text = modelText(first);
-    assert.equal(first.isError, true);
-    assert.ok(text.includes(HANDOFF_MARK), "B 面拦一次并把证据写进理由");
-    assert.ok(text.includes(READ_HEAD_MARK), "带目标内容一块");
-    assert.ok(text.includes(REFS_HEAD_MARK), "带引用探查一块");
-    assert.ok(text.includes("test/handed.test.ts"), "引用面是真扫出来的：点名那个真实引用者");
-    assert.ok(text.includes(ALPHA_BODY), "正文是真读回来的");
-    const second = await dispatch(spine, agent, "h2", TOOL_EDIT, args);
-    assert.equal(second.isError, false, "原样重试凭投递水位放行");
-    assert.ok(modelText(second).includes("edited"), "工具体真的跑了");
-    assert.match(await readDisk(file), /const padded = "x{230}"/u, "放行即落盘（不靠插件自报）");
-  });
-
   it("预检 A 面：引用面随读取结果出去并换到凭证；同一趟里 read 仍缺（直接 dispatch 不落会话日志）", async () => {
     const { spine, agent } = await stage();
     const file = await addSource(spine, "attached.ts");
@@ -262,15 +226,12 @@ describe("真实 spine 下的接线与物化", () => {
     const edit = await dispatch(spine, agent, "r2", TOOL_EDIT, midBlind(file));
     const text = modelText(edit);
     assert.equal(edit.isError, true);
-    assert.ok(text.includes(HANDOFF_MARK), "仍拦一次：read 这项还没补上");
-    assert.ok(text.includes(READ_HEAD_MARK), "B 面把正文补上");
+    assert.ok(text.includes(LIST_MARK), "仍拦一次：read 这项还没补上");
     assert.doesNotMatch(
       text,
       /满足任一即计入/u,
       "⚠ A 面投的 refs 已计入凭证 ⇒ 这一项不再出现（没计入的话这里会再要一遍）",
     );
-    const retried = await dispatch(spine, agent, "r3", TOOL_EDIT, midBlind(file));
-    assert.equal(retried.isError, false, "read 由 B 面补上之后放行");
   });
 
   it("预检 A 面不吞下游的 additionalContexts，也不改写结果正文", async () => {
@@ -313,36 +274,7 @@ describe("真实 spine 下的接线与物化", () => {
     assert.ok(modelText(read).includes(OTHER_PLUGIN_MARK));
   });
 
-  it("目标超过定长上界：正文截断并在理由里点明", async () => {
-    const { spine, agent } = await stage();
-    const big = await writeDisk(
-      path.join(spine.project.root, "src", "big.ts"),
-      `// ${"b".repeat(PREFLIGHT_MAX_BYTES + 500)}`,
-    );
-    // ⚠ old_string 取短：写入一大就判"大段重写"升 high，走的是清单而不是递证据——
-    // 这条要钉的是"目标很大"，不是"这次改动很大"。
-    const result = await dispatch(spine, agent, "g1", TOOL_EDIT, {
-      file_path: big,
-      old_string: "// b",
-      new_string: `const padded = "${"x".repeat(230)}";`,
-    });
-    const text = modelText(result);
-    assert.ok(text.includes(HANDOFF_MARK), `应为带证据的拦法，实际：${text.slice(0, 200)}`);
-    assert.ok(
-      text.includes(markOf(zh.preflightReadTruncated)),
-      `半份正文必须自带截断说明，实际尾部：…${text.slice(-160)}`,
-    );
-    assert.ok(
-      text.includes(String(PREFLIGHT_MAX_BYTES)),
-      "点明上界是多少字节，模型才知道自己拿到的是多少",
-    );
-    assert.ok(
-      text.includes(`\`big.ts\`（${PREFLIGHT_MAX_BYTES} 字节）`),
-      `正文头报的字节数必须停在上界，实际：${text.slice(0, 200)}`,
-    );
-  });
-
-  it("二进制目标拿不到正文 ⇒ B 面整趟让路，交回 guard 的行动清单", async () => {
+  it("二进制目标拿不到正文 ⇒ 交回 guard 的行动清单", async () => {
     const { spine, agent } = await stage();
     const bin = await writeDisk(
       path.join(spine.project.root, "src", "blob.bin"),
@@ -354,84 +286,28 @@ describe("真实 spine 下的接线与物化", () => {
       new_string: `const padded = "${"x".repeat(230)}";`,
     });
     assert.equal(result.isError, true);
-    assert.ok(modelText(result).includes(LIST_MARK), "拿不到证据就不该拦——那是纯拒绝");
+    assert.ok(modelText(result).includes(LIST_MARK), "拿不到正文 ⇒ 纯拒绝，给行动清单");
     assert.doesNotMatch(modelText(result), /这次编辑先停下/u);
   });
 
-  it("新建文件（write）免 read，但引用面仍要探 ⇒ 走新建头部而不是 B 面", async () => {
+  it("新建文件（write）免 read，但引用面仍要探 ⇒ 走新建头部", async () => {
     const { spine, agent } = await stage();
     const fresh = path.join(spine.project.root, "src", "brand-new.ts");
     const result = await dispatch(spine, agent, "w1", "write", {
       file_path: fresh,
       content: "export const created = 1;\n",
     });
-    // 新建目标没有正文可给，但引用面与层结论同一次扫描就给得出 ⇒ 现在由 B 面带证据拦
     const text = modelText(result);
     assert.equal(result.isError, true);
-    assert.ok(text.includes(HANDOFF_MARK), `新建文件也由预检递证据，实际：${text.slice(0, 240)}`);
-    assert.ok(
-      text.includes(markOf(zh.preflightLayerLine)),
-      "test 层的结论随行（同一趟扫描，不多花 I/O）",
-    );
-    const retry = await dispatch(spine, agent, "w2", "write", {
-      file_path: fresh,
-      content: "export const created = 1;\n",
-    });
-    assert.equal(retry.isError, false, "read 免、refs 与层凭投递水位 ⇒ 原样重试放行");
-    assert.match(await readDisk(fresh), /export const created/u, "放行即落盘");
+    assert.ok(text.includes("新建文件免 read"), `新建头部点名免 read，实际：${text.slice(0, 240)}`);
+    assert.doesNotMatch(text, /read brand-new\.ts/u, "新建文件不要求 read");
   });
 
-  it("直接 dispatch 的调用不落会话日志 ⇒ 这一层的放行只可能来自预检自己的发送水位", async () => {
-    const { spine, agent } = await stage();
-    const file = await addSource(spine, "nolog.ts");
-    const blind = highBlind(file, "x");
-    const first = await dispatch(spine, agent, "l1", TOOL_EDIT, blind);
-    assert.equal(first.isError, true);
-    const settled = await Promise.all([
-      dispatch(spine, agent, "l2", TOOL_READ, { file_path: file }),
-      dispatch(spine, agent, "l3", "grep", { pattern: "nolog.ts", path: spine.project.root }),
-    ]);
-    assert.ok(settled.every((result) => !result.isError));
-    assert.equal(
-      sessionEventCount(agent),
-      0,
-      "这就是根因：不经 agent loop 的调用在会话日志里根本没有条目",
-    );
-    const afterSearch = await dispatch(spine, agent, "l4", TOOL_EDIT, blind);
-    assert.equal(
-      afterSearch.isError,
-      false,
-      "放行的是 l1 那趟发送写下的水位（下一枚用例把「模型自己搜过」这条单独钉死）",
-    );
-  });
-
-  it("模型自己 dispatch 的检索换不到凭证 ⇒ 引用面仍由本包当场扫一遍", async () => {
-    // 与上一枚用例的对照：这一台从头到尾只让模型自己 grep 过（没有任何预检发送），
-    // 若那次 grep 被记录下来，本包就不必再扫，拒绝理由里也不会有被引用这一块。
-    const { spine, agent } = await stage();
-    const file = await addSource(spine, "solo.ts");
-    const searched = await dispatch(spine, agent, "s1", "grep", {
-      pattern: "solo.ts",
-      path: spine.project.root,
-    });
-    assert.equal(searched.isError, false);
-    assert.equal(sessionEventCount(agent), 0, "模型这次搜索没进会话日志");
-    const afterSearch = await dispatch(spine, agent, "s2", TOOL_EDIT, highBlind(file, "s"));
-    assert.equal(afterSearch.isError, true, "搜过也照样拦：这一层不认模型自己的检索");
-    const text = modelText(afterSearch);
-    assert.ok(text.includes(HANDOFF_MARK), `应为带证据的拦法，实际：${text.slice(0, 200)}`);
-    assert.ok(
-      text.includes(REFS_HEAD_MARK),
-      "引用面这块只能由本包自己扫出来——那次 grep 一分凭证都没换到",
-    );
-  });
-
-  it("preflightEnabled=false ⇒ 退回先拒绝、模型自己补证，判据一条不减", async () => {
+  it("preflightEnabled=false ⇒ 只少 A 面附加上下文，判据一条不减", async () => {
     const { spine, agent } = await stage({ preflightEnabled: false });
     const file = await addSource(spine, "off.ts");
     const result = await dispatch(spine, agent, "o1", TOOL_EDIT, midBlind(file));
     assert.ok(modelText(result).includes(LIST_MARK), "走的是行动清单");
-    assert.doesNotMatch(modelText(result), /这次编辑先停下/u, "没有当场递证据");
     assert.doesNotMatch(modelText(result), /const alpha = 1;/u, "连正文都不给");
   });
 
@@ -447,8 +323,6 @@ describe("真实 spine 下的接线与物化", () => {
 
   it("maxDenies 用尽 ⇒ 配额放行并留下一条警告（真实轮次，不是桩里的计数）", async () => {
     const { spine, agent } = await stage({ maxDenies: 1 });
-    // 配额是 guard 的记录下来：只有走清单的那条路才推进轮次，所以先把扫描预算吃光（B 面答不出）
-    await capTree(spine);
     const file = await addSource(spine, "quota.ts");
     const first = await dispatch(spine, agent, "d1", TOOL_EDIT, highBlind(file, "a"));
     assert.equal(first.isError, true);
@@ -540,8 +414,9 @@ describe("真实 spine 下的接线与物化", () => {
     const escape = path.join(spine.project.root, "escape.link");
     await symlink(path.join(spine.project.root, "no-such.ts"), broken);
     await symlink(outside, escape);
-    const text = modelText(await dispatch(spine, agent, "y1", TOOL_EDIT, midBlind(file)));
-    assert.ok(text.includes(HANDOFF_MARK), "证据照递（这一支不因软链而整趟作废）");
+    const read = await dispatch(spine, agent, "y1", TOOL_READ, { file_path: file });
+    const text = (read.additionalContexts ?? []).map((message) => contextText(message)).join(" ");
+    assert.ok(text.includes(ATTACH_MARK), "证据照递（这一支不因软链而整趟作废）");
     assert.doesNotMatch(text, /sk-outside-leak/u, "树外文件被跟读并抄进命中 ⇒ 扫描面弹出了目录树");
     assert.doesNotMatch(text, /broken\.link|escape\.link/u, "两枚链都不该作为命中出现");
     assert.ok(
@@ -556,9 +431,9 @@ describe("真实 spine 下的接线与物化", () => {
     const file = await addSource(spine, "token.ts");
     // 让 `.env` 的某一行撞上目标的词干：这正是"引用命中"会被抄出去的那种行
     await writeDisk(spine.project.envFile, 'token = "sk-scan-leak-sentinel"\n');
-    const result = await dispatch(spine, agent, "e2e1", TOOL_EDIT, midBlind(file));
-    const text = modelText(result);
-    assert.ok(text.includes(HANDOFF_MARK), "B 面照给证据（这条不改判据的强度）");
+    const read = await dispatch(spine, agent, "e2e1", TOOL_READ, { file_path: file });
+    const text = (read.additionalContexts ?? []).map((message) => contextText(message)).join(" ");
+    assert.ok(text.includes(ATTACH_MARK), "A 面照给证据（这条不改判据的强度）");
     assert.doesNotMatch(
       text,
       /sk-scan-leak-sentinel/u,
@@ -596,7 +471,8 @@ describe("真实 spine 下的接线与物化", () => {
       path.join(spine.project.root, "deploy.sh"),
       'rollout = "sk-user-pattern-leak"\n',
     );
-    const text = modelText(await dispatch(spine, agent, "u1", TOOL_EDIT, midBlind(file)));
+    const read = await dispatch(spine, agent, "u1", TOOL_READ, { file_path: file });
+    const text = (read.additionalContexts ?? []).map((message) => contextText(message)).join(" ");
     assert.doesNotMatch(
       text,
       /sk-user-pattern-leak/u,

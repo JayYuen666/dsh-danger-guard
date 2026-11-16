@@ -14,8 +14,16 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { PREFLIGHT_MAX_FILES, ancestorLevelsOf, scanReferences } from "../lib/preflight-scan.ts";
+import {
+  PREFLIGHT_MAX_DIRS,
+  PREFLIGHT_MAX_FILES,
+  PREFLIGHT_MAX_FINDINGS,
+  ancestorLevelsOf,
+  renderRefsBlock,
+  scanReferences,
+} from "../lib/preflight-scan.ts";
 import type { PreflightFs, RefScan, ScanRequest } from "../lib/preflight-scan.ts";
+import { MESSAGES, fillTemplate } from "../lib/messages.ts";
 import { localFsFace } from "./fixtures/local-fs-face.ts";
 
 /** 一次扫描的**可判据视图**：把"整趟作废（`undefined`）"与"结果里的各位"收成一处，
@@ -234,7 +242,7 @@ describe("引用扫描器：层覆盖位（`dirs`）如实记录走没走到", (
       assert.deepEqual(
         [...viewOf(scan).dirs].toSorted(),
         ["", "src", "src/nested"],
-        "层探查结论要靠它判覆盖：少一个都可能把『没走到』说成『零命中』",
+        "零命中结论要靠它判覆盖：少一个都可能把『没走到』说成『零命中』",
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -310,5 +318,92 @@ describe("引用扫描器：祖先层级链（纯字符串函数，导出只为�
     const root = path.resolve(path.parse(process.cwd()).root, "w", "proj");
     const elsewhere = path.resolve(path.parse(process.cwd()).root, "elsewhere", "mod.ts");
     assert.deepEqual(ancestorLevelsOf(root, elsewhere), [root]);
+  });
+});
+
+describe("引用扫描器：预算到顶与证据块的三条完成度分支", () => {
+  it("命中数达上限即停：findings 截在上限，hitsCapped 如实置位", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "dg-scan-hitcap-"));
+    try {
+      const target = path.join(root, "cap.ts");
+      await writeFile(target, "export const cap = 1;\n");
+      await writeFile(path.join(root, "hits.txt"), "cap.ts\n".repeat(PREFLIGHT_MAX_FINDINGS + 5));
+      const scan = await scanReferences({
+        targetN: target,
+        root,
+        needles: ["cap"],
+        signal: new AbortController().signal,
+        fs: localFsFace(),
+      });
+      assert.ok(scan !== undefined, "这一趟跑成了");
+      assert.equal(scan.findings.length, PREFLIGHT_MAX_FINDINGS, "命中列表停在上限");
+      assert.equal(scan.hitsCapped, true, "达上限要如实置位");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("目录预算到顶 ⇒ 遍历截断，complete=false", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "dg-scan-dircap-"));
+    try {
+      const target = path.join(root, "cap.ts");
+      await writeFile(target, "export const cap = 1;\n");
+      for (let index = 0; index < PREFLIGHT_MAX_DIRS + 1; index += 1) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- 夹具就是逐目录铺；并发铺 257 个目录反而更难定位失败
+        await mkdir(path.join(root, `d${index}`), { recursive: true });
+      }
+      const scan = await scanReferences({
+        targetN: target,
+        root,
+        needles: ["cap"],
+        signal: new AbortController().signal,
+        fs: localFsFace(),
+      });
+      assert.ok(scan !== undefined, "这一趟跑成了");
+      assert.equal(scan.complete, false, "目录预算到顶 ⇒ 不完整");
+      assert.equal(scan.dirs.length, PREFLIGHT_MAX_DIRS, "只展开到上限为止");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  const scanRoot = path.resolve(path.parse(process.cwd()).root, "w", "proj");
+  const finding = { file: "src/a.ts", line: 1, text: "hit" };
+  const baseScan: RefScan = {
+    root: scanRoot,
+    scanned: 1,
+    findings: [finding],
+    complete: true,
+    hitsCapped: false,
+    quarantined: 0,
+    dirs: [""],
+    unread: [],
+    unreadNotQuarantined: [],
+  };
+
+  it("命中达上限的扫描：证据块补一句'不是全部'", () => {
+    const text = renderRefsBlock(MESSAGES.zh, { ...baseScan, hitsCapped: true });
+    const expected = fillTemplate(MESSAGES.zh.preflightRefsCapped, {
+      limit: String(PREFLIGHT_MAX_FINDINGS),
+    });
+    assert.ok(text.includes(expected), "达上限要说明列出的不是全部");
+  });
+
+  it("扫完但有文件没读成正文：证据块补一句'命中面可能不止这些'", () => {
+    const text = renderRefsBlock(MESSAGES.zh, {
+      ...baseScan,
+      unreadNotQuarantined: ["src/big.ts"],
+    });
+    const expected = fillTemplate(MESSAGES.zh.preflightRefsUnread, { count: "1" });
+    assert.ok(text.includes(expected), "没读成正文的份数要说出来");
+  });
+
+  it("未扫完但找到了引用：凭证照给，同时点名遍历没有覆盖全", () => {
+    const text = renderRefsBlock(MESSAGES.zh, { ...baseScan, complete: false });
+    const expected = fillTemplate(MESSAGES.zh.preflightRefsPartial, {
+      limit: String(PREFLIGHT_MAX_FILES),
+      root: baseScan.root,
+    });
+    assert.ok(text.includes(expected), "未扫完要说明'以上只是已扫范围'");
   });
 });

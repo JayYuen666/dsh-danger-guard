@@ -204,16 +204,6 @@ export function attributeExternalChange(input: AttributionInput): Attribution {
   const externallyChanged = staleCandidate >= 0 && !(mtimeJump && selfExplains);
   return { externallyChanged, staleBase: externallyChanged ? staleCandidate : -1 };
 }
-/** 预检把正文当场递进结果里 ⇒ 那枚"还没看过这一版"的失效点可以解除。
- *  为什么调用方不能靠发送水位的位次判：水位记的是日志长度，而外部改动发生在日志之外，
- *  两者会取到同一个下标（delivered.readSeq > staleBase 不成立），会一直卡在缺 read 上。 */
-export function clearStaleness(key: string): void {
-  const current = basis.get(key);
-  if (current !== undefined && current.staleBase >= 0) {
-    lruPut(basis, key, { mtimeMs: current.mtimeMs, staleBase: -1 });
-  }
-}
-
 /**
  * 会话键台账集合（会话销毁时按前缀回收）：键形都是 会话id|目标。
  *

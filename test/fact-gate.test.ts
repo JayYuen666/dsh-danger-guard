@@ -507,10 +507,10 @@ describe("str_replace_editor 并存编辑器过事实门", () => {
 describe("不可判定输入与发送水位", () => {
   it("发送缺省常量在运行时也不可变", () => {
     assert.equal(Object.isFrozen(NO_DELIVERY), true);
-    assert.equal(Object.isFrozen(NO_DELIVERY.layerSeqs), true);
+    assert.equal(NO_DELIVERY.refsSeq, -1);
   });
 
-  it("历史不可得时只按 read/refs 起步；发送水位翻成 done，layerSeqs 不进入该退化面", () => {
+  it("历史不可得时 read 永远要求；refs 可由 A 面发送水位豁免", () => {
     const missing = undeterminable(NO_DELIVERY);
     assert.deepEqual(
       missing.gaps.map((gap) => gap.need),
@@ -518,18 +518,18 @@ describe("不可判定输入与发送水位", () => {
     );
     assert.equal(missing.determinate, false);
 
-    const delivered = undeterminable({
-      readSeq: 1,
-      refsSeq: 1,
-      layerSeqs: { test: 1 },
-    });
-    assert.deepEqual(delivered.gaps, []);
-    assert.deepEqual(delivered.done, ["read", "refs"], "layerSeqs 不参与该退化面");
+    const delivered = undeterminable({ refsSeq: 1 });
+    assert.deepEqual(
+      delivered.gaps.map((gap) => gap.need),
+      ["read"],
+    );
+    assert.deepEqual(delivered.done, ["refs"], "refs 不再要求，read 仍然必须");
 
     const gate = new FactGate();
     assert.equal(gate.check("edit", "/w/u.ts", "su", missing).kind, "deny");
     assert.equal(gate.check("edit", "/w/u.ts", "su", missing).kind, "indeterminate");
-    assert.equal(gate.check("edit", "/w/u2.ts", "su", delivered).kind, "allow");
+    assert.equal(gate.check("edit", "/w/u2.ts", "su", delivered).kind, "deny");
+    assert.equal(gate.check("edit", "/w/u2.ts", "su", delivered).kind, "indeterminate");
   });
 });
 
@@ -641,32 +641,6 @@ describe("factGate：配额放行的失效条件（不变式，见 SessionState.
     assert.equal(gate.check("edit", "/w/q.ts", "sq", upper).kind, "deny", "首拒");
     // maxDenies=1：第 2 次无证据拒绝达配额 → 放行
     assert.equal(gate.check("edit", "/w/q.ts", "sq", lack(["refs"], { logSeq: 5 })).kind, "quota");
-    // 只读查询与 check 用同一条严格判据：等于放行水位不算"之后"，必须失效。
-    assert.equal(
-      gate.releasedFor("sq", "/w/q.ts", lack(["refs"], { externalChangeSeq: 4 })),
-      true,
-      "更早的外部改动不撤销配额",
-    );
-    assert.equal(
-      gate.releasedFor("sq", "/w/q.ts", lack(["read"], { externalChangeSeq: 4 })),
-      false,
-      "当前仍有 read 缺项时，预检也不得让路",
-    );
-    assert.equal(
-      gate.releasedFor("sq", "/w/q.ts", lack(["refs"], { externalChangeSeq: 5 })),
-      false,
-      "等于放行水位即失效",
-    );
-    assert.equal(
-      gate.releasedFor("sq", "/w/q.ts", lack(["refs"], { externalChangeSeq: 6 })),
-      false,
-      "晚于放行水位即失效",
-    );
-    assert.equal(
-      gate.releasedFor("sq", "/w/q.ts", undeterminable(NO_DELIVERY)),
-      true,
-      "不可判定态沿用旧配额：历史读不到不证明模型没读过这一版",
-    );
     // 目标未变（externalChangeSeq 仍早于放行水位）→ 持续放行
     assert.equal(gate.check("edit", "/w/q.ts", "sq", lack(["refs"], { logSeq: 6 })).kind, "allow");
     // 外部改动水位恰好等于放行水位 → 放行作废，回到正常过门（重新计数）

@@ -47,8 +47,8 @@ export const BUILTIN_BASE: Config = {
   enabled: true,
   // 事实门独立开关：不想要首次编辑强制取证时关掉（默认开）。
   factGateEnabled: true,
-  // 预检独立开关（默认开）：A 面随读取附上引用面、B 面把当场取到的证据写进拒绝理由，
-  // 于是一次编辑不必被拒第二次。关掉即退回"先拒绝、再由模型自己补证"的老路径（判定强度不变）。
+  // 预检独立开关（默认开）：read 之后把引用面随读取结果附给模型，省掉一次引用检索。
+  // 关掉只少这块附加上下文；盲改仍由事实门给行动清单（判定强度不变）。
   preflightEnabled: true,
   // 判定耗时采集（长度上限要按真实分布调，而分布只能从真实调用里来）。默认开。
   judgeStats: true,
@@ -75,11 +75,10 @@ Object.freeze(BUILTIN_BASE);
 export interface Config {
   enabled: boolean;
   factGateEnabled: boolean;
-  /** 编辑前预检（Phase 2，两边各挂一条官方瀑布）：
-   *  A 面在 `tools/post-execute` 把引用面随**读取结果**交出去（additionalContexts），
-   *  B 面在 `tools/pre-execute` 把当场取到的正文/引用面写进**这一次的拒绝理由**，
-   *  于是常规流程一次编辑都不会被拒；物理停止仍在 dispatch 之前，"改之前先看清它"没有让。
-   *  关掉即退回"先拒绝、再由模型自己补证"的老路径——判据一条不减，变的只是谁去跑这次取证。 */
+  /** 编辑前预检（Phase 2）：A 面在 `tools/post-execute` 把引用面随**读取结果**交出去
+   *  （additionalContexts），省掉模型自己检索引用；盲改不再由预检代读，而是由同步 guard
+   *  给行动清单，模型必须自己 read。
+   *  关掉只少这块附加上下文——判据一条不减，变的只是谁去跑这次引用检索。 */
   preflightEnabled: boolean;
   /** 是否把每次判定的耗时与输入规模采样出去（滚动摘要 + lesson-loop 的 `judge-cost` pass）。
    *  关掉只是不再看分布，判定本身一字不变；长度上限该不该调，靠的就是这一格的真实分布。 */
@@ -148,7 +147,7 @@ export function snapshot(config: ConfigRefs): Config {
 export const ConfigSchema = Schema.object({
   enabled: Schema.boolean().default(BUILTIN_BASE.enabled).volatile(),
   factGateEnabled: Schema.boolean().default(BUILTIN_BASE.factGateEnabled).volatile(),
-  // 预检独立开关（默认开）：与上面那枚同形——卡片/行 config 都能关，关掉只影响"谁来跑这次取证"。
+  // 预检独立开关（默认开）：与上面那枚同形——卡片/行 config 都能关，关掉只少 A 面这块附加上下文。
   preflightEnabled: Schema.boolean().default(BUILTIN_BASE.preflightEnabled).volatile(),
   judgeStats: Schema.boolean().default(BUILTIN_BASE.judgeStats).volatile(),
   maxDenies: Schema.natural().min(1).max(5).default(BUILTIN_BASE.maxDenies).volatile(),

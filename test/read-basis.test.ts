@@ -13,7 +13,6 @@ import path from "node:path";
 import {
   attributeExternalChange,
   clearReadBasis,
-  clearStaleness,
   commitReadObservation,
   discardReadObservation,
   MAX_STAGED_PER_KEY,
@@ -188,25 +187,6 @@ describe("settleVersion：全局基线在结论落定时刷新", () => {
     const seen = observeVersion(KEY, TARGET, 2000);
     assert.equal(seen.staleBase, 5);
     assert.equal(seen.mtimeJump, false);
-  });
-});
-
-describe("clearStaleness：只解除失效点，不动观测基线", () => {
-  beforeEach(() => {
-    clearReadBasis();
-  });
-
-  it("有失效点时解除，mtime 基线保留", () => {
-    settleVersion(KEY, TARGET, 2000, 5);
-    clearStaleness(KEY);
-    const seen = observeVersion(KEY, TARGET, 2000);
-    assert.equal(seen.staleBase, -1);
-    assert.equal(seen.mtimeJump, false, "解除失效点不能把观测基线一起清掉");
-  });
-
-  it("没有记录时是空操作，不为该键新建记录", () => {
-    clearStaleness(KEY);
-    assert.equal(basisTable().has(KEY), false);
   });
 });
 
