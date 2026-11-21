@@ -25,11 +25,16 @@ import type { InvocationDescriptor, RemoteResult } from "@deepseek-ai/dsh-typert
 // 改名漏一处没有任何编译期信号，表现是"读不到"而不是报错。
 import { BUNDLE_PKG } from "./bundle-pkg.ts";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/client";
+import { isRemoteMounter } from "@jayyuen66/dsh-plugin-shared/lib/typert-client";
+import type { RemoteHost, RemoteMounter } from "@jayyuen66/dsh-plugin-shared/lib/typert-client";
 import { z } from "zod";
 
 // 形状从**叶子**模块取，不从 lib/judge-stats.ts：后者带 node:os/node:path，
 // 那会把它们拖进客户端类型程序（实测 TS2591）。
 import type { StatsSnapshot } from "../lib/stats-shape.ts";
+/** 客户端上下文里本模块用到的那一位（shared 收编的正主，含 isRemoteMounter）：
+ *  **显式读取**一个可选服务（见文件头为什么不用 inject）。 */
+export type { RemoteHost } from "@jayyuen66/dsh-plugin-shared/lib/typert-client";
 
 /** 宿主侧那枚服务键（= 线上命名空间）。与 `lib/stats-remote.ts` 的 `STATS_SERVICE_KEY` 同值：
  *  两侧各自内联 `lib/` 的那一份是**两个产物**，所以这个串在两处各写一次是必然的 —— 而它一旦
@@ -56,27 +61,10 @@ export const STATS_DESCRIPTORS: readonly InvocationDescriptor[] = [
   },
 ];
 
-/** 客户端上下文里本模块用到的那一位：**显式读取**一个可选服务（见文件头为什么不用 inject）。 */
-export interface RemoteHost {
-  get?: (name: string, strict?: boolean) => unknown;
-}
-
-/** 官方网关的客户端宿主服务：本卡只用 `$mount` 一位（挂载一枚手写贡献）。 */
-interface RemoteMounter {
-  $mount: (contribution: {
-    package: string;
-    descriptors: readonly InvocationDescriptor[];
-  }) => Promise<unknown>;
-}
-
 /** 挂载后由网关提供的命名空间宿主服务。 */
 interface StatsNamespace {
   stats: () => Promise<RemoteResult<StatsSnapshot>>;
 }
-
-/** 这个值能当远程通道用吗（只核我们要调的那一位；服务来自别的实现或版本时保守当作没有）。 */
-const isRemoteMounter = (value: unknown): value is RemoteMounter =>
-  isRecord(value) && typeof value["$mount"] === "function";
 
 /** 同上：命名空间服务（挂载之后才有，缺它说明网关没认这枚贡献）。 */
 const isStatsNamespace = (value: unknown): value is StatsNamespace =>

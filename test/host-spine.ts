@@ -29,6 +29,7 @@ import {
   mountAgentLoopTestHarness,
 } from "@deepseek-ai/dsh-agent-loop-testkit";
 import type { AgentLoopTestHarness } from "@deepseek-ai/dsh-agent-loop-testkit";
+import { executeModelToolFixture } from "@deepseek-ai/dsh-tool-testkit";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import type {
   InferArgs,
@@ -455,7 +456,10 @@ export async function disposeSpine(spine: Spine): Promise<void> {
   }
 }
 
-/** 直接经真 registry 派发一次调用（集成层用；点对点层走 runTurn）。 */
+/** 直接经真 registry 派发一次调用（集成层用；点对点层走 runTurn）。
+ *  官方 testkit 的单发执行位与本文件此前的手写批次包装逐位同构（单发批次 → 拆唯一结果 →
+ *  缺失抛错）：`arguments` 在夹具内部才 stringify，原始对象直接给；结果缺失时抛的是
+ *  夹具自己的错误文案。 */
 export async function dispatch(
   spine: Spine,
   agent: Agent,
@@ -463,25 +467,13 @@ export async function dispatch(
   name: string,
   args: Record<string, unknown>,
 ): Promise<ToolExecutionResult> {
-  // 官方已把 `tools.execute` 收成**批次**入口：单发也要包成一条 `calls`，再把唯一那条结果
-  // 拆回来。`arguments` 按模型产出的原形给——它是原始 JSON 串，不是已解析对象。
-  const batch = await spine.ctx.tools.execute({
-    calls: [
-      {
-        type: "tool-call",
-        id: callIdOf(callId),
-        name,
-        arguments: JSON.stringify(args),
-      },
-    ],
+  return executeModelToolFixture(spine.ctx, {
+    callId: callIdOf(callId),
+    name,
+    arguments: args,
     agent,
     signal: new AbortController().signal,
   });
-  const [only] = batch.results;
-  if (only === undefined) {
-    throw new Error(`tools.execute 对单发调用没有交回结果：${name}`);
-  }
-  return only.result;
 }
 
 /** 若干枚调用 → 一串官方 chunk（每条占一个 block index，与官方适配器契约同形）。 */

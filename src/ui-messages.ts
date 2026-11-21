@@ -19,6 +19,8 @@ export interface UiMessages {
   readonly cardDescription: string;
   /** 作用域只读（非 loopback 页面）时的状态条文本。 */
   readonly blockSection: string;
+  /// 表单小节标题旁的字段计数徽章（{count} 为字段数）。
+  readonly fieldCount: string;
   readonly judgeSection: string;
   readonly rulesSection: string;
   readonly unitTimes: string;
@@ -87,6 +89,8 @@ export interface UiMessages {
   readonly secretPlaceholder: string;
   /** 判定统计块的标题（说明它是宿主进程内存）。 */
   readonly statsTitle: string;
+  /** 统计小节的说明行（数据边界：宿主进程内存）。 */
+  readonly statsTitleHint: string;
   /** 刷新按钮。 */
   readonly statsRefresh: string;
   /** 读取中。 */
@@ -96,19 +100,21 @@ export interface UiMessages {
   /** 还没有判定发生过。 */
   readonly statsEmpty: string;
   /** 判定次数（槽位 summary）。 */
-  readonly statsCalls: string;
+  readonly statsCallsTile: string;
   /** 直接拒的命中分布（槽位 summary）。 */
-  readonly statsHits: string;
+  readonly statsHitsTile: string;
   /** 需确认的命中分布（槽位 summary）。 */
-  readonly statsAsks: string;
+  readonly statsAsksTile: string;
   /** 本档看见了但没拦的命中（按规则键）：零兜底与"交给 reviewer"两类的合计规则。 */
-  readonly statsAllowed: string;
+  readonly statsAllowedTile: string;
   /** 重复命中未再上报的次数（同一会话同一命令）。 */
-  readonly statsSkipped: string;
+  readonly statsSkippedTile: string;
   /** 配额放行次数（槽位 count）——防死锁出口被用到了，这一格最该被看见。 */
   readonly statsQuota: string;
   /** 慢判定分布（槽位 ms/summary）。 */
-  readonly statsSlow: string;
+  readonly statsSlowTile: string;
+  /** 慢判定瓦片的副行：阈值与 Top 面名。 */
+  readonly statsSlowSub: string;
 }
 
 /**
@@ -169,6 +175,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     cardDescription:
       "危险命令物理拦截（git 钩子绕过/灾难删除/下载即执行/长驻 dev server/密钥编辑）+ 首次编辑事实强制门（ECC gateguard 移植）",
     blockSection: "拦截",
+    fieldCount: "{count} 字段",
     judgeSection: "判定与放行",
     rulesSection: "分级规则",
     unitTimes: "次",
@@ -222,19 +229,21 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     secretLabel: "额外密钥路径模式",
     secretHint:
       "追加到内置正则（.ssh/私钥/证书/…）。每行一条正则片段（可含逗号，按行分隔不会被切碎）。加载期逐条编译：编不过或超长的会点名告警『本条未生效』，不静默放行",
-    statsTitle: "判定统计（宿主进程内存，宿主重启即清零）",
+    statsTitle: "判定统计",
+    statsTitleHint: "宿主进程内存，宿主重启即清零",
     statsRefresh: "刷新",
     statsLoading: "读取中…",
     statsUnavailable: "读不到宿主侧统计（当前部署没装远程读面）——阈值与窗口见左上的设置行。",
     statsEmpty: "还没有判定发生过。",
-    statsCalls: "判定次数：{summary}",
-    statsHits: "拦截命中（直接拒）：{summary}",
-    statsAsks: "需确认（问过用户）：{summary}",
-    statsAllowed: "已放过（按当前档位未拦）：{summary}",
-    statsSkipped: "重复命中未再上报：{count} 次",
+    statsCallsTile: "判定次数",
+    statsHitsTile: "拦截命中",
+    statsAsksTile: "需确认",
+    statsAllowedTile: "已放过",
+    statsSkippedTile: "重复未上报",
     statsQuota:
       "⚠ 配额放行 {count} 次：连续未收敛拒绝达上限后的出口，用到它说明有目标一直凑不齐证据。",
-    statsSlow: "慢判定（≥{ms}ms）：{summary}",
+    statsSlowTile: "慢判定",
+    statsSlowSub: "≥{ms}ms · {summary}",
     secretPlaceholder: String.raw`id_dsa$|\.p12$（裸片段，不要定界符与 flags；每行一条，可含逗号）`,
   },
   en: {
@@ -242,6 +251,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     cardDescription:
       "Physical blocking of dangerous commands (git hook bypass / catastrophic delete / download-and-run / long-running dev server / secret edits) + first-edit fact gate (ported from ECC gateguard)",
     blockSection: "Blocking",
+    fieldCount: "{count} fields",
     judgeSection: "Judgment and release",
     rulesSection: "Tier rules",
     unitTimes: "times",
@@ -300,20 +310,22 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     secretLabel: "Extra secret path patterns",
     secretHint:
       "Appended to the built-in regex (.ssh / private keys / certificates / ...). One regex fragment per line - commas survive because lines are the separator. Each pattern is compiled at load time; one that fails to compile or is over-long is named in a warning as not in effect, never silently allowed through",
-    statsTitle: "Judgment stats (host-process memory; cleared when the host restarts)",
+    statsTitle: "Judgment stats",
+    statsTitleHint: "Host-process memory; cleared when the host restarts",
     statsRefresh: "Refresh",
     statsLoading: "Loading…",
     statsUnavailable:
       "Host-side stats are unreachable (this deployment composes no Remote read face) — thresholds and windows live in the settings rows above.",
     statsEmpty: "No judgement has happened yet.",
-    statsCalls: "Judgments: {summary}",
-    statsHits: "Blocked (hard refusal): {summary}",
-    statsAsks: "Needs confirmation (asked the user): {summary}",
-    statsAllowed: "Allowed by the current preset: {summary}",
-    statsSkipped: "Repeat hits not re-reported: {count}",
+    statsCallsTile: "Judgments",
+    statsHitsTile: "Blocked",
+    statsAsksTile: "Asked",
+    statsAllowedTile: "Allowed",
+    statsSkippedTile: "Repeat hits not re-reported",
     statsQuota:
       "⚠ {count} quota release(s): the exit after consecutive unconverged refusals — using it means some target never gathered its evidence.",
-    statsSlow: "Slow judgements (≥{ms}ms): {summary}",
+    statsSlowTile: "Slow judgements",
+    statsSlowSub: "≥{ms}ms · {summary}",
     secretPlaceholder: String.raw`id_dsa$|\.p12$ (bare fragment, no delimiters or flags; one per line, commas allowed)`,
   },
 };

@@ -10,7 +10,11 @@
 import { createElement, useEffect, useState } from "react";
 import { z } from "zod";
 import {
+  Callout,
   CardForm,
+  FieldTwoCol,
+  KpiGrid,
+  KpiTile,
   ListField,
   NumberField,
   SaveBar,
@@ -73,17 +77,6 @@ const NS: LocaleNs = "danger-guard";
  * 卡片写的是这一条，host 拦截半读的也是这一条（两侧靠 schema-coverage / host 测试对齐）。
  */
 const SETTINGS_NS = "danger-guard-settings";
-/** 统计块保留自己的紧凑样式：它是只读领域内容，不是表单字段。颜色一律走主题令牌。 */
-const STATS_CSS = [
-  ".dgc-stats{padding:12px 0;border-top:.5px solid var(--dsw-alias-border-l2)}",
-  ".dgc-row{display:flex;align-items:center;justify-content:space-between;gap:12px}",
-  ".dgc-label{font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}",
-  ".dgc-hint{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary);margin-top:2px}",
-].join("\n");
-
-/** 错误色那一格：保存失败与统计读取失败共用（`sonarjs/no-duplicate-string` 盯着重复字面量）。 */
-const ERROR_CLASS = "dgc-saveerr";
-
 /**
  * 客户端配置表直接取官方声明：`@deepseek-ai/dsh-client-ui-settings/client` 交出的
  * `ConfigForm<T>` 与其快照 `ConfigFormSnapshot<T>`（installed
@@ -184,7 +177,13 @@ function buildBlockSection(props: SectionInputs): ReactNode {
       setField("factGateEnabled", next);
     },
   });
-  return createElement(Section, { title: t("blockSection") }, enabled, factGate);
+  // 计数徽章随字段增减维护（两个总开关）。
+  return createElement(
+    Section,
+    { title: t("blockSection"), count: t("fieldCount", { count: "2" }) },
+    enabled,
+    factGate,
+  );
 }
 
 /** 判定与放行小节：统计开关、放行次数、严格模式。 */
@@ -229,7 +228,14 @@ function buildJudgeSection(props: SectionInputs): ReactNode {
       setField("strictMode", next);
     },
   });
-  return createElement(Section, { title: t("judgeSection") }, judgeStats, maxDenies, strict);
+  // 计数徽章：一个开关 + 一个数字 + 一个开关。
+  return createElement(
+    Section,
+    { title: t("judgeSection"), count: t("fieldCount", { count: "3" }) },
+    judgeStats,
+    maxDenies,
+    strict,
+  );
 }
 
 /**
@@ -367,9 +373,10 @@ function buildRulesSection(props: SectionInputs): ReactNode {
   });
   return createElement(
     Section,
-    { title: t("rulesSection") },
-    small,
-    big,
+    // 计数徽章随字段增减维护：两份阈值 + 六份名单/词表。
+    { title: t("rulesSection"), count: t("fieldCount", { count: "8" }) },
+    // 两份写入阈值按设计稿的双列数字排布成一对；名单/词表仍是整行。
+    createElement(FieldTwoCol, null, small, big),
     refTools,
     refStrict,
     testDirs,
@@ -397,77 +404,89 @@ interface SectionInputs {
   reportInvalid: (field: string, invalid: boolean) => void;
 }
 
-/** 一条读数的形状：`面名 12 · 键名 3`（各行的取值都过这里）。 */
+/** 一条读数的形状：`面名 12 · 键名 3`（各瓦片的副行都过这里）。 */
 const statsSummary = (lines: readonly StatsLine[]): string =>
   lines.map((line) => `${line.label} ${line.count}`).join(" · ");
 
-/** 一行读数（读数块里的每一行都是它；`key` 只为 React 列表稳定，不参与渲染）。 */
+/** 一行次要说明（读数块的过渡态用它；`key` 只为 React 列表稳定，不参与渲染）。 */
 const statLine = (key: string, text: string): ReactNode =>
-  createElement("div", { className: "dgc-hint", key }, text);
+  createElement("p", { className: "dsu-hint", key }, text);
 
-/** 有快照时的各行。拆出来是为了**分开两件复杂度**：组件那层只管状态与生命周期，
+/** 面计数记录的总和：瓦片的主数值取全体，Top 面名进副行。 */
+const totalOf = (counts: Readonly<Record<string, number>>): number =>
+  Object.values(counts).reduce((sum, count) => sum + count, 0);
+
+/** 有快照时的瓦片与警示。拆出来是为了**分开两件复杂度**：组件那层只管状态与生命周期，
  *  而"哪一格要不要显示"是纯展示判断（合在一起会顶爆 cognitive-complexity）。 */
-function statsValueLines(t: Translate, snap: StatsSnapshot): ReactNode[] {
-  const lines: ReactNode[] = [];
-  const calls = topLines(snap.calls, 6);
-  const hits = topLines(snap.hits, 6);
-  const asks = topLines(snap.asks, 6);
-  const allowed = topLines(snap.allowed, 6);
-  const slow = topLines(snap.slow, 6);
-  const skipped = Object.values(snap.skipped).reduce((sum, count) => sum + count, 0);
-  // 每一格都先把文案落成变量再 push：本仓 lint 的 `max-nested-calls` 上限是 3，
-  // 而 `push(statLine(…, t(…, { … })))` 那一串正好是第四层。
-  if (calls.length > 0) {
-    const callsText = t("statsCalls", { summary: statsSummary(calls) });
-    lines.push(statLine("calls", callsText));
-  }
-  if (hits.length > 0) {
-    const hitsText = t("statsHits", { summary: statsSummary(hits) });
-    lines.push(statLine("hits", hitsText));
-  }
-  if (asks.length > 0) {
-    const asksText = t("statsAsks", { summary: statsSummary(asks) });
-    lines.push(statLine("asks", asksText));
-  }
-  if (allowed.length > 0) {
-    const allowedText = t("statsAllowed", { summary: statsSummary(allowed) });
-    lines.push(statLine("allowed", allowedText));
-  }
-  if (skipped > 0) {
-    const skippedText = t("statsSkipped", { count: String(skipped) });
-    lines.push(statLine("skipped", skippedText));
-  }
-  if (slow.length > 0) {
-    const slowText = t("statsSlow", { ms: String(snap.slowMs), summary: statsSummary(slow) });
-    lines.push(statLine("slow", slowText));
+function statsTilesOf(
+  t: Translate,
+  snap: StatsSnapshot,
+): { tiles: ReactNode[]; warnings: ReactNode[] } {
+  const tiles: ReactNode[] = [];
+  const warnings: ReactNode[] = [];
+  const faces: readonly (readonly [
+    string,
+    (
+      | "statsCallsTile"
+      | "statsHitsTile"
+      | "statsAsksTile"
+      | "statsAllowedTile"
+      | "statsSkippedTile"
+      | "statsSlowTile"
+    ),
+    Readonly<Record<string, number>>,
+    string | undefined,
+  ])[] = [
+    ["calls", "statsCallsTile", snap.calls, undefined],
+    ["hits", "statsHitsTile", snap.hits, undefined],
+    ["asks", "statsAsksTile", snap.asks, undefined],
+    ["allowed", "statsAllowedTile", snap.allowed, undefined],
+    ["skipped", "statsSkippedTile", snap.skipped, undefined],
+    [
+      "slow",
+      "statsSlowTile",
+      snap.slow,
+      t("statsSlowSub", { ms: String(snap.slowMs), summary: statsSummary(topLines(snap.slow, 6)) }),
+    ],
+  ];
+  for (const [key, labelKey, counts, sub] of faces) {
+    const hasFace = topLines(counts, 1).length > 0;
+    if (hasFace) {
+      // 每一格都先把文案落成变量再 createElement：本仓 lint 的 `max-nested-calls` 上限是 3。
+      const tile = createElement(KpiTile, { key, label: t(labelKey), value: totalOf(counts), sub });
+      tiles.push(tile);
+    }
   }
   if (snap.quotaReleases > 0) {
-    // 配额放行是"有目标一直凑不齐证据"的信号，比任何命中数都更该被看见 → 用告警色。
+    // 配额放行是"有目标一直凑不齐证据"的信号，比任何命中数都更该被看见 → 警示条。
     const quotaText = t("statsQuota", { count: String(snap.quotaReleases) });
-    lines.push(createElement("div", { className: ERROR_CLASS, key: "quota" }, quotaText));
+    warnings.push(createElement(Callout, { key: "quota", tone: "warn" }, quotaText));
   }
-  return lines;
+  return { tiles, warnings };
 }
 
 /** 读数块的四种"非正常"面 + 正常情况（纯函数：组件只负责把它的结果摆出来）。 */
-function statsLinesOf(
+function statsBodyOf(
   t: Translate,
   read: unknown,
   failed: string | null,
   snap: StatsSnapshot | null,
 ): ReactNode[] {
   if (read === undefined) {
-    return [statLine("unavailable", t("statsUnavailable"))];
+    return [createElement(Callout, { key: "unavailable", tone: "info" }, t("statsUnavailable"))];
   }
   // 读取失败照实说（含错误码），不假装"还没有判定" —— 那会把一次读取故障说成一条结论。
   if (failed !== null) {
-    return [createElement("div", { className: ERROR_CLASS, key: "failed" }, failed)];
+    return [createElement(Callout, { key: "failed", tone: "err" }, failed)];
   }
   if (snap === null) {
     return [statLine("loading", t("statsLoading"))];
   }
-  const values = statsValueLines(t, snap);
-  return values.length === 0 ? [statLine("empty", t("statsEmpty"))] : values;
+  const { tiles, warnings } = statsTilesOf(t, snap);
+  if (tiles.length === 0) {
+    return [statLine("empty", t("statsEmpty")), ...warnings];
+  }
+  return [createElement(KpiGrid, { key: "tiles" }, ...tiles), ...warnings];
 }
 
 /**
@@ -521,7 +540,7 @@ function StatsBlock(props: {
     "button",
     {
       type: "button",
-      className: "dgc-btn",
+      className: "dsu-btn dsu-btnSm",
       disabled: read === undefined || busy,
       onClick: () => {
         setTick((current) => current + 1);
@@ -529,17 +548,11 @@ function StatsBlock(props: {
     },
     t("statsRefresh"),
   );
-  const head = createElement(
-    "div",
-    { className: "dgc-row" },
-    createElement("div", { className: "dgc-label" }, t("statsTitle")),
-    refresh,
-  );
+  const body = statsBodyOf(t, read, failed, snap);
   return createElement(
-    "div",
-    { className: "dgc-stats" },
-    head,
-    ...statsLinesOf(t, read, failed, snap),
+    Section,
+    { title: t("statsTitle"), hint: t("statsTitleHint"), actions: refresh },
+    ...body,
   );
 }
 
@@ -765,13 +778,9 @@ const inject = ["slots", "configForms", "locale"];
 
 function apply(ctx: ClientCtx): void {
   ctx.effect(() => {
+    // 统计块的私有样式已收进 shared card-ui v2（KPI 瓦片 / Callout），这里只注入共享一份。
     const disposeShared = ensureCardUiCss();
-    const tag = document.createElement("style");
-    tag.id = "dsh-card-ui-css-danger-guard";
-    tag.textContent = STATS_CSS;
-    document.head.append(tag);
     return () => {
-      tag.remove();
       disposeShared();
     };
   }, "danger-guard-card: styles");

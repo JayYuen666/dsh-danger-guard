@@ -13,6 +13,13 @@
 // `stateOf(session, key)`，读错来源且不报错。
 
 import { asLedger, LEDGER_KEY, toolLedgerProjection } from "./tool-ledger.ts";
+// 双协议的判别件（ProjectionHandle / isDisposer / isProjectionHandle 与先 handle 后
+// disposer 的判序）由 shared `./lib/session-projection` 收编——两仓的这三段 md5 一致。
+// 挂载主体的失败策略（本包 fail-open，session-rescue fail-fast）是真实分叉，留在本文件。
+import {
+  isDisposer,
+  isProjectionHandle,
+} from "@jayyuen66/dsh-plugin-shared/lib/session-projection";
 
 /**
  * `ctx.sessionProjections` 的本包读取接口。`stateOf` 的第一参按 `unknown` 收（官方钉名义类
@@ -22,25 +29,6 @@ export interface ProjectionsRegistry {
   register: (definition: typeof toolLedgerProjection) => unknown;
   stateOf: (session: unknown, key: typeof LEDGER_KEY) => unknown;
 }
-
-/** 新版注册的结果：`await register()` 之后拿到的那一枚。 */
-interface ProjectionHandle {
-  readonly stateOf: (session: unknown) => unknown;
-  readonly dispose: () => Promise<void> | undefined;
-}
-
-/** 旧版注册的结果就是 disposer 本身。 */
-const isDisposer = (value: unknown): value is () => void => typeof value === "function";
-
-/** 新版注册的结果：可读、可释放。判据只看这两位方法在不在，**不看可调用性**——宿主当前的
- *  handle 是对象，但可调用性本是旧协议（disposer）的唯一判据，把它同时当成排除条件时，
- *  一份「可调用 + 带 stateOf/dispose」的合成值会掉进旧读口，去调注册表上已弃用的
- *  `stateOf(session, key)`，读错来源且不报错。 */
-const isProjectionHandle = (value: unknown): value is ProjectionHandle =>
-  (typeof value === "object" || typeof value === "function") &&
-  value !== null &&
-  typeof (value as { stateOf?: unknown }).stateOf === "function" &&
-  typeof (value as { dispose?: unknown }).dispose === "function";
 
 /** 挂载这一段要的外部动作：发布/撤下读口，以及注册一条随插件卸载的收尾。 */
 export interface LedgerReadFace {

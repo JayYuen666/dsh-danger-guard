@@ -1,3 +1,13 @@
+## 0.1.20
+
+宿主基线抬到 `0.2.2-rc.5`；集成层的单发派发换官方 testkit 的同构执行位。拦截规则与默认配置不变。
+
+### Changed
+
+- **宿主依赖线抬到 `0.2.2-rc.5`**：devDependencies 全族精确钉 rc.5，`engines.dsh` 与 dsh 家族 peer 同一条窗口；shared 经 catalog 抬到 `^0.2.12`——本仓收编的 `./lib/session-projection` 与 `./lib/typert-client` 两个子路径随 shared 0.2.12 发布，lockfile 经 `pnpm install --lockfile-only` 重解到 0.2.12。两份 README 的支持窗口徽章同步。
+- **集成层 dispatch 换官方 `executeModelToolFixture`**：`test/host-spine.ts` 手写的单发批次包装（包成一条 `calls` → 拆唯一结果 → 缺失抛错）与官方 tool-testkit 的执行位逐位同构，删除后既有调用点零改动；`arguments` 在夹具内部才 stringify，原始对象直接给。devDependencies 加 `@deepseek-ai/dsh-tool-testkit` 与 `@deepseek-ai/dsh-tool-executor-ptc`（后者供 shared `./lib/tool-events` 的官方类型在本仓解析）。
+- **投影挂载判别件与读取器骨架收编 shared**：`lib/projection-reader.ts` 的 `ProjectionHandle` / `isDisposer` / `isProjectionHandle` 三段（与 session-rescue 的副本 md5 一致）改从 `./lib/session-projection` 取用，判序由 shared 固定、fail-open 策略留本地；`src/stats-reader.ts` 的 `RemoteHost` / `isRemoteMounter` 改从 `./lib/typert-client` 取用（七仓逐字副本的正主）。
+
 ## 0.1.19
 
 设置卡组件不再打进 `client.js`，改回外置 shared 客户端行，由 `cordis.patch.yml` 新增的固定 id 供应行装载；`@jayyuen66/dsh-plugin-shared` 抬到 `^0.2.10`，吸底保存条的暗带与旧固定 id 样式冲突随 shared 修复。client 产物随外置降到实测 21,488 B，预算收紧到 22,000 B。拦截规则与默认配置不变。
