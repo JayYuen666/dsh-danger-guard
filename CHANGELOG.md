@@ -1,3 +1,7 @@
+## 0.1.21
+
+宿主基线切到 `dsh 0.2.3-alpha.2`（Node `^24.22.3 || >=26.13.1`），devDependencies 与两种 README 徽章同步；shared 经 catalog 抬到 `^0.2.13`。设置卡随 shared 的 v3 视觉层更新，并新增 `DgPanelSection` 会话面板段（id `danger-guard-stats`）；客户端卡片测试同步槽位与清理计数。拦截规则与默认配置不变。
+
 ## 0.1.20
 
 宿主基线抬到 `0.2.2-rc.5`；集成层的单发派发换官方 testkit 的同构执行位。拦截规则与默认配置不变。

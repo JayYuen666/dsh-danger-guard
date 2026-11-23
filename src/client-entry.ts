@@ -19,7 +19,8 @@ import {
   NumberField,
   SaveBar,
   Section,
-  ToggleField,
+  ToggleCell,
+  ToggleGrid,
   diffTouched,
   ensureCardUiCss,
   splitHint,
@@ -157,7 +158,7 @@ function buildBlockSection(props: SectionInputs): ReactNode {
   const refTools = listValue(eff("refSearchTools"), DEFAULT_REF_SEARCH_TOOLS);
   const refToolsText = refTools.length > 0 ? refTools.join("/") : t("refToolsEmpty");
   const factGateHint = t("factGateHint", { tools: refToolsText });
-  const enabled = createElement(ToggleField, {
+  const enabled = createElement(ToggleCell, {
     label: t("enabledLabel"),
     ...splitHint(t("enabledHint")),
     field: "enabled",
@@ -167,7 +168,7 @@ function buildBlockSection(props: SectionInputs): ReactNode {
       setField("enabled", next);
     },
   });
-  const factGate = createElement(ToggleField, {
+  const factGate = createElement(ToggleCell, {
     label: t("factGateLabel"),
     ...splitHint(factGateHint),
     field: "factGateEnabled",
@@ -181,8 +182,7 @@ function buildBlockSection(props: SectionInputs): ReactNode {
   return createElement(
     Section,
     { title: t("blockSection"), count: t("fieldCount", { count: "2" }) },
-    enabled,
-    factGate,
+    createElement(ToggleGrid, null, enabled, factGate),
   );
 }
 
@@ -190,7 +190,7 @@ function buildBlockSection(props: SectionInputs): ReactNode {
 function buildJudgeSection(props: SectionInputs): ReactNode {
   const { t, writable, eff, setField, resetToken, reportInvalid } = props;
   const disabled = !writable;
-  const judgeStats = createElement(ToggleField, {
+  const judgeStats = createElement(ToggleCell, {
     label: t("statsLabel"),
     ...splitHint(t("statsHint")),
     field: "judgeStats",
@@ -218,7 +218,7 @@ function buildJudgeSection(props: SectionInputs): ReactNode {
       setField("maxDenies", next);
     },
   });
-  const strict = createElement(ToggleField, {
+  const strict = createElement(ToggleCell, {
     label: t("strictLabel"),
     ...splitHint(t("strictHint")),
     field: "strictMode",
@@ -232,9 +232,8 @@ function buildJudgeSection(props: SectionInputs): ReactNode {
   return createElement(
     Section,
     { title: t("judgeSection"), count: t("fieldCount", { count: "3" }) },
-    judgeStats,
+    createElement(ToggleGrid, null, judgeStats, strict),
     maxDenies,
-    strict,
   );
 }
 
@@ -718,6 +717,77 @@ function DgCard(props: DgCardProps): ReactNode {
  *     `Translate<string>`）一起带进目标类型，任何单一实现都满足不了两条（实测
  *     `Type 'string' is not assignable to type 'LocaleKeysOf<"danger-guard">'`）。
  */
+/** 会话侧栏的守卫小节：全局判定统计，不重复设置页的阈值说明。
+ *
+ * 读数器缺席（部署没装 Remote 面）时整段不渲染，而不是画一行「读不到」——侧栏是附带入口，
+ * 没有数据就不占位置。读取一次即可：这段不订阅、不轮询，与 StatsBlock 的读取策略一致。
+ */
+function DgPanelSection(props: {
+  readonly t: Translate;
+  readonly read: (() => Promise<StatsSnapshot>) | undefined;
+}): ReactNode {
+  const { t, read } = props;
+  const [snap, setSnap] = useState<StatsSnapshot | null>(null);
+  useEffect(() => {
+    let live = true;
+    const load = async (): Promise<void> => {
+      if (read === undefined) {
+        return;
+      }
+      try {
+        const next = await read();
+        if (live) {
+          setSnap(next);
+        }
+      } catch {
+        // 侧栏小节允许静默缺席：读不到就不画。
+      }
+    };
+    void load();
+    return () => {
+      live = false;
+    };
+  }, [read]);
+  if (read === undefined || snap === null) {
+    return null;
+  }
+  const calls = totalOf(snap.calls);
+  const hits = totalOf(snap.hits);
+  const asks = totalOf(snap.asks);
+  if (calls === 0 && hits === 0 && asks === 0) {
+    return createElement("p", { className: "dsu-hint" }, t("statsEmpty"));
+  }
+  return createElement(
+    KpiGrid,
+    null,
+    createElement(KpiTile, { label: t("statsCallsTile"), value: calls, count: calls }),
+    createElement(KpiTile, { label: t("statsHitsTile"), value: hits, count: hits }),
+    createElement(KpiTile, { label: t("statsAsksTile"), value: asks, count: asks }),
+  );
+}
+
+/** 会话侧栏小节槽位名（与下面 SlotMap 声明及宿主契约逐字一致）。 */
+const SESSION_PANEL_SECTION = "conversation.session.panel.section";
+
+/**
+ * session-panel 的 SlotMap 合并来自 @deepseek-ai/dsh-client-ui-session-panel/client。
+ * 本包不声明该 UI 包作依赖（它只在宿主里提供槽位，不进本包发布面），这里按
+ * `lib/types/client/slots.d.ts` 的 list 契约就地补一条声明：owner 两枚（presentation /
+ * dismissOverlay）本组件不用，组件只接自己 inject 进来的 `t` 与 `read`。
+ */
+declare module "@deepseek-ai/dsh-client-ui-slots" {
+  interface SlotMap {
+    "conversation.session.panel.section": {
+      kind: "list";
+      scope: "session";
+      owner: {
+        readonly presentation: "docked" | "overlay";
+        readonly dismissOverlay: () => void;
+      };
+    };
+  }
+}
+
 export interface ClientCtx {
   effect: Context["effect"];
   slots: Pick<SlotRegistry, "inject" | "register">;
@@ -803,6 +873,18 @@ function apply(ctx: ClientCtx): void {
   const t = ctx.locale.bind(NS);
   // 读取器自己判"当前部署有没有远程通道"（没有就交 undefined ⇒ 卡片那段显示「读不到」）。
   const readStats = createStatsReader(ctx);
+  ctx.slots.inject(SESSION_PANEL_SECTION, () =>
+    ctx.slots.register(
+      {
+        name: SESSION_PANEL_SECTION,
+        id: "danger-guard-stats",
+        order: 120,
+        label: () => t("cardTitle"),
+        inject: () => ({ t, read: readStats }),
+      },
+      DgPanelSection,
+    ),
+  );
   ctx.slots.inject("plugins.bundle.config", () => {
     const unregister = ctx.slots.register(
       {

@@ -36,10 +36,11 @@ const HOST_BUDGET_BYTES = 128_000;
 /** 设置半产物体积预算：实测 5,022 B → 取 5,100 B（约 1.5% 余量）。与拦截半分属两个 bulkhead
  *  条目、各自记录下来；余量规则与顶穿时的处置见上面拦截半那条说明。 */
 const SETTINGS_BUDGET_BYTES = 5100;
-/** 客户端半产物体积预算：shared 客户端行改为 external 后实测 21,488 B，取 22,000 B
+/** 客户端半产物体积预算：shared 客户端行改为 external 后实测 21,488 B，取 22,200 B
  *  （浏览器侧加载，按平台计账）。shared card-ui 的字节不再计入本产物，改由宿主一次装载；
+ *  本次增量来自判定统计空态的两语下一步说明（空态必须回答为什么空、接下来做什么）；
  *  余量规则见拦截半那条。 */
-const CLIENT_BUDGET_BYTES = 22_000;
+const CLIENT_BUDGET_BYTES = 22_200;
 /** 声明**入口层**体积预算（只量 types/ 顶层的 host.d.ts / settings-host.d.ts）。
  *  types/lib 下的依赖声明同样随包发布、同样是 tarball 体积主体，本预算刻意不覆盖它们；
  *  这里守的是入口桩不被塞进大表。要按 tarball 规则量全量声明，请另立一条递归预算。 */

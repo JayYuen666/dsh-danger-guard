@@ -234,7 +234,8 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     statsRefresh: "刷新",
     statsLoading: "读取中…",
     statsUnavailable: "读不到宿主侧统计（当前部署没装远程读面）——阈值与窗口见左上的设置行。",
-    statsEmpty: "还没有判定发生过。",
+    statsEmpty:
+      "还没有判定发生过。下一次 Agent 执行需要取证或确认的命令时，这里会出现调用、拦截与需确认的统计。",
     statsCallsTile: "判定次数",
     statsHitsTile: "拦截命中",
     statsAsksTile: "需确认",
@@ -316,7 +317,8 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     statsLoading: "Loading…",
     statsUnavailable:
       "Host-side stats are unreachable (this deployment composes no Remote read face) — thresholds and windows live in the settings rows above.",
-    statsEmpty: "No judgement has happened yet.",
+    statsEmpty:
+      "No judgement has happened yet. The next command that needs evidence or confirmation will populate calls, blocks and confirmations here.",
     statsCallsTile: "Judgments",
     statsHitsTile: "Blocked",
     statsAsksTile: "Asked",

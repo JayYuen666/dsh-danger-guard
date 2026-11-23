@@ -585,7 +585,7 @@ describe("b11：danger-guard 设置卡", () => {
   function hintTextOf(field: string): string {
     const control = container.querySelector<HTMLElement>(`[data-field="${field}"]`);
     assert.ok(control !== null, `${field} 控件已渲染`);
-    const row = control.closest(".dsu-field");
+    const row = control.closest(".dsu-field, .dsu-toggleCell");
     assert.ok(row !== null, `${field} 控件落在设置行内`);
     const hint = row.querySelector(".dsu-hint")?.textContent ?? "";
     const detail = row.querySelector(".dsu-tip")?.textContent ?? "";
@@ -1199,17 +1199,22 @@ describe("b11：danger-guard 设置卡", () => {
     // slot-contract.d.ts:96-100「keyed by the bundle's package name」；
     // dsh-client-ui-renderer/lib/client.js:1154 逐字相等匹配（错一个字符=卡片不渲染）。
     const bundlePkg = await profileBundleName();
-    assert.deepEqual(slotDescs, [{ name: "plugins.bundle.config", key: bundlePkg }]);
+    const bundleSlots = slotDescs.filter((slot) => slot.name === "plugins.bundle.config");
+    assert.deepEqual(bundleSlots, [{ name: "plugins.bundle.config", key: bundlePkg }]);
+    assert.ok(
+      slotDescs.some((slot) => slot.name === "conversation.session.panel.section"),
+      "会话侧栏守卫小节已登记",
+    );
     // 反向漂移钉：三条 bulkhead 串各归各位，谁也不许顶替谁。
-    assert.equal(slotDescs.length, 1, "只登记一张 bundle 设置卡");
+    assert.equal(bundleSlots.length, 1, "只登记一张 bundle 设置卡");
     assert.notEqual(
-      slotDescs[0]?.key,
+      bundleSlots[0]?.key,
       GUARD_ENTRY_ID,
       "key 不得退回裸条目 id：0.1.7 迁移第一版正是这样，卡片在插件页面上根本不渲染",
     );
     assert.notEqual(slotDescs[0]?.key, SETTINGS_ENTRY_ID, "key 也不是设置条目 id");
     assert.ok(
-      typeof slotDescs[0]?.key === "string" && !slotDescs[0].key.includes("#"),
+      typeof bundleSlots[0]?.key === "string" && !bundleSlots[0].key.includes("#"),
       "bundle 槽的 key 不含 #（<pkg>#<rowId> 是 plugins.row.config 的写法）",
     );
     // 正反向同时钉住 bulkhead 的两行：设置命名空间 = **设置行**（name 为子路径导出）的 id，
@@ -1251,7 +1256,7 @@ describe("b11：danger-guard 设置卡", () => {
     // slot disposer：只注销登记。`form.dispose` 是抛错绊线——测试替身在 loadCard 期间只记录
     // 不调用（真实槽位 collapse 时才卸载），这里连续调用两次，既证明 disposer 不销毁
     // provider 持有的共享表单，也证明重复回收幂等。
-    assert.equal(slotCleanups.length, 1, "slots.inject 工厂产出一个 disposer");
+    assert.equal(slotCleanups.length, 2, "设置卡与会话侧栏两个槽各产出一个 disposer");
     for (const cleanup of slotCleanups) {
       assert.doesNotThrow(() => {
         cleanup();
