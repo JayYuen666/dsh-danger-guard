@@ -139,8 +139,76 @@ const DOCKER_PRUNE_GROUPS: ReadonlySet<string> = new Set([
   "network",
 ]);
 
+/** `docker compose` 自己那层带取值的全局旗标：`-f compose.yml`、`--profile prod`。
+ *  它们出现在 `compose` 与子命令之间，不跳取值会把 compose 文件名读成子命令。 */
+const COMPOSE_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  "-f",
+  "--file",
+  "-p",
+  "--project-name",
+  "--project-directory",
+  "--env-file",
+  "--profile",
+  "--ansi",
+  "--progress",
+  "--parallel",
+]);
+
+/** 取一枚词的旗标主名（`--volumes=true` 的 `=` 之前那一段）。 */
+const flagNameOf = (word: string): string => {
+  const equals = word.indexOf("=");
+  return equals === -1 ? word : word.slice(0, equals);
+};
+
+/** `docker compose down -v/--volumes`：删掉 Compose 文件里声明的**命名卷**，数据不可撤销。
+ *
+ *  只认 `down` 子命令之后的 volume 旗标：`docker compose up -v` 不是删数据，
+ *  `docker compose config --volumes` 也只是打印清单。`--volumes=false` 不删。
+ *  `-v` 在 compose 的其它子命令里含义不同，所以位置必须钉在 `down` 之后——
+ *  这是"按真实 CLI 语义判"而不是"见到 -v 就当删卷"。
+ */
+function composeVolumeFlagAfterDown(args: readonly string[]): boolean {
+  let sawDown = false;
+  let skipValue = false;
+  let afterTerminator = false;
+  for (const word of args) {
+    const flag = flagNameOf(word);
+    const equals = word.indexOf("=");
+    if (skipValue) {
+      skipValue = false;
+    } else if (!afterTerminator && word === OPTION_TERMINATOR) {
+      afterTerminator = true;
+    } else if (!afterTerminator && word.startsWith("-")) {
+      const volumeOn =
+        sawDown &&
+        (flag === "-v" || flag === "--volumes") &&
+        (equals === -1 || word.slice(equals + 1).toLowerCase() !== "false");
+      if (volumeOn) {
+        return true;
+      }
+      skipValue = equals === -1 && COMPOSE_VALUE_FLAGS.has(flag);
+    } else if (!sawDown && word === "down") {
+      sawDown = true;
+    }
+  }
+  return false;
+}
+
+function composeDownVolumes(words: readonly string[]): boolean {
+  // 先剥 docker 自己的全局旗标，再确认第一个位置词是 compose。
+  const [sub] = commandWordsOf(words, DOCKER_VALUE_FLAGS);
+  if (sub !== "compose") {
+    return false;
+  }
+  const composeAt = words.indexOf("compose");
+  return composeVolumeFlagAfterDown(words.slice(composeAt + 1));
+}
+
 export function dockerDanger(words: readonly string[]): BashDenialKey | undefined {
   const [sub, next] = commandWordsOf(words, DOCKER_VALUE_FLAGS);
+  if (composeDownVolumes(words)) {
+    return "composeDownVolumes";
+  }
   return sub === "prune" || (sub !== undefined && DOCKER_PRUNE_GROUPS.has(sub) && next === "prune")
     ? "dockerPrune"
     : undefined;

@@ -5,6 +5,7 @@
 
 import type { JudgeCost } from "./judge-stats.ts";
 import type { WriteTarget, WriteTargetScan } from "./write-targets.ts";
+import { isApplyPatchToolName } from "./tool-names.ts";
 
 interface SecretDecision {
   readonly reason: string | undefined;
@@ -43,9 +44,10 @@ export function writeGateDecisionOf(
   args: Record<string, unknown>,
 ): WriteGateDecision {
   const scan = hooks.scan(name, args);
-  if (name === "apply_patch" && (scan.targets.length === 0 || scan.overflow)) {
+  if (isApplyPatchToolName(name) && (scan.targets.length === 0 || scan.overflow)) {
     // 补丁为空/语法未被官方解析器接受/目标数超过事实门预算：无法核对凭据面与先读证据。
-    // 这是本工具自己的 fail-closed，不受 `factGateEnabled` 影响。
+    // 这是本工具自己的 fail-closed，不受 `factGateEnabled` 影响。MCP 同名工具也算补丁类，
+    // 否则 `mcp__<server>__apply_patch` 的目标解析失败会掉进 fact 门并得到 undefined 放行。
     return { deny: hooks.opaque, secretCost: undefined };
   }
   const secret = hooks.secret(name, args);

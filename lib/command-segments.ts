@@ -933,6 +933,9 @@ const segmentStructure = (segment: Segment, budget: number): string =>
 /** 断段的产出：段源文本 + 是否还有**没展开到**的层。 */
 export interface Segments {
   texts: string[];
+  /** 与 `texts` 等长：该段是否由上一段经 `|` 连接。`;` / `&&` / `||` 一律为 false；
+   *  第一段也为 false。需要判断「上一条命令的输出是否真的喂给了这一条」的调用方读它。 */
+  pipeConnected: boolean[];
   /** `true` ⇒ 更深处的 region 体**没被扫过**：调用方不得拿"这段清单里没有危险"当放行依据。 */
   truncated: boolean;
 }
@@ -943,22 +946,36 @@ export interface Segments {
  *  `tools.guard` 的调用链上，宿主怎么兜这份错误不由本包决定。界外一律升格为需确认。 */
 export const REGION_MAX_DEPTH = 16;
 
-/** 本层的段文本进 `texts`；空段不占位。 */
-function pushSegmentTexts(segments: readonly Segment[], texts: string[]): void {
+/** 本层的段文本进 `texts`，并把「是否由上一段经管道连接」写进同位置的 `pipeConnected`。
+ *  空段不占位，但它的终止符仍会影响下一段的连接判断（例如 `echo . ; ; xargs`）。 */
+function pushSegmentTexts(
+  segments: readonly Segment[],
+  texts: string[],
+  pipeConnected: boolean[],
+): void {
+  let previousTerminator = "";
   for (const segment of segments) {
     const text = segmentSource(segment);
+    const connected = previousTerminator === "|";
     if (text.trim().length > 0) {
       texts.push(text);
+      pipeConnected.push(connected);
     }
+    previousTerminator = segment.terminator;
   }
 }
 
 /** 展开一层：本层的段进 `texts`，本层 region/heredoc 体留给下一层；返回是否被迫截断。
  *  每一枚兄弟都展开，不因前一枚截断而短路。递归深度由 `REGION_MAX_DEPTH` 界住
  *  （这才是栈安全的来源，不是"输入不会太长"）。 */
-function expandOneLevel(src: string, budget: number, texts: string[]): boolean {
+function expandOneLevel(
+  src: string,
+  budget: number,
+  texts: string[],
+  pipeConnected: boolean[],
+): boolean {
   const result = scan(src);
-  pushSegmentTexts(result.segments, texts);
+  pushSegmentTexts(result.segments, texts, pipeConnected);
   const sources = [...result.regions, ...result.bodies].filter((source) => source.length > 0);
   if (sources.length === 0) {
     return false;
@@ -968,7 +985,7 @@ function expandOneLevel(src: string, budget: number, texts: string[]): boolean {
   }
   let truncated = false;
   for (const source of sources) {
-    const childTruncated = expandOneLevel(source, budget - 1, texts);
+    const childTruncated = expandOneLevel(source, budget - 1, texts, pipeConnected);
     if (childTruncated) {
       truncated = true;
     }
@@ -983,7 +1000,12 @@ function expandOneLevel(src: string, budget: number, texts: string[]): boolean {
  */
 export function splitSegments(command: string): Segments {
   const texts: string[] = [];
-  return { texts, truncated: expandOneLevel(command, REGION_MAX_DEPTH, texts) };
+  const pipeConnected: boolean[] = [];
+  return {
+    texts,
+    pipeConnected,
+    truncated: expandOneLevel(command, REGION_MAX_DEPTH, texts, pipeConnected),
+  };
 }
 
 /**

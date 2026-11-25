@@ -1,3 +1,33 @@
+## 0.1.22
+
+按 dsh 真实宿主与当前 CLI 补规则面：GitHub 远端破坏、版本化 Python 解释器、解释器代码串的独立档位、Compose 删卷与 terraform destroy 别名；MCP 文件别名同步扩面；`find`/`xargs` 的删除档位与危险聚合按真实命令补全。
+
+### Added
+
+- **`findDelete` 独立规则键**：带谓词/范围的 `find` 删除（`find . -name '*.ts' -delete`、`-maxdepth`、`-exec rm`）不再落到工作区档会放行的 `nestedShellUnconfirmed`，改判 `ask`；无过滤的 `find . -delete` 仍是 `rmrf` 硬拒。只读档 `deny`，完全权限问不了时放行，自动审查交 reviewer。
+- **`find`/`xargs` 的严重度聚合**：`find … -delete; find / -delete` 不再被前段的 `ask` 截断，后段 `rmrf` 会覆盖；同一档内保持先到先得。`-exec`/xargs 命令自身的目标（`find … -exec rm -rf /`、`echo foo | xargs rm -rf /`、`sh -c` 包装）先于起始路径/上游目标结算，多个 `-exec` 逐条看。
+- **`find` 的密钥面**：起始路径、`-name`/`-path` 取值、`-delete`、`-exec rm`、`-exec cat` 与 `sh -c` 包装均进 `secretDelete` / `secretRead`；花括号目标（`.env{,.local}`、`~/.ssh/{id_rsa,config}`）按 shell 语义展开后逐项判。
+- **MCP 文件台账**：`mcp__<server>__read_multiple_files` 的 `paths` / `file_paths` 数组逐个目标记读取基线与结算；MCP 写工具按名字末段进 `editCalls`，写入文本取 `content` / `file_text` / `new_text` / `new_string` / `new_str` / `text`。`move_file` / `rename_file` / `delete_file` 仍不猜。
+- **无沙箱的 `nestedShellUnconfirmed`**：MCP shell 或显式 `sandbox_permissions` 让路、且模式不是完全权限时，工作区档的 `allow` 改为未知档 `ask`；完全权限档的 allow 来自用户选择，不受影响。
+- **`interpreterCode` 识别扩面**：`uv run` / `poetry run` / `pipenv run` / `pdm` / `hatch` / `rye`、`pnpm exec` / `npm exec` / `yarn exec` / `bun`、`npx` / `bunx`，以及 `-cprint(1)` / `-lc` / `--eval=` 这类附着旗标；带值启动器旗标（`--project` 等）连取值一起跳过。
+
+- **`interpreterCode` 独立规则键**：`python3.14 -c` / `python -` / `node -e` / `perl -e` 等代码串或 stdin 执行不再与 `nestedShellUnconfirmed` 混同。工作区档对它保持 `ask`——代码串可发起网络/进程副作用，沙箱只保护写入，不能按"沙箱仍在兜底"放行；完全权限问不了时仍放行，自动审查交 reviewer。中英文案、逐档矩阵与 README 表同步。
+- **版本化 Python 解释器**：`python3.14`、`python3.12`、`python3.14t`、`python3.6m`、`pypy3.11` 等按同一家族识别；`-c`、`-`、`curl | python3.14`、`python3.14 manage.py migrate` 均进判据。`uv run python -c` / `poetry run python -c` 先剥 `run` 启动器再判。
+- **`docker compose down -v/--volumes`**：新增 `composeDownVolumes`（`ask` 档），只认 `down` 子命令之后的卷旗标；`--volumes=false`、`docker compose config --volumes`、`docker compose up -v` 不判。
+- **`terraform apply -destroy`**：官方文档确认它是 `terraform destroy` 的别名，现与 `destroy` 同判 `tfDestroy`；`-destroy=false` 不判，`plan -destroy` 仍只是打印。
+- **GitHub 远端破坏补面**：`gh release delete-asset`、`gh project delete`、`gh codespace delete`，以及可见的 `gh api graphql` mutation 进 `ghDestroy`；GraphQL query 与只读查询不误拦。
+- **MCP 文件别名扩面**：写类末段新增 `append_file`、`replace_text`、`insert_text`、`delete_text_range`、`apply_diff`；读证据新增 `read_multiple_files`。`move_file` / `rename_file` / `delete_file` 这类成对目标或删除形态仍不猜，边界在 README 中写明。
+
+### Tests
+
+- 新增 `find`/`xargs` 的档位与严重度聚合、`-exec`/xargs 命令自带目标、`find` 密钥面与花括号展开、多个 `-exec`、无沙箱 `nestedShellUnconfirmed`、MCP 多路径读取、启动器与附着旗标的逐条断言；逐档矩阵补 `findDelete`。
+- 新增 gh 新命令、GraphQL mutation/query、版本化 Python、stdin 执行、`uv run` / `poetry run`、Compose 卷删除、terraform `-destroy` 与 MCP 别名的逐条断言；逐档矩阵补 `interpreterCode` 与 `composeDownVolumes` 两行。
+- 新增 win32 平台桩 + Windows 形态家目录的回归：`rm -rf *` / `rm -rf *.log` 放行，`rm -rf /*` 仍命中 `rmrf`；该断言在 macOS/Linux 上也可复跑，不依赖 windows-latest 那一格。
+
+### Fixed
+
+- **相对 glob 不再拿 Windows 家目录当展开候选**：`rm -rf *` 在 windows-latest 上被误判为 `rmrf`——`globCouldHitProtected` 把 `home` 与系统前缀一起做探针，而 Windows 家目录 `C:\Users\…` 不含 `/`，`*` 编译出的 `[^/]*` 会整段命中它；POSIX 家目录含 `/`，同一命令在 macOS/Linux 上不复发。探针迁到 `lib/glob-match.ts` 的 `absoluteGlobCouldHit` 并在入口只接受绝对 glob：相对 `*` 的展开域是当前目录，家目录/上级目录由 `isDisasterTarget` 的专用分支另判；`/*`、`/e?c` 等绝对 glob 照旧按受保护前缀判。
+
 ## 0.1.21
 
 宿主基线切到 `dsh 0.2.3-alpha.2`（Node `^24.22.3 || >=26.13.1`），devDependencies 与两种 README 徽章同步；shared 经 catalog 抬到 `^0.2.13`。设置卡随 shared 的 v3 视觉层更新，并新增 `DgPanelSection` 会话面板段（id `danger-guard-stats`）；客户端卡片测试同步槽位与清理计数。拦截规则与默认配置不变。

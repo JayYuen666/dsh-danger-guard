@@ -22,6 +22,8 @@ One value has no knob on the card: `preflightEnabled` is volatile, but the setti
 
 Nothing it cannot supply itself — no external CLI, interpreter or credential. `zg_search` counts as evidence only when the Zvec indexed search plugin is installed.
 
+MCP command tools are recognized only when the tool name starts with `mcp__` and the arguments carry a `command` / `cmd` string; MCP edit tools are recognized by their final name segment (`write_file`, `edit_file`, `create_file`, `replace_in_file`, `patch_file`, `str_replace`, `write_text_file`, `append_file`, `replace_text`, `insert_text`, `delete_text_range`, `apply_diff`, `apply_patch`), and write text from `content` / `file_text` / `new_text` / `new_string` / `new_str` / `text` enters this session's own edit ledger; read evidence also accepts `read_multiple_files`, whose `paths` / `file_paths` array records and settles each target. No MCP server configuration, credential or connection is read; other MCP tool names stay outside the guard.
+
 ## Further detail
 
 The rule vocabulary, the permission-preset behaviour, the sandbox deferral and the known boundaries are in the package README (`README.md` / `README.zh-CN.md`).

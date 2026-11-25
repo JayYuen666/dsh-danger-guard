@@ -22,6 +22,8 @@
 
 不需要任何本插件给不了的东西：没有外部 CLI、没有解释器、没有凭据。`zg_search` 只有在装了「Zvec 索引检索」插件时才存在。
 
+MCP 命令工具只在工具名以 `mcp__` 开头、且参数带 `command` / `cmd` 字符串时才认；MCP 编辑工具按名字末段认（`write_file`、`edit_file`、`create_file`、`replace_in_file`、`patch_file`、`str_replace`、`write_text_file`、`append_file`、`replace_text`、`insert_text`、`delete_text_range`、`apply_diff`、`apply_patch`），写入文本取 `content` / `file_text` / `new_text` / `new_string` / `new_str` / `text` 记入本会话自己的编辑台账；读取末段另含 `read_multiple_files`，其 `paths` / `file_paths` 数组逐个目标记读取基线与结算。插件不读 MCP server 配置、凭据或连接；其他 MCP 工具名不在这条面上。
+
 ## 更完整的说明
 
 规则词表、四种权限预设的差别、沙箱让位边界都写在随包的 README（`README.md` / `README.zh-CN.md`）。

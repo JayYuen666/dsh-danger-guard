@@ -187,14 +187,22 @@ function makeWithLog(
   });
 }
 
+/** 宿主 `ToolGuard` 的两种结果：纯文本，或带结构化身份的 `ToolGuardDenial`。 */
+type GuardResult =
+  | string
+  | { readonly reason: string; readonly info: { readonly name: string; readonly code: string } }
+  | undefined;
+
 interface GuardCall {
   /** 载荷按 unknown 记录形状声明：测试里既传 {name, arguments} 也传带 agent 链的完整 exec。 */
   fn: (exec: Record<string, unknown>) => string | undefined;
+  /** 原始结果（不折成文本）：只给结构化 info 的用例读。 */
+  raw: (exec: Record<string, unknown>) => GuardResult;
 }
 
 interface MockCtx {
   tools: {
-    guard: (fn: (exec: Record<string, unknown>) => string | undefined) => () => void;
+    guard: (fn: (exec: Record<string, unknown>) => GuardResult) => () => void;
   };
   /** 0.1.7 的 settings 面：拦截半只用 describe()（跨命名空间读 locale 偏好）。
    *  register / get / installSection 已从宿主删除；configure() 归**设置条目**。 */
@@ -281,7 +289,15 @@ function createMockCtx(): MockCtx {
     extraServices: {},
     tools: {
       guard(fn) {
-        ctx.guardInstalled = { fn };
+        // 存量用例断言的是模型看到的文案；这里把结构化拒绝折回 reason，另留 raw 给
+        // 结构化身份用例读 `info`。折算只改测试观察面，不改变生产路径。
+        ctx.guardInstalled = {
+          fn: (exec) => {
+            const result = fn(exec);
+            return typeof result === "string" ? result : result?.reason;
+          },
+          raw: fn,
+        };
         return () => {
           ctx.guardInstalled = null;
         };
@@ -2222,6 +2238,20 @@ const terminalOf = (ctx: MockCtx, args: Record<string, unknown>): string | undef
 
 /** `tools/pre-execute` 在 mock 里的监听器名（三处用例共用，避免重复字符串漂移）。 */
 const PRE_EXECUTE_EVENT = "tools/pre-execute";
+
+describe("结构化拒绝身份", () => {
+  it("b1-info: 拒绝结果带稳定身份（name=错误类名，code=规则键）", () => {
+    const gctx = bootMode(WRITABLE_MODE, "never");
+    const result = gctx.guardInstalled!.raw({
+      name: "bash",
+      arguments: { command: RESET_HARD_COMMAND },
+    });
+    assert.ok(typeof result === "object", "结构化拒绝应是对象");
+    assert.equal(result.info.name, "DangerGuardDenial");
+    assert.equal(result.info.code, "gitResetHard");
+    assert.match(result.reason, /git reset --hard/u);
+  });
+});
 
 describe("按权限档位分叉：预设驱动判定", () => {
   it("`pipeShell`：只读档放行、工作区档硬拒（用户对这两档的取舍不同）", () => {

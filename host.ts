@@ -88,7 +88,8 @@ import type { DispositionFactory } from "./lib/effective-disposition.ts";
 import { presenceOfAttempt } from "./lib/fs-errors.ts";
 import type { StatAttempt } from "./lib/fs-errors.ts";
 // terminal_send 的调用面归一：text → command，并按终端后端的默认 shell 给方言。
-import { shellFaceOf } from "./lib/shell-face.ts";
+import { sandboxAppliesTo, shellFaceOf } from "./lib/shell-face.ts";
+import { isApplyPatchToolName, isEditToolName, isReadToolName } from "./lib/tool-names.ts";
 import { mountLedgerReader } from "./lib/projection-reader.ts";
 import type { ProjectionsRegistry } from "./lib/projection-reader.ts";
 // 非法密钥模式的点名上报（去重表与设置条目共用一枚）：判定链这里补报 apply 之后才写进来的值。
@@ -950,47 +951,26 @@ function remember(map: Map<string, number>, callId: string | undefined, seq: num
   return key;
 }
 
-/** 写类工具名。read 与 str_replace_editor 的 view 是**只读**面，不进写台账。 */
-type WriteToolName = "edit" | "write" | "str_replace_editor";
-
-/**
- * 一次调用是"写"还是"读"：把判定收敛成一个函数，writeTextOf 才敢把最后一支当 else 用。
- * 原来 writeTextOf 自己还要再问一次 `toolName === "str_replace_editor"`，而调用方
- * （applyToolCall 的 switch）只可能传这三个名字进来 → 那道 if 的 false 路是**死分支**
- * （覆盖率 100% 目标下它就是一个永远测不到的洞）。
- * 宿主若新增写类编辑器，三处须同步：applyToolCall 的 switch、WriteToolName、本函数——
- * 漏了本函数会把写误判成 read（少一次自证），故在类型别名处一并留痕。
- */
-function writeToolNameOf(name: string, command: unknown): WriteToolName | undefined {
-  let result: WriteToolName | undefined;
-  // 三支判定同一条：命中就是"这个名字算写"，两支的分支体本来就一模一样（同一枚 `result = name`），
-  // 于是按 sonarjs/no-duplicated-branches 把条件并成一支，判据一条不减：
-  //   edit / write 一律是写；str_replace_editor 里 create/str_replace/insert 是写，
-  //   view 只读 → 等价 read 证据（所以 `command !== "view"` 仍是它自己的守卫，短路与原来一致）。
-  if (
-    name === "edit" ||
-    name === "write" ||
-    (name === "str_replace_editor" && command !== "view")
-  ) {
-    result = name;
-  }
-  return result;
-}
+/** 写类工具名。read 与 str_replace_editor 的 view 是**只读**面，不进写台账。
+ *  MCP 写工具的末段按 `lib/tool-names.ts` 的同一份名单认，名字本身进台账。 */
+type WriteToolName = string;
 
 /**
  * 各写类工具"新写入内容"的字段名。字段名逐一实测自工具 schema，不猜：
  *   edit → new_string；write → content；
  *   str_replace_editor → create 用 file_text，str_replace/insert 用 new_str。
+ * MCP 写工具的字段名由 server 决定，只收能作为"最终内容 / 追加内容"自证的常见键；
+ * `apply_diff` / `patch_file` 的正文是 diff，不是文件最终内容，故不在这里猜（`editTexts`
+ * 留空，归因按"内容不可自证"保守处理）。
  */
-function writeTextFieldOf(toolName: WriteToolName, command: unknown): string {
-  if (toolName === "edit") {
-    return "new_string";
-  }
-  if (toolName === "write") {
-    return "content";
-  }
-  return command === "create" ? "file_text" : "new_str";
-}
+const MCP_WRITE_TEXT_KEYS = [
+  "content",
+  "file_text",
+  "new_text",
+  "new_string",
+  "new_str",
+  "text",
+] as const;
 
 /**
  * 提取一次写操作"新写入的内容"，用于 mtime 归因的**内容自证**（见 evidenceFor）。
@@ -998,12 +978,19 @@ function writeTextFieldOf(toolName: WriteToolName, command: unknown): string {
  * 调用方按"无法自证"保守处理。
  */
 function writeTextOf(toolName: WriteToolName, a: Record<string, unknown>): string | undefined {
-  const value = a[writeTextFieldOf(toolName, a["command"])];
-  let text: string | undefined;
-  if (typeof value === "string") {
-    text = value;
+  let value: unknown;
+  if (toolName === "edit") {
+    value = a["new_string"];
+  } else if (toolName === "write") {
+    value = a["content"];
+  } else if (toolName === "str_replace_editor") {
+    value = a[a["command"] === "create" ? "file_text" : "new_str"];
+  } else {
+    value = MCP_WRITE_TEXT_KEYS.map((key) => a[key]).find(
+      (candidate) => typeof candidate === "string",
+    );
   }
-  return text;
+  return typeof value === "string" ? value : undefined;
 }
 
 /**
@@ -1316,20 +1303,43 @@ type ToolCall = Pick<ToolCallRecord, "callId" | "seq"> & {
   a: ToolCallRecord["arguments"];
 };
 
-/**
- * 一次读/写调用声明的目标路径。判定侧（门禁要哪个文件取证）走 `editTargetPath`，
- * 取证侧（模型对哪个文件做过动作）**必须同一个键形**——两侧不同键时，模型照门禁
- * 要求做了动作却永远记不上证据（静默死锁 + 无限 indeterminate）。editTargetPath 认
- * `file_path ?? path`（edit/write）与 `path`（str_replace_editor），read/view 不在它
- * 的表内（它只管"要不要过门"），故在此补齐同样的双键宽容。
- */
-function callPathOf(name: string, a: Record<string, unknown>): string | undefined {
+/** 文件工具声明的目标路径。判定侧（门禁要哪个文件取证）走 `editTargetPath`，
+ *  取证侧（模型对哪个文件做过动作）**必须同一个键形**——两侧不同键时，模型照门禁
+ *  要求做了动作却永远记不上证据（静默死锁 + 无限 indeterminate）。editTargetPath 认
+ *  `file_path ?? path`（edit/write）与 `path`（str_replace_editor），read/view 不在它
+ *  的表内（它只管"要不要过门"），故在此补齐同样的双键宽容。
+ *
+ *  `read_multiple_files` 一类工具把目标放在 `paths` 数组里；只读单值会让整次读取
+ *  既不进 readCalls、也不建 mtime 基线。数组键与单值键在这里一起收。 */
+const CALL_PATH_ARRAY_KEYS = ["paths", "file_paths", "filePaths"] as const;
+
+function callPathsOf(name: string, a: Record<string, unknown>): string[] {
   const gatePath = editTargetPath(name, a);
   if (gatePath !== null) {
-    return gatePath;
+    return [gatePath];
   }
+  const target: string[] = [];
   const candidate = name === "str_replace_editor" ? a["path"] : (a["file_path"] ?? a["path"]);
-  return nonEmptyStr(candidate);
+  const single = nonEmptyStr(candidate);
+  if (single !== undefined) {
+    target.push(single);
+  }
+  for (const key of CALL_PATH_ARRAY_KEYS) {
+    const value = a[key];
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const parsed = nonEmptyStr(item);
+        if (parsed !== undefined && !target.includes(parsed)) {
+          target.push(parsed);
+        }
+      }
+    }
+  }
+  return target;
+}
+
+function callPathOf(name: string, a: Record<string, unknown>): string | undefined {
+  return callPathsOf(name, a)[0];
 }
 
 /**
@@ -1355,24 +1365,26 @@ function recordReadObservation(
   args: Record<string, unknown>,
   cwd: string | undefined,
 ): void {
-  if (name !== "read" && !(name === "str_replace_editor" && args["command"] === "view")) {
+  if (!isReadToolName(name, args["command"])) {
     return;
   }
-  const target = callPathOf(name, args);
-  if (target === undefined) {
+  const targets = callPathsOf(name, args);
+  if (targets.length === 0) {
     return;
   }
   // 键形与评估侧（buildEvalContext）逐字同源：同一 cwd 归一、同一 sessKey 前缀，
   // 否则 read 时写的基线编辑评估时读不到。cwd 由 guard 回调那**同一趟**调用算好传来
   // （`GuardRuntime.cwd`），不在这里再读一遍会话类型——两处各自现取，中间夹一次 `cd`
   // 就会把基线写到另一个键上。
-  const targetN = resolveTarget(target, cwd);
-  // 只**暂存**：这一趟还没执行，成功与否此刻未知（见 lib/read-basis.ts 的文件头第 2 条）。
-  stageReadObservation(
-    sessionTargetKeyOf(session?.id, targetN),
-    presenceOf(targetN).mtimeMs,
-    targetN,
-  );
+  for (const target of targets) {
+    const targetN = resolveTarget(target, cwd);
+    // 只**暂存**：这一趟还没执行，成功与否此刻未知（见 lib/read-basis.ts 的文件头第 2 条）。
+    stageReadObservation(
+      sessionTargetKeyOf(session?.id, targetN),
+      presenceOf(targetN).mtimeMs,
+      targetN,
+    );
+  }
 }
 
 /** 提交/丢弃一次读取的暂存观测（`tools/post-execute` 报回真实成败之后才走到这里）。
@@ -1394,22 +1406,27 @@ function settleReadOf(
   commitReadObservation(key);
 }
 
-/** 写/读型调用记录：read 与 str_replace_editor 的 view 记 readCalls，其余按写登记。 */
+/** 写型调用记录：MCP 写工具的末段按同一份名单认，命中目标就进 editCalls。 */
 function applyWriteCall(ctx: EvalCtx, ledger: CallLedger, call: ToolCall): void {
   if (ctx.norm(callPathOf(call.name, call.a)) !== ctx.targetN) {
     return;
   }
-  // 写入判定收敛在 writeToolNameOf（read / view → 只读，等价 read 证据；
-  // 门禁侧 editTargetPath 不会对 view 传路径）。
-  const writeName = writeToolNameOf(call.name, call.a["command"]);
-  if (writeName === undefined) {
-    remember(ledger.readCalls, call.callId, call.seq);
-    return;
-  }
+  // 调用点只在 `isEditToolName` 命中时进来；`str_replace_editor` 的 view 与
+  // `apply_patch` 已在 `applyToolCall` 的读/补丁分派里截走，这里只处理真正的写。
+  const writeName = call.name;
   // create/str_replace/insert 与 edit/write 一样是**写**：必须登记进 editCalls，否则
   // lastEditSeq 停在 -1，模型用它自改目标后 mtime 跳变会被误判成"另一会话改的"（既多要
-  // 一次 read，又误报冲突）。两套编辑器并存正是这里最容易漏的地方。
+  // 一次 read，又误报冲突）。两套编辑器与 MCP 写工具并存正是这里最容易漏的地方。
   rememberWriteInto(ledger, call.callId, call.seq, writeName, call.a);
+}
+
+/** 读型调用记录：内置 read/view 与 MCP 读工具的**任一声明目标**命中本次评估目标，
+ *  都记为一次读证据。`read_multiple_files` 的目标在 `paths` 数组里，不能只看单值。 */
+function applyReadCall(ctx: EvalCtx, ledger: CallLedger, call: ToolCall): void {
+  const targets = callPathsOf(call.name, call.a);
+  if (targets.some((target) => ctx.norm(target) === ctx.targetN)) {
+    remember(ledger.readCalls, call.callId, call.seq);
+  }
 }
 
 /** 引用型调用记录：按工具名对应的判据规则取签名与作用域，命中后给 refs，或记下等待收窄的路径。 */
@@ -1447,17 +1464,19 @@ function applySearchCall(
   }
 }
 
-/** 对单条 tool/call 分类记录（读/写/引用各自入口）。 */
+/** 对单条 tool/call 分类记录（读/写/引用各自入口）。
+ *  顺序：补丁先判（多目标，不走单目标台账）→ 读型（内置 read/view 与 MCP 读工具）
+ *  → 写型（内置编辑器与 MCP 写工具）→ 检索型（按现读的 refPolicy）。 */
 function applyToolCall(
   ctx: EvalCtx,
   ledger: CallLedger,
   layers: FactLayer[],
   call: ToolCall,
 ): void {
-  if (call.name === "apply_patch") {
+  if (isApplyPatchToolName(call.name)) {
     // 多目标补丁没有单一的 file_path：只要本次评估的目标出现在补丁的任一操作/目的路径里，
     // 这次调用就是该目标的写证据。补丁正文不提供单文件最终内容，故 `editTexts` 留空，
-    // 下游按“内容不可自证”保守处理（不会 fail-open）。
+    // 下游按“内容不可自证”保守处理（不会 fail-open）。内置与 MCP 同名工具同判。
     const hit = applyPatchTargetsOf(call.a).some(
       (target) =>
         ctx.norm(target.path) === ctx.targetN ||
@@ -1468,25 +1487,19 @@ function applyToolCall(
     }
     return;
   }
-  switch (call.name) {
-    case "read":
-    case "str_replace_editor":
-    case "edit":
-    case "write": {
-      // 读/写分组**先判**：即便有人把 "read" 写进 refSearchTools，它也仍然只按读证据记录
-      // （否则一次笔误就能把 read 面从取证里摘掉）。
-      applyWriteCall(ctx, ledger, call);
-      break;
-    }
-    default: {
-      const criterion = ctx.refPolicy.criteria.get(call.name);
-      if (criterion !== undefined) {
-        applySearchCall(ctx, ledger, layers, call, criterion);
-      }
-      // 名单外的工具（bash / 未知名 / 未列入的第三方检索）不参与取证记录。
-      break;
-    }
+  if (isReadToolName(call.name, call.a["command"])) {
+    applyReadCall(ctx, ledger, call);
+    return;
   }
+  if (isEditToolName(call.name)) {
+    applyWriteCall(ctx, ledger, call);
+    return;
+  }
+  const criterion = ctx.refPolicy.criteria.get(call.name);
+  if (criterion !== undefined) {
+    applySearchCall(ctx, ledger, layers, call, criterion);
+  }
+  // 名单外的工具（bash / 未知名 / 未列入的第三方检索）不参与取证记录。
 }
 
 /** 第一遍：tool/call 记录（成败未知先挂起，等第二遍回填）。
@@ -2645,14 +2658,16 @@ function readObservationSettler(svc: HostCtx): SettleReadObservation {
     const agentRaw: unknown = exec.agent;
     const session = isPreflightAgent(agentRaw) ? agentRaw.session : undefined;
     const args = isRecord(exec.arguments) ? exec.arguments : {};
-    const target = callPathOf(exec.name, args);
-    if (target === undefined) {
+    const targets = callPathsOf(exec.name, args);
+    if (targets.length === 0) {
       return;
     }
     // cwd 与 guard 时点那次（recordReadObservation）**必须同源**：两处各自现取时，中间夹
     // 一次 `cd` 就会把提交写到另一个键上，暂存永远配不上（见 effectiveCwdOf 的注释）。
     const cwd = effectiveCwdOf(svc, session);
-    settleReadOf(session, target, cwd, isError, blocked);
+    for (const target of targets) {
+      settleReadOf(session, target, cwd, isError, blocked);
+    }
   };
 }
 
@@ -2673,6 +2688,18 @@ const reportContextOf = (wiring: GuardWiring, exec: GuardExecution): ReportConte
   cwd: effectiveCwdOf(wiring.svc, exec.agent?.session),
   sessionId: exec.agent?.session?.id,
 });
+
+/** 结构化拒绝身份：宿主 `ToolGuardDenial.info` 会随 `tool/result.error.info` 落到结果里。
+ *  `name` 是稳定的错误类名，`code` 是规则键；`reason` 不重复长文案（宿主已有 reason）。 */
+function guardDenialOf(
+  reason: string,
+  code: string,
+): {
+  readonly reason: string;
+  readonly info: { readonly name: string; readonly code: string };
+} {
+  return { reason, info: { name: "DangerGuardDenial", code } };
+}
 
 /** `denyFromPolicy` 的输入：一枚已被档位表判成 `deny` 的命中，加上上报要用的上下文。 */
 interface PolicyDenyInput {
@@ -2750,8 +2777,14 @@ function confirmFactory(
     // 覆盖后的 `rmrf` 可能从 `deny` 降成 `allow`；扫描与过滤必须吃**同一份**实际处置，
     // 否则这里会选出一枚 `deny` 键而不问，guard 随后又把它放行，后段没人看。guard 里
     // 用的也是同一个工厂、同一组宿主服务与同一条 `effectiveCwdOf` 规则，所以两处结论一致。
-    const effective = dispositionFactory(exec.agent?.session, cwd, facts);
-    // 与 guard 同一条调用面归一：terminal_send 的 text 折成 command、方言按终端后端平台给。
+    const effective = dispositionFactory(
+      exec.agent?.session,
+      cwd,
+      facts,
+      sandboxAppliesTo(exec.name, args),
+    );
+    // 与 guard 同一条调用面归一：terminal_send 的 text 折成 command、MCP shell 的 command
+    // 折成 bash/pwsh 调用面、方言按工具身份/平台给。
     const face = shellFaceOf(exec.name, args);
     const ask = cfg.enabled
       ? askRequestOf(
@@ -2995,6 +3028,7 @@ function wireReadFaces(
   });
 }
 
+// oxlint-disable-next-line max-lines-per-function -- 装配顺序本身就是契约（单实例、guard、effect、gate 清空各一步），拆开会把服务就位顺序藏到别处
 export function apply(ctx: Context): void {
   // inject 宿主服务运行期保证存在；守卫理论不失败，失败即硬错快速暴露。
   if (!isDangerGuardHost(ctx)) {
@@ -3080,6 +3114,7 @@ export function apply(ctx: Context): void {
       present,
     };
     let deny: string | undefined;
+    let denyCode = "danger-guard";
     if (rt.cfg.enabled) {
       const { cfg, messages } = rt;
       const { name } = exec;
@@ -3105,7 +3140,14 @@ export function apply(ctx: Context): void {
       // 档位事实与逐命中实际处置先算：扫描层按后者排序，否则串行命令里"本档已放行的前段"
       // 会吞掉"仍要拦的后段"；沙箱覆盖的 rmrf 尤其如此（排序时 deny、处置时 allow）。
       const facts = policyFactsOf(svc, exec.agent?.session, false);
-      const effective = dispositionFactory(exec.agent?.session, rt.cwd, facts);
+      // MCP 的 stdio 子进程与显式 `sandbox_permissions` 升权都不在常驻沙箱之下：
+      // 这两类调用不能拿 `sandboxCovers` 给 `rmrf` 让路（详见 lib/shell-face.ts）。
+      const effective = dispositionFactory(
+        exec.agent?.session,
+        rt.cwd,
+        facts,
+        sandboxAppliesTo(name, args),
+      );
       // 命令行工具的调用面归一（terminal_send 的 text → command + 终端后端默认 shell 的方言）：
       // bash 闸与需确认档共用这一份，否则「guard 拦得住、审批看不见」会在新工具名上重演。
       const face = shellFaceOf(name, args);
@@ -3130,6 +3172,7 @@ export function apply(ctx: Context): void {
         // 三档统一处理：allow 只记读数（沙箱让路不算"放过"——那是交给宿主拦），
         // deny 交给下面的工厂出文案与上报，ask 什么都不做。
         if (verdict === "deny") {
+          denyCode = key;
           decision = denyFromPolicy({
             wiring,
             exec,
@@ -3167,11 +3210,12 @@ export function apply(ctx: Context): void {
           sample(secretCost);
         }
         deny = writeDeny;
+        denyCode = "write-gate";
       } else {
         deny = decideBash(bashDenial);
       }
     }
-    return deny;
+    return deny === undefined ? undefined : guardDenialOf(deny, denyCode);
   });
 
   if (dispose !== undefined) {

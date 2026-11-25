@@ -5,6 +5,7 @@
 
 import { applyPatchTargetsOf } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 import { editTargetPath } from "./danger-rules.ts";
+import { isApplyPatchToolName } from "./tool-names.ts";
 
 /** 触及导出名单/签名的关键字：改动文本含这些词 → 影响范围大概率超出文件自身，升档。 */
 const SIG_KEYWORD_RE =
@@ -13,6 +14,9 @@ const SIG_KEYWORD_RE =
 /** 高风险路径：manifest / lockfile / 构建配置 / CI / cordis 装配——改一个字符也能全局波及。 */
 const RISKY_PATH_RE =
   /(?:^|[/\\])(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|npm-shrinkwrap\.json|bun\.lockb?|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|pyproject\.toml|poetry\.lock|uv\.lock|requirements\.txt|setup\.py|tsconfig[^/]*\.json|vite\.config\.[cm]?[jt]s|webpack\.config\.[cm]?js|cordis\.(?:ya?ml|json)|Makefile|Dockerfile|docker-compose\.ya?ml|\.env(?:\.[\w-]+)?|schema\.sql)$/u;
+
+/** MCP 的写/建文件工具名末段：这些调用会把目标**创建**出来，而不是改既有文件。 */
+const MCP_WRITE_SUFFIX_RE = /(?:__|^)(?:write_file|create_file|write_text_file)$/u;
 
 /** 取证档位（定稿：按写入风险分档，配 strictMode 回到"每文件全探查"）。 */
 export type FactTier = "low" | "mid" | "high";
@@ -84,7 +88,9 @@ export function riskFactsOf(
   return {
     creatable:
       creatableOverride ??
-      (name === "write" || (name === "str_replace_editor" && args["command"] === "create")),
+      (name === "write" ||
+        (name === "str_replace_editor" && args["command"] === "create") ||
+        MCP_WRITE_SUFFIX_RE.test(name)),
     riskyPath: RISKY_PATH_RE.test(target),
     sigChanged,
     contentChars,
@@ -124,7 +130,7 @@ export function dedupeWriteTargets(targets: readonly WriteTarget[]): readonly Wr
  * 都要过凭据面与事实门。补丁解析失败时交回空表，调用方按工具名 fail-closed。
  */
 export function writeTargetsOf(name: string, args: Record<string, unknown>): WriteTargetScan {
-  if (name === "apply_patch") {
+  if (isApplyPatchToolName(name)) {
     const raw: WriteTarget[] = [];
     for (const operation of applyPatchTargetsOf(args)) {
       raw.push({ path: operation.path, creatable: operation.kind === "add" });

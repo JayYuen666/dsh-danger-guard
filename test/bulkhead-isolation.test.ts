@@ -66,8 +66,14 @@ function harness(rowConfig: Record<string, unknown>): {
   const ctx = new Context();
   const tools: ToolsProbe = { predicate: undefined };
   ctx.provide("tools", {
-    guard(predicate: (exec: Record<string, unknown>) => string | undefined) {
-      tools.predicate = predicate;
+    guard(predicate: (exec: Record<string, unknown>) => unknown) {
+      // 生产 guard 可能交回 `{ reason, info }`；本文件只读文案，统一折回 reason。
+      tools.predicate = (exec) => {
+        const result = predicate(exec);
+        return typeof result === "string"
+          ? result
+          : (result as { reason?: string } | undefined)?.reason;
+      };
       return () => {
         tools.predicate = undefined;
       };

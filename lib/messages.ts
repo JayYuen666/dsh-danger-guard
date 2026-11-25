@@ -55,13 +55,23 @@ export interface DangerGuardMessages {
   readonly noVerify: string;
   /** 灾难性 rm 目标（家目录 / 根 / 上跳）。 */
   readonly rmrf: string;
+  /** `find` 的谓词/范围删除：确实在删匹配集，但范围需要用户拍板。 */
+  readonly findDelete: string;
+  /** 删除目标是凭据面或 git 元数据。 */
+  readonly secretDelete: string;
+  /** 直接读取凭据面。 */
+  readonly secretRead: string;
+  /** gh 的远端破坏（删仓库/发布、绕过保护合并、api DELETE）。 */
+  readonly ghDestroy: string;
   /** 下载即执行管道（curl|sh 家族）。 */
   readonly pipeShell: string;
   /** 长驻开发服务器。 */
   readonly devServer: string;
-  /** 执行上下文里那条命令没被检查到（嵌套 shell 的 `-c` 体、解释器的代码串、超出长度上限的输入）
+  /** 执行上下文里那条命令没被检查到（嵌套 shell 的 `-c` 体、超出长度上限的输入）
    *  → 需用户确认。 */
   readonly nestedShellUnconfirmed: string;
+  /** 段头是非 shell 的解释器、且正在执行代码串或从 stdin 读代码（python -c / python - / node -e…）。 */
+  readonly interpreterCode: string;
   // ── git 破坏族（A1；全部 `ask` 档）─────────────────────────────────────────────
   /** `git reset --hard`（丢弃未提交改动）。 */
   readonly gitResetHard: string;
@@ -84,6 +94,8 @@ export interface DangerGuardMessages {
   readonly tfAutoApprove: string;
   /** `docker * prune`。 */
   readonly dockerPrune: string;
+  /** `docker compose down -v/--volumes`：连命名卷一起删。 */
+  readonly composeDownVolumes: string;
   /** `kubectl delete`。 */
   readonly kubectlDelete: string;
   /** 数据库迁移命令。 */
@@ -281,6 +293,24 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
     rmrf:
       "[danger-guard] rm -rf 的目标是家目录本身、家目录直接子项、根或上跳路径，会灾难性删除用户数据。" +
       "请在目标项目目录内做相对路径清理（如 rm -rf ./build），或先与用户确认。",
+    findDelete:
+      "[danger-guard] 这条 `find` 的 `-delete` / `-exec rm` 会删除**谓词匹配到的整组文件**，" +
+      "而起始路径包住了工作区（或家目录/根）。删除范围不是整棵树，但在执行前无法确认匹配集里有什么；" +
+      "请先用同一个 `find` 把 `-delete` 换成 `-print` 审一遍结果，或把范围收窄到具体子目录后再执行。" +
+      "确实要删时请让用户确认这次范围。",
+    secretDelete:
+      "[danger-guard] 删除目标是密钥/凭据面（.env、.ssh、私钥、证书等）或 git 元数据（.git）。" +
+      "这些内容删除后往往无法从版本控制恢复，密钥还可能已经泄露。" +
+      "请确认这是有意清理；需要保留时先备份，或把密钥轮换后再删。",
+    secretRead:
+      "[danger-guard] 这条命令会直接读取密钥/凭据面（.env、.ssh、私钥、证书等）。" +
+      "凭据内容一旦进入输出就可能被记录或外传。请确认这是有意读取；" +
+      "只想知道有哪些键时也要经过这次确认：这条读取本身不会被当成安全写法。" +
+      "把读取范围收窄到非密钥文件，或先由用户决定是否允许这次读取。",
+    ghDestroy:
+      "[danger-guard] 检测到 GitHub 远端破坏操作（删仓库/发布/运行记录、绕过分支保护合并、" +
+      "`gh api -X DELETE`）。这类动作不在本地沙箱的管辖内，删除与强合并在远端不可逆。" +
+      "请确认目标与影响范围；需要保留时先导出/备份，或改用非破坏性的查询命令。",
     pipeShell:
       '[danger-guard] 检测到"下载即执行"管道（curl/wget | sh/bash）。' +
       "远程脚本未审计即执行有任意代码风险。请先下载到本地（curl -O），" +
@@ -293,14 +323,20 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "（由用户在自己的终端启动当然也可以。）",
     nestedShellUnconfirmed:
       "[danger-guard] 这条命令真正要执行的那段内容**未被检查**：嵌套 shell 的 `-c` 体因引号不闭合被" +
-      "截断、套娃层数超出下钻上限（嵌套 `-c` 与 `$( )` 命令替换各自有一道层数界）、段头是取代码串再" +
-      "执行的解释器（python -c / node -e / perl -e 等，语言层的动作不在命令词法面上）、" +
+      "截断、套娃层数超出下钻上限（嵌套 `-c` 与 `$( )` 命令替换各自有一道层数界）、" +
       "或命令长度超出可判定上限。" +
       "这不是「已确认危险」也不是「已确认安全」——请勿原样重试，" +
       "把它贴给用户、由用户显式确认后再执行；" +
-      '或改写成单层、引号闭合、直白可读的形态（如 bash -c "rm -rf ./build"）后重试。' +
-      "若是解释器代码串那一类（python -c / node -e / perl -e），把代码写进文件再执行" +
-      "（如 python3 script.py），或改用 read / grep / glob 这类本机工具完成同样的读取。",
+      '或改写成单层、引号闭合、直白可读的形态（如 bash -c "rm -rf ./build"）后重试。',
+    interpreterCode:
+      "[danger-guard] 段头是非 shell 的解释器，正在执行**代码串**或从 stdin 读代码" +
+      "（python -c / python - / python3.14 -c / node -e / perl -e…）。语言层的动作不在命令词法面上，" +
+      "沙箱也只管文件效应，无法确认它不会发起网络/进程副作用。" +
+      "请把代码写进文件再执行（如 python3 script.py），或把代码贴给用户、由用户显式确认后再执行。",
+    composeDownVolumes:
+      "[danger-guard] `docker compose down -v/--volumes` 会删除 Compose 文件声明的**命名卷**，" +
+      "卷里的数据不可撤销。先 `docker compose config --volumes` 看卷清单；需要保留时先备份，" +
+      "或去掉 `-v` 只删容器/网络；确实要连卷一起清时请用户确认后执行。",
     secretPath:
       "[danger-guard] 编辑目标是密钥/凭据文件（.ssh、私钥、证书、密钥库）。" +
       "凭据面不由模型直接改动；确需变更请让用户在终端手动操作。",
@@ -490,6 +526,29 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
       "[danger-guard] The target of this rm -rf is the home directory itself, a direct child of it, / or an upward path — it " +
       "would delete user data catastrophically. Clean up with relative paths inside the target " +
       "project (e.g. rm -rf ./build), or confirm with the user first.",
+    findDelete:
+      "[danger-guard] This `find` `-delete` / `-exec rm` removes the **whole set matched by the " +
+      "predicates**, and the starting path encloses the workspace (or the home directory / root). " +
+      "It is not a whole-tree delete, but what the match set contains cannot be confirmed before " +
+      "execution. Run the same `find` with `-print` instead of `-delete` to inspect the matches, " +
+      "or narrow the starting path to a specific subdirectory first. Have the user confirm the " +
+      "scope before deleting.",
+    secretDelete:
+      "[danger-guard] The delete target is credential material (.env, .ssh, private keys, " +
+      "certificates, …) or git metadata (.git). Deleting these is often unrecoverable from version " +
+      "control, and keys may already be exposed. Confirm this is intentional; back up what you " +
+      "need to keep, or rotate the keys before deleting.",
+    secretRead:
+      "[danger-guard] This command reads credential material directly (.env, .ssh, private keys, " +
+      "certificates, …). Once credential contents reach the output they can be logged or leaked. " +
+      "Confirm this is intentional; a key-name-only form still needs this confirmation, so do not " +
+      "treat it as a safe rewrite. Narrow the read to non-secret files, or let the user decide " +
+      "whether to allow this read.",
+    ghDestroy:
+      "[danger-guard] A destructive GitHub remote operation was detected (deleting a repo, " +
+      "release, or run; merging past branch protection; `gh api -X DELETE`). The local sandbox " +
+      "does not govern the network, and remote deletion or admin merges are irreversible. " +
+      "Confirm the target and blast radius; export/back up first, or use a non-destructive query.",
     pipeShell:
       "[danger-guard] Download-and-run pipe detected (curl/wget | sh/bash). Running a remote " +
       "script without auditing it means arbitrary code. Download it first (curl -O), audit the " +
@@ -504,14 +563,22 @@ export const MESSAGES: MessagesCatalog<DangerGuardMessages> = {
     nestedShellUnconfirmed:
       "[danger-guard] The part this command actually executes was never inspected: the `-c` body " +
       "of a nested shell was truncated by unbalanced quotes, the nesting went past the drill-down " +
-      "limit (nested `-c` bodies and `$( )` substitutions each carry their own depth cap), the " +
-      "segment head is an interpreter that runs a code string (python -c / node -e / " +
-      "perl -e, … — what that language does is not visible at the command-lexer level), or the " +
+      "limit (nested `-c` bodies and `$( )` substitutions each carry their own depth cap), or the " +
       "command is longer than the judgeable limit. This is neither 'confirmed dangerous' nor " +
       "'confirmed safe' — do not retry it verbatim. Paste it to the user and run it only after " +
-      'they explicitly confirm; or rewrite it as one plain, quote-balanced layer (e.g. bash -c "rm -rf ./build") and retry. ' +
-      "For the interpreter case (python -c / node -e / perl -e), put the code in a file and run it " +
-      "(e.g. python3 script.py), or use a built-in tool (read / grep / glob) for the same read.",
+      'they explicitly confirm; or rewrite it as one plain, quote-balanced layer (e.g. bash -c "rm -rf ./build") and retry.',
+    interpreterCode:
+      "[danger-guard] The segment head is a non-shell interpreter running a **code string** or " +
+      "reading code from stdin (python -c / python - / python3.14 -c / node -e / perl -e, …). " +
+      "What that language does is not visible at the command-lexer level, and the sandbox only " +
+      "governs file effects, so it cannot be cleared of network/process side effects. Put the code " +
+      "in a file and run it (e.g. python3 script.py), or paste it to the user and run it only after " +
+      "they explicitly confirm.",
+    composeDownVolumes:
+      "[danger-guard] `docker compose down -v/--volumes` removes the **named volumes** declared in " +
+      "the Compose file; the data in them cannot be undone. Run `docker compose config --volumes` " +
+      "to list them first; back up anything to keep, or drop `-v` to remove only containers and " +
+      "networks. If the volumes really should go, ask the user to confirm first.",
     secretPath:
       "[danger-guard] The edit target is a secret/credential file (.ssh, private keys, " +
       "certificates, keystores). Credentials are not edited by the model; when one really must " +

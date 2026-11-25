@@ -54,7 +54,16 @@ function createMockCtx(): MockCtx {
     value: { ...BUILTIN_BASE },
     tools: {
       guard(fn) {
-        ctx.guardInstalled = { fn };
+        // 生产 guard 现在可能交回 `{ reason, info }`；存量用例断言的是模型看到的文案，
+        // 这里统一折回 `reason`。结构化身份的断言只在 host.test 的 raw 口上做。
+        ctx.guardInstalled = {
+          fn: (exec) => {
+            const result = fn(exec);
+            return typeof result === "string"
+              ? result
+              : (result as { reason?: string } | undefined)?.reason;
+          },
+        };
         return () => {
           ctx.guardInstalled = null;
         };
@@ -179,6 +188,14 @@ function ownEdit(file: string, newText: string): SessionEvent[] {
   return [
     fxCall("e1", "edit", JSON.stringify({ file_path: file, new_string: newText })),
     fxResult("e1"),
+  ];
+}
+
+/** MCP 写工具的成功事件：目标在 `file_path`，写入文本在 `content`（不是 `new_string`）。 */
+function ownMcpWrite(file: string, newText: string): SessionEvent[] {
+  return [
+    fxCall("w1", "mcp__fs__write_file", JSON.stringify({ file_path: file, content: newText })),
+    fxResult("w1"),
   ];
 }
 
@@ -557,6 +574,31 @@ describe("host 运行路径接线（三档分级、层要求与外部改动归�
         ),
         undefined,
         "mtime 跳变能被自己的编辑 + 内容自证解释 → 不再反复过门",
+      );
+    });
+
+    it("mcp write_file 写过的同一条路径，也按自己的写台账自证", async () => {
+      const file = path.join(root, "src", "self-mcp.ts");
+      await writeFile(file, FILE_CONTENT_BEFORE);
+      await utimes(file, T0, T0);
+      const ctx = createMockCtx();
+      apply(ctx);
+      assert.equal(
+        fireWith(ctx, "edit", { file_path: file, ...SMALL }, evidenceFor(file), "self-mcp"),
+        undefined,
+      );
+      await writeFile(file, FILE_CONTENT_AFTER);
+      await utimes(file, T1, T1);
+      assert.equal(
+        fireWith(
+          ctx,
+          "edit",
+          { file_path: file, ...SMALL },
+          [...evidenceFor(file), ...ownMcpWrite(file, FILE_CONTENT_AFTER)],
+          "self-mcp",
+        ),
+        undefined,
+        "MCP 写台账必须和内置 edit 一样参与 mtime 归因；只认内置写会把这次改成外部改动",
       );
     });
 

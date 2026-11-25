@@ -54,8 +54,13 @@ const EXPECTED: Readonly<Record<GuardMode, Readonly<Record<BashDenialKey, RuleVe
   "read-only": {
     noVerify: "deny",
     rmrf: "deny",
+    findDelete: "deny",
+    secretDelete: "deny",
+    secretRead: "ask",
+    ghDestroy: "ask",
     pipeShell: "ask",
     devServer: "allow",
+    interpreterCode: "ask",
     nestedShellUnconfirmed: "ask",
     gitResetHard: "ask",
     gitCheckoutDiscard: "ask",
@@ -67,14 +72,20 @@ const EXPECTED: Readonly<Record<GuardMode, Readonly<Record<BashDenialKey, RuleVe
     tfDestroy: "ask",
     tfAutoApprove: "ask",
     dockerPrune: "ask",
+    composeDownVolumes: "ask",
     kubectlDelete: "ask",
     dbMigrate: "ask",
   },
   "workspace-write": {
     noVerify: "deny",
     rmrf: "deny",
+    findDelete: "ask",
+    secretDelete: "ask",
+    secretRead: "ask",
+    ghDestroy: "ask",
     pipeShell: "deny",
     devServer: "allow",
+    interpreterCode: "ask",
     nestedShellUnconfirmed: "allow",
     gitResetHard: "ask",
     gitCheckoutDiscard: "ask",
@@ -86,14 +97,20 @@ const EXPECTED: Readonly<Record<GuardMode, Readonly<Record<BashDenialKey, RuleVe
     tfDestroy: "ask",
     tfAutoApprove: "ask",
     dockerPrune: "ask",
+    composeDownVolumes: "ask",
     kubectlDelete: "ask",
     dbMigrate: "ask",
   },
   unknown: {
     noVerify: "deny",
     rmrf: "deny",
+    findDelete: "ask",
+    secretDelete: "ask",
+    secretRead: "ask",
+    ghDestroy: "ask",
     pipeShell: "deny",
     devServer: "allow",
+    interpreterCode: "ask",
     nestedShellUnconfirmed: "ask",
     gitResetHard: "ask",
     gitCheckoutDiscard: "ask",
@@ -105,6 +122,7 @@ const EXPECTED: Readonly<Record<GuardMode, Readonly<Record<BashDenialKey, RuleVe
     tfDestroy: "ask",
     tfAutoApprove: "ask",
     dockerPrune: "ask",
+    composeDownVolumes: "ask",
     kubectlDelete: "ask",
     dbMigrate: "ask",
   },
@@ -115,8 +133,13 @@ const EXPECTED: Readonly<Record<GuardMode, Readonly<Record<BashDenialKey, RuleVe
   "danger-full-access": {
     noVerify: "deny",
     rmrf: "allow",
+    findDelete: "allow",
+    secretDelete: "allow",
+    secretRead: "allow",
+    ghDestroy: "allow",
     pipeShell: "allow",
     devServer: "allow",
+    interpreterCode: "allow",
     nestedShellUnconfirmed: "allow",
     gitResetHard: "allow",
     gitCheckoutDiscard: "allow",
@@ -128,6 +151,7 @@ const EXPECTED: Readonly<Record<GuardMode, Readonly<Record<BashDenialKey, RuleVe
     tfDestroy: "allow",
     tfAutoApprove: "allow",
     dockerPrune: "allow",
+    composeDownVolumes: "allow",
     kubectlDelete: "allow",
     dbMigrate: "allow",
   },
@@ -139,8 +163,13 @@ const EXPECTED: Readonly<Record<GuardMode, Readonly<Record<BashDenialKey, RuleVe
 const AUTO_EXPECTED: Readonly<Record<BashDenialKey, RuleVerdict>> = {
   noVerify: "deny",
   rmrf: "deny",
+  findDelete: "allow",
+  secretDelete: "allow",
+  secretRead: "allow",
+  ghDestroy: "allow",
   pipeShell: "deny",
   devServer: "allow",
+  interpreterCode: "allow",
   nestedShellUnconfirmed: "allow",
   gitResetHard: "allow",
   gitCheckoutDiscard: "allow",
@@ -152,6 +181,7 @@ const AUTO_EXPECTED: Readonly<Record<BashDenialKey, RuleVerdict>> = {
   tfDestroy: "allow",
   tfAutoApprove: "allow",
   dockerPrune: "allow",
+  composeDownVolumes: "allow",
   kubectlDelete: "allow",
   dbMigrate: "allow",
 };
@@ -217,10 +247,17 @@ describe("完全权限档的两个分支：零兵底只属于「问不了」的�
     assert.equal(decideRule(FULL_ACCESS, "noVerify"), "deny");
   });
 
-  it("还能问 ⇒ 不能按零兵底放行：沿用工作区档的处置（沙箱不后备，写类要我们拦）", () => {
+  it("还能问 ⇒ 不能按零兵底放行：沿用工作区档的处置；`nestedShellUnconfirmed` 例外回 ask", () => {
     for (const key of ALL_RULE_KEYS) {
-      assert.equal(decideRule(FULL_ACCESS_ASKABLE, key), EXPECTED["workspace-write"][key], key);
+      const expected = key === "nestedShellUnconfirmed" ? "ask" : EXPECTED["workspace-write"][key];
+      assert.equal(decideRule(FULL_ACCESS_ASKABLE, key), expected, key);
     }
+  });
+
+  it("那支里的 `nestedShellUnconfirmed` 不能沿用工作区档的 allow——沙箱前提不成立", () => {
+    // 工作区档的 allow 依赖沙箱兜住嵌套命令的文件效应；这一档沙箱完全不拦，
+    // 沿用 allow 就是无 reviewer、无审批、无沙箱的三重静默放行。
+    assert.equal(decideRule(FULL_ACCESS_ASKABLE, "nestedShellUnconfirmed"), "ask");
   });
 
   it("那支里的 `rmrf` 仍然拦（不是静默放行）——这正是本条修复的缺口", () => {

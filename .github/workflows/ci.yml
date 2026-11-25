@@ -292,6 +292,9 @@ jobs:
 
   # 依赖审查：只在 PR 上跑。它比的是「这个 PR 引入的依赖」与 GitHub Advisory Database，
   # 拦的是「今天能装、明天被披露有洞」那一类。push 上没有「引入」这个概念，所以不跑。
+  # 运行前提：仓库 Settings → Advanced Security 的 Dependency graph 必须启用。
+  # 未启用时 dependency-review API 回 403（action v5 只显示 Forbidden），与 GITHUB_TOKEN
+  # 权限无关；官方安装示例也只要求 contents: read，所以抬权限不解决这一形态。
   dependency-review:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest

@@ -23,6 +23,9 @@ export interface EffectiveDispositionInput {
   readonly facts: PolicyFacts;
   readonly session: unknown;
   readonly cwd: OsPath | undefined;
+  /** 这次调用是否真的在宿主文件沙箱之下（MCP 与显式升权为 false）。
+   *  缺席按 true：既有调用点与既有测试的语义不变。 */
+  readonly sandbox?: boolean;
   readonly shellRaw: () => unknown;
   readonly policyRaw: () => unknown;
   readonly canonicalize: Canonicalize;
@@ -58,6 +61,7 @@ export type DispositionFactory = (
   session: unknown,
   cwd: string | undefined,
   facts: PolicyFacts,
+  sandbox?: boolean,
 ) => EffectiveDisposition;
 
 /**
@@ -105,10 +109,24 @@ export function effectiveDispositionOf(input: EffectiveDispositionInput): Effect
       ),
     };
   };
-  const coveredFactsOf = (key: BashDenialKey, fix: Fix | undefined): PolicyFacts =>
-    SANDBOX_COVERED.has(key)
-      ? sandboxCoveredFacts(input.facts, key, canonicalFixOf(fix), scopeOf(), input.cwd)
-      : input.facts;
+  const coveredFactsOf = (key: BashDenialKey, fix: Fix | undefined): PolicyFacts => {
+    // `nestedShellUnconfirmed` 在工作区档的 allow 依赖一个前提：宿主沙箱仍会拦住
+    // 写入（见 lib/mode-policy.ts 的 BASE 注释）。MCP shell 与显式升权没有这层沙箱，
+    // 继续沿用 allow 就等于把“看不见要执行什么”静默放行。把这一键切到 unknown 档
+    // （ask / 问不了时 deny），而不是只对 rmrf 做特判。完全权限档不切：它的 allow 来自
+    // 用户已选择“不要拦”，不是来自沙箱前提。
+    if (
+      input.sandbox === false &&
+      key === "nestedShellUnconfirmed" &&
+      input.facts.mode !== "danger-full-access"
+    ) {
+      return { ...input.facts, mode: "unknown" };
+    }
+    if (input.sandbox === false || !SANDBOX_COVERED.has(key)) {
+      return input.facts;
+    }
+    return sandboxCoveredFacts(input.facts, key, canonicalFixOf(fix), scopeOf(), input.cwd);
+  };
   const verdictOf = (key: BashDenialKey, fix: Fix | undefined): EffectiveOutcome => {
     const covered = coveredFactsOf(key, fix);
     return { verdict: decideRule(covered, key), facts: covered };
@@ -128,10 +146,11 @@ export function effectiveDispositionOf(input: EffectiveDispositionInput): Effect
  * @returns 由 `(session, cwd, facts)` 得到处置器的工厂。
  */
 export function effectiveDispositionFactory(host: EffectiveDispositionHost): DispositionFactory {
-  return (session, cwd, facts) =>
+  return (session, cwd, facts, sandbox) =>
     effectiveDispositionOf({
       facts,
       session,
+      ...(sandbox === undefined ? {} : { sandbox }),
       // 铸造边界校验绝对性：`asOsPath` 是纯声明，第三方 `workingDirectory` 服务给出相对
       // 路径时原样打 brand，灾难目标会按 `process.cwd()` 解析出与可写根无关的绝对形——
       // 一次真实的工作区删除可能被判成"沙箱已覆盖"而由 deny 降为 allow。不绝对就交回

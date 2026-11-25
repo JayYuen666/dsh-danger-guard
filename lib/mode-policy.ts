@@ -97,8 +97,13 @@ const BASE: Readonly<Record<Exclude<GuardMode, typeof FULL_ACCESS_MODE>, ModeTab
   "read-only": {
     noVerify: "deny",
     rmrf: "deny",
+    findDelete: "deny",
+    secretDelete: "deny",
+    secretRead: "ask",
+    ghDestroy: "ask",
     pipeShell: "ask",
     devServer: "allow",
+    interpreterCode: "ask",
     nestedShellUnconfirmed: "ask",
     gitResetHard: "ask",
     gitCheckoutDiscard: "ask",
@@ -110,14 +115,21 @@ const BASE: Readonly<Record<Exclude<GuardMode, typeof FULL_ACCESS_MODE>, ModeTab
     tfDestroy: "ask",
     tfAutoApprove: "ask",
     dockerPrune: "ask",
+    composeDownVolumes: "ask",
     kubectlDelete: "ask",
     dbMigrate: "ask",
   },
   "workspace-write": {
     noVerify: "deny",
     rmrf: "deny",
+    findDelete: "ask",
+    secretDelete: "ask",
+    secretRead: "ask",
+    ghDestroy: "ask",
     pipeShell: "deny",
     devServer: "allow",
+    // 代码串不是"壳的体看不见"：它可以发起网络/进程副作用，沙箱只保护写入，不能跟着降。
+    interpreterCode: "ask",
     // 这一档降到放行：它表达的是「判据看不见」而不是「确认危险」，而这一档的沙箱仍在保护写入。
     nestedShellUnconfirmed: "allow",
     gitResetHard: "ask",
@@ -130,14 +142,20 @@ const BASE: Readonly<Record<Exclude<GuardMode, typeof FULL_ACCESS_MODE>, ModeTab
     tfDestroy: "ask",
     tfAutoApprove: "ask",
     dockerPrune: "ask",
+    composeDownVolumes: "ask",
     kubectlDelete: "ask",
     dbMigrate: "ask",
   },
   unknown: {
     noVerify: "deny",
     rmrf: "deny",
+    findDelete: "ask",
+    secretDelete: "ask",
+    secretRead: "ask",
+    ghDestroy: "ask",
     pipeShell: "deny",
     devServer: "allow",
+    interpreterCode: "ask",
     nestedShellUnconfirmed: "ask",
     gitResetHard: "ask",
     gitCheckoutDiscard: "ask",
@@ -149,6 +167,7 @@ const BASE: Readonly<Record<Exclude<GuardMode, typeof FULL_ACCESS_MODE>, ModeTab
     tfDestroy: "ask",
     tfAutoApprove: "ask",
     dockerPrune: "ask",
+    composeDownVolumes: "ask",
     kubectlDelete: "ask",
     dbMigrate: "ask",
   },
@@ -178,27 +197,23 @@ export const AUTO_REVIEW_HARD_STOPS: ReadonlySet<BashDenialKey> = new Set<BashDe
  * @param key   命中的规则键。
  * @returns `allow`（不处理，交给下游/沙箱）、`ask`（走宿主审批）、`deny`（我们硬拒）。
  */
+/**
+ * 完全权限档的三条分支：自动审查、问不了、还能问。
+ * 抽出来只为把 `decideRule` 的复杂度压回闸门；判据本身一位不改。
+ */
+function fullAccessVerdict(facts: PolicyFacts, key: BashDenialKey): RuleVerdict {
+  if (facts.autoReview) {
+    return key === "noVerify" || AUTO_REVIEW_HARD_STOPS.has(key) ? "deny" : "allow";
+  }
+  if (!facts.askable) {
+    return key === "noVerify" ? "deny" : "allow";
+  }
+  return key === "nestedShellUnconfirmed" ? "ask" : BASE["workspace-write"][key];
+}
+
 export function decideRule(facts: PolicyFacts, key: BashDenialKey): RuleVerdict {
   if (facts.mode === FULL_ACCESS_MODE) {
-    // 自动审查档先判：硬拦不依赖“能不能问”。若先命中 `!askable`，`auto` 预设叠加
-    // 审批策略 `never` 时 `rmrf`/`pipeShell` 会被整档放行，`AUTO_REVIEW_HARD_STOPS` 失效。
-    if (facts.autoReview) {
-      // `noVerify` 不在 `AUTO_REVIEW_HARD_STOPS` 里，却和「完全权限但问不了」那一支一样硬拒：
-      // 绕 git 钩子与沙箱无关，也不该被 reviewer 的一次判断顺带放行（`BASE` 每一列都是 deny）。
-      return key === "noVerify" || AUTO_REVIEW_HARD_STOPS.has(key) ? "deny" : "allow";
-    }
-    // 零兜底只属于**问不了**的那一档（官方预设为 `danger-full-access` + `never`）。
-    // 判据用 `askable` 而不是预设名：`danger-full-access + ask` 是对得上的组合（用户自定义，
-    // 或没装预设服务时的默认 `ask`），那一档沙箱什么都不拦、却**还能问** —— 按零兜底处理
-    // 等于把本该问的动作静默放行，方向正好与"问不了才降级"相反。
-    if (!facts.askable) {
-      // 例外只有 `noVerify`：绕 git 钩子与沙箱无关，`BASE` 表里它每一列都是 `deny`
-      // （见上方那张表的说明）。整档 allow 会把它一起放行，与那张表自相矛盾，
-      // 也会让"完全权限档"成为钩子绕过的唯一开口。
-      return key === "noVerify" ? "deny" : "allow";
-    }
-    // 完全权限但仍能问：沿用工作区档的处置（沙箱不后备，所以写类判据一律我们拦）。
-    return BASE["workspace-write"][key];
+    return fullAccessVerdict(facts, key);
   }
   const base = BASE[facts.mode][key];
   // 沙箱确实盖住这次的目标（只可能发生在 `rmrf` 上）：让宿主去拦，它会给出官方拒绝标记

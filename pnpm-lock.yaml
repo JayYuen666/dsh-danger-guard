@@ -105,6 +105,7 @@ overrides:
   '@deepseek-ai/dsh-workspace': 0.2.3-alpha.2
   '@deepseek-ai/schemastery': 3.20.0-alpha.1
   koffi: 3.3.8
+  minimatch: 11.0.9
   zod: 4.6.7
 
 importers:
@@ -683,6 +684,9 @@ packages:
   '@eslint-zod/utils@7.0.0':
     resolution: {integrity: sha512-ToKmzhtXqagS6ohatO3vbE03KRGQ732MZ2mIOHr+pi/ta6X1cEjcBCbGzTUQU0Pvs/QOO5XydVcdDgMc7aHkkg==}
     engines: {node: ^20.19 || ^22.12 || >=24}
+
+  '@isaacs/nonrecursive-glob-match@1.1.0':
+    resolution: {integrity: sha512-GPm/Dbvk5RLmhRnxXIa7nTpK0xtl4E0wj0MslsuNiJ1FIROU+2+9lgUC/dgF7Ey4QCWhfEsgxilMRMCdHPfDfw==}
 
   '@jayyuen66/dsh-plugin-shared@0.2.13':
     resolution: {integrity: sha512-kfK1TzV50weNLNFs420jLpu7ZItVyPVIsYVXRbsbM+rk8vx/j3BfIlXPLBf6JeEnPKrlOlO8x1Kuh5YoZNDVGw==}
@@ -1738,9 +1742,9 @@ packages:
   magicast@0.5.5:
     resolution: {integrity: sha512-UicdXN8zQ3JHlxVq+28afMXPr1z7WNY6+7EJnzTdQWkTAlMLF5fNCCKxJHBQwGaNGR11581EiQmQzx73+MvszA==}
 
-  minimatch@10.2.6:
-    resolution: {integrity: sha512-vpLQEs+VLCr1nU0BXS07maYoFwlDAH0gngQuuttxIwutDFEMHq2blX+8vpgxDdK3J1PwjCJiep77OitTZ4Ll1A==}
-    engines: {node: 18 || 20 || >=22}
+  minimatch@11.0.9:
+    resolution: {integrity: sha512-KCFkfyjqerNlSstjlhIGNXIKZGA/6O4V4RlhZ+Dsr621SPPw0mzlypE9D9ZOoPiVefHID+j7/XuMMlqfD/F60Q==}
+    engines: {node: 20 || >=22}
 
   module-replacements@3.4.0:
     resolution: {integrity: sha512-NKBNFM/uAUvSs+LOYfSly4EwrC9bgMoFuEnqNNjcDb910W+5IgS2KMB2ERLm5YZZm7R187jx1dMA9pOPvqbSbw==}
@@ -2419,6 +2423,8 @@ snapshots:
       '@typescript-eslint/types': 8.72.1
       esquery: 1.7.0
 
+  '@isaacs/nonrecursive-glob-match@1.1.0': {}
+
   '@jayyuen66/dsh-plugin-shared@0.2.13(6634db4eae73c9cfa9c16b451d6b145b)':
     dependencies:
       '@deepseek-ai/dsh-fs-patch': 0.2.3-alpha.2(@deepseek-ai/cordis@4.2.0-alpha.1)
@@ -2936,7 +2942,7 @@ snapshots:
       globals: 17.13.0
       jsx-ast-utils-x: 0.1.0
       lodash.merge: 4.6.2
-      minimatch: 10.2.6
+      minimatch: 11.0.9
       scslre: 0.3.0
       semver: 7.8.5
       ts-api-utils: 2.5.0(typescript@6.0.3)
@@ -3085,8 +3091,9 @@ snapshots:
       '@babel/types': 7.29.8
       source-map-js: 1.2.2
 
-  minimatch@10.2.6:
+  minimatch@11.0.9:
     dependencies:
+      '@isaacs/nonrecursive-glob-match': 1.1.0
       brace-expansion: 5.0.12
 
   module-replacements@3.4.0: {}

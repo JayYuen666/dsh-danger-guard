@@ -180,6 +180,53 @@ const editExecWithEvidence = (id: string): GuardExecParam => ({
   agent: { session: { id, header: { cwd: FIXTURE_ROOT }, snapshotEvents: () => evidenceLog() } },
 });
 
+/** MCP 读 `read_multiple_files` 版的取证日志：目标在 `paths` 数组里，不是单值 `file_path`。
+ *  它必须和内置 read 一样被记成 readCalls，否则同一份证据会因工具名而失效。数组里故意
+ *  混入非字符串与重复项：目标解析要跳过坏值，但去重后仍保留第一次命中。 */
+function mcpReadEvidenceLog(): SessionEvent[] {
+  return [
+    fxCall(
+      "m1",
+      "mcp__fs__read_multiple_files",
+      JSON.stringify({ paths: [EDIT_TARGET_PATH, 42, EDIT_TARGET_PATH] }),
+    ),
+    fxResult("m1"),
+    fxCall("g1", "grep", JSON.stringify({ path: FIXTURE_ROOT, pattern: "cfg.ts" })),
+    fxResult("g1"),
+  ];
+}
+
+/** MCP 写文件会话日志：`content` 是 MCP 常见字段，必须走 `writeTextOf` 的 MCP 分支进台账。 */
+function mcpWriteLog(): SessionEvent[] {
+  return [
+    fxCall(
+      "w1",
+      "mcp__fs__write_file",
+      JSON.stringify({ file_path: EDIT_TARGET_PATH, content: "written by mcp" }),
+    ),
+    fxResult("w1"),
+    ...evidenceLog(),
+  ];
+}
+
+/** 带 MCP 写台账 + 读证据的 edit 调用。 */
+const editExecWithMcpWrite = (id: string): GuardExecParam => ({
+  name: "edit",
+  arguments: { file_path: EDIT_TARGET_PATH },
+  agent: {
+    session: { id, header: { cwd: FIXTURE_ROOT }, snapshotEvents: () => mcpWriteLog() },
+  },
+});
+
+/** 带 MCP 多文件读证据的 edit 调用（应和内置 read 同判）。 */
+const editExecWithMcpRead = (id: string): GuardExecParam => ({
+  name: "edit",
+  arguments: { file_path: EDIT_TARGET_PATH },
+  agent: {
+    session: { id, header: { cwd: FIXTURE_ROOT }, snapshotEvents: () => mcpReadEvidenceLog() },
+  },
+});
+
 /** 只有 read 证据的会话日志：缺项只落在**上层探查** —— 决策 ④ 之后配额要免的正是那一半，
  *  所以"数配额轮次"的用例都得用它（缺 read 时配额会被扣下，见 test/fact-gate.test.ts）。 */
 function readOnlyLog(): SessionEvent[] {
@@ -220,7 +267,16 @@ function createMockCtx(bus: LessonLoopSpy = {}, value?: Partial<Config>): MockCt
     bus,
     tools: {
       guard(fn) {
-        ctx.guardInstalled = { fn };
+        // 生产 guard 现在可能交回 `{ reason, info }`；存量用例断言的是模型看到的文案，
+        // 这里统一折回 `reason`。结构化身份的断言只在 host.test 的 raw 口上做。
+        ctx.guardInstalled = {
+          fn: (exec) => {
+            const result = fn(exec);
+            return typeof result === "string"
+              ? result
+              : (result as { reason?: string } | undefined)?.reason;
+          },
+        };
         return () => {
           ctx.guardInstalled = null;
         };
@@ -687,6 +743,30 @@ function factgatePasses(passes: readonly unknown[]): unknown[] {
 }
 
 describe("pass 信号上报的完整契约（总线同时提供 report/pass）", () => {
+  it("mcp read_multiple_files 的 paths 数组进 readCalls（与内置 read 同一条证据链）", () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const id = "s-mcp-read";
+    ctx.guardInstalled!.fn(editExecWithEvents(id));
+    assert.equal(
+      ctx.guardInstalled!.fn(editExecWithMcpRead(id)),
+      undefined,
+      "MCP 读证据必须被采纳；若 applyToolCall 仍只认内置 read，这里会首拒",
+    );
+  });
+
+  it("mcp write_file 的 content 进写台账（writeTextOf 的 MCP 分支）", () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const id = "s-mcp-write";
+    ctx.guardInstalled!.fn(editExecWithEvents(id));
+    assert.equal(
+      ctx.guardInstalled!.fn(editExecWithMcpWrite(id)),
+      undefined,
+      "MCP 写台账 + 读证据必须被采纳；MCP content 没进 writeTextOf 时，mtime 归因会退化成外部改动",
+    );
+  });
+
   it("取证通过 → bus.pass 被调用一次，载荷含 category/signature", () => {
     const passes: unknown[] = [];
     const reports: unknown[] = [];

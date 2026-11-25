@@ -55,7 +55,7 @@
 
 - **它拦截，不是建议。** 判定挂在 `ctx.tools.guard` 的同步谓词上：返回字符串即拒绝该次调用。宿主把理由变成这次调用的错误结果，所以模型读到的是"为什么被拒、改成什么写法"，不是静默失败。
 - **三条防线：**
-  - `bash` / `pwsh` 危险命令（`lib/danger-rules.ts` 的 `bashVerdictOf`）：git 钩子绕过、灾难性 `rm`、下载即执行、长驻 dev server、git 破坏族、基础设施破坏族。rc.2 持久终端 bundle 的 `terminal_send` 也折进同一调用面：`text` 当命令判定，方言按终端后端的平台给。
+  - `bash` / `pwsh` 危险命令（`lib/danger-rules.ts` 的 `bashVerdictOf`）：git 钩子绕过、灾难性 `rm`、下载即执行、长驻 dev server、git 破坏族、基础设施破坏族、密钥路径删除/读取与 GitHub 远端破坏。rc.2 持久终端 bundle 的 `terminal_send` 也折进同一调用面：`text` 当命令判定，方言按终端后端的平台给。
   - 编辑/写类工具上的凭据与密钥路径（`secretPathDeny`）——单目标编辑器按**参数键形**识别，`apply_patch` 走官方补丁解析器取目标，**不看工具名**，因为工具名会随 provider 漂移。
     - 输入区还有**第二枚**拒绝键 `opaqueTarget`：目标路径长到超出可判定上限时，既没确认为凭据、也没确认不是，所以判拒绝，文案是"别原样重试、把路径贴给用户确认"。与 bash 侧 `nestedShellUnconfirmed` 同一个原则——**判不了不等于安全**。（超长的**命令**走的是 `nestedShellUnconfirmed`。）
   - 首次编辑事实门（`lib/fact-gate.ts`）：没读过目标就改，或碰了高风险范围却没有层证据，会被拒，并附上一份点名缺项的行动清单。`apply_patch` **按每个操作目标逐枚过门**（move 的源与目的都算）；空补丁、官方解析器不接受的补丁、或目标数超出 `APPLY_PATCH_TARGET_LIMIT`（128）时整条拒绝而不是部分生效，且这条拒绝**不受 `factGateEnabled` 影响**。
@@ -74,11 +74,11 @@
 
 ### 判定是怎么做出来的
 
-- 只判 `bash` 与 `pwsh` 的命令串，以及 `terminal_send` 的 `text`（边界见「已知边界」）；`command` / `text` 非字符串则放行（不猜）。按 `;`、`&&`、`||`、`|`、换行、`&`、`(`、`)`、反引号分段，引号内不切段。
+- 只判 `bash` 与 `pwsh` 的命令串、`terminal_send` 的 `text`，以及注册为 `mcp__<server>__<tool>` 且参数带 `command` / `cmd` 的 MCP 工具（边界见「已知边界」）；`command` / `text` 非字符串则放行（不猜）。按 `;`、`&&`、`||`、`|`、换行、`&`、`(`、`)`、反引号分段，引号内不切段。
 - 断段、切词、结构视图、引号是否闭合**四个出口共用一台 POSIX 状态机**（`lib/command-segments.ts`）。两台机器会让同一串在不同判据下结论相反。
 - 包装词（`sudo`、`env`、`time`、`nice`、`stdbuf`、`timeout`、`taskset`、`watch`、`setsid`、`doas`、`pkexec`、`nohup`、`exec`、`command`、`xargs`、`parallel` 与前导 `VAR=x`）、bin 路径前缀（按 basename 比对，所以 `/usr/bin/sudo` 也不是逃逸口）、引号、反斜杠续行**都不是**逃逸口。引号包裹的旗标或命令头**是生效写法**：`git commit "--no-verify"` 确实跳过钩子，`"rm" -rf ~` 与不加引号同判。
 - 因为按工具维护的 option 表按定义补不完，包装词领头的段还会把其后**每个词位**都当候选命令头各判一遍。
-- **原则：认不准就放行**——唯一例外是**看不见的执行上下文**。取不出可靠文本的嵌套 `-c` / `eval` 体、超过下钻上限、段头是取代码串再执行的非 shell 解释器（`python3 -c`、`node -e`、`perl -e`、`php -r`…）、以及超出可判定长度的命令，一律判 `nestedShellUnconfirmed`：出路是交用户显式确认，或改写成单层、引号闭合的形态。
+- **原则：认不准就放行**——唯一例外是**看不见的执行上下文**。取不出可靠文本的嵌套 `-c` / `eval` 体、超过下钻上限、以及超出可判定长度的命令，判 `nestedShellUnconfirmed`；段头是非 shell 的解释器、且它在执行代码串或从 stdin 读代码（`python3.14 -c`、`python -`、`node -e`、`perl -e`、`php -r`…），另判 `interpreterCode`。启动器前缀（`uv run --project .`、`poetry run`、`pnpm exec`、`npm exec`、`npx`、`bunx`）与合写旗标（`-cprint(1)`、`-lc`）同面识别，`--project` 等带值旗标不会被当成要执行的命令。两者都要交用户显式确认，或改写成单层、引号闭合的形态；`interpreterCode` 在工作区档也**不**让给沙箱——代码串能发起网络/进程副作用，而沙箱只保护写入。
 - **严重度择优**：同一串里既有 `ask` 段又有 `deny` 段时，**整串按 `deny` 统一处理**（逐段扫到拿到 `deny` 为止）。少了它，前面那段 `ask` 会让扫描提前收工、后面那段的灾难从未被判定。
 
 ## <img src="https://api.iconify.design/lucide/package.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 安装
@@ -138,12 +138,15 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 | 族 | 拦 | 放行与出路 |
 |---|---|---|
 | git 钩子绕过 | `commit` / `push` / `merge` / `cherry-pick` / `rebase` / `am` 上的 `--no-verify` 及其无歧义缩写；`commit` / `am` 的短形式 `-n`；`git -c core.hooksPath=` 与 `git config core.hooksPath <dir>`（含 `--global` 与 `=` 合写）。git 参数**按角色**走查：短簇逐字母展开、带值选项的取值不当旗标看、`--` 之后一律 pathspec、`-c` 的取值才是被查的那一段 | `git push -n`（dry-run）、`git cherry-pick -n`（不提交）、`git rebase -n`（--no-stat）、`git config --get` / `--unset` / `--list core.hooksPath`，以及提交信息里出现的该字样 |
-| 灾难性 `rm` | 判定条件**按命令词轨分别**。POSIX/cmd 轨要"递归 + 强制"，唯一例外是短旗标簇里的大写 `-R`，单独即灾难级。`Remove-Item` / `ri` 轨（以及 Windows 方言下的 `rm` / `del` / `rd` 别名）则**任何 Recurse 形态单独**命中灾难目标即灾难级、**不要求** `-Force`——那一形不给 `-Force` 也静默删整树。计入的目标：`/`、`~` 与 `~/…`、家目录字面路径、`$HOME` 与 `${HOME…}` 各形态、`.` / `..` / `../…`、系统与用户目录前缀下的整树、以及绝对 glob 与花括号展开；路径先做词法归一。命令用词另含 `pwsh` / `cmd` 的删除形态，大小写不敏感 | 项目内相对清理（`rm -rf node_modules`、`./dist`）、POSIX 轨上只有 `-f`（`rm -f ~`）或只有小写 `-r`（`rm -r ~`）——**这一档按写法而非语义**，不对称是刻意的；`Remove-Item -Recurse ./build`；`/var` 与 `/tmp`（有意不列：误拦代价高于漏拦）；`/usrx` 这类不同段 |
+| 灾难性 `rm` | 判定条件**按命令词轨分别**。POSIX/cmd 轨要"递归 + 强制"，唯一例外是短旗标簇里的大写 `-R`，单独即灾难级。`Remove-Item` / `ri` 轨（以及 Windows 方言下的 `rm` / `del` / `rd` 别名）则**任何 Recurse 形态单独**命中灾难目标即灾难级、**不要求** `-Force`——那一形不给 `-Force` 也静默删整树。计入的目标：`/`、`~` 与 `~/…`、家目录字面路径、`$HOME` 与 `${HOME…}` 各形态、`.` / `..` / `../…`、系统与用户目录前缀下的整树、以及绝对 glob 与花括号展开；路径先做词法归一。命令用词另含 `pwsh` / `cmd` 的删除形态，大小写不敏感；`find`/`xargs` 的投影复用本规则，带谓词/范围的 `find` 删除另判 `findDelete`（ask），`-maxdepth` 这类范围形态不再硬拒 | 项目内相对清理（`rm -rf node_modules`、`./dist`）、POSIX 轨上只有 `-f`（`rm -f ~`）或只有小写 `-r`（`rm -r ~`）——**这一档按写法而非语义**，不对称是刻意的；`Remove-Item -Recurse ./build`；`/var` 与 `/tmp`（有意不列：误拦代价高于漏拦）；`/usrx` 这类不同段 |
 | 下载即执行 | `curl` / `wget` / `fetch` 之后接 shell 或脚本解释器，包括经 `sudo`、带路径前缀的解释器、`xargs`、`parallel`，以及反序的过程替换（`sh <(curl …)`、`python <(curl …)`、`source <(curl …)`、`. <(curl …)`）。执行端覆盖 `sh` / `bash` / `zsh` / `dash` / `ksh`、`pwsh` / `powershell` / `iex` / `Invoke-Expression`，以及 Python / Node / Perl / Ruby / PHP / Lua / osascript——它们都会把 stdin 当代码执行。**双引号内的 `$( )` 同样算执行上下文**，所以 `echo "$(curl x \| sh)"` 照拦。PowerShell 家族两端都认：`Invoke-WebRequest` / `Invoke-RestMethod` / `iwr` / `irm` 接 `pwsh` / `powershell` / `iex` / `Invoke-Expression`，与 `curl … \| sh` 同判 | `curl -O`、`curl … \| jq .name`、`cat x \| grep foo`、无下载来源的 `ls \| sh`、`source ./setup.sh`，以及引号内的字面 `\|` |
 | 长驻 dev server | 单独出现的 `vite` / `next` / `nuxt`、`webpack serve` / `--watch`、`cargo watch`、`npm` / `pnpm` / `yarn` / `bun run dev` / `watch` / `serve` / `start`、一切 `dev` 词根脚本名，以及经 `npx` / `bunx` / `exec` / `dlx` 起的长驻包（版本选择器不算新身份）。`vite build --watch` 仍拦。一次性豁免**只看子命令位** | `npm test`、`npm run build`、`vite build`、`next build`、`webpack --config prod.js`、`cargo run` / `check` / `test`、`vitest run`，以及确认一次性子命令（`vite optimize`、`next lint`、`nuxt prepare`） |
 | 密钥路径编辑 | `.ssh` / `.gnupg` / `.aws` / `.kube` / `.docker` 目录内任何文件，**含相对形态**；`id_rsa` / `id_ed25519` / `id_ecdsa` 主名及其拷贝后缀；`.pem` / `.key` / `.p12` / `.pfx` / `.keystore` / `.jks` 结尾；`.env` 及其变体；`.envrc` / `.npmrc` / `.pypirc` / `.netrc` / `.pgpass` / `.git-credentials`；`credentials.json`、`service-account*.json`、`token.json`；`secret(s).yaml` / `yml` / `json`；`.git/config`。目标先做词法归一，宿主给了会话 cwd 时相对目标按 cwd 解析；反斜杠 Windows 路径同判 | `.env.example` / `.sample` / `.template` / `.defaults`、`api.key.ts`、`main.pem.tsx`、`.gitignore`、`mysecrets.yaml`、`secrets.yaml.bak`、`myid_rsa` |
+| 密钥删除族（`secretDelete`） | rm 家族删除命中上面那批密钥/凭据路径或 `.git` 元数据；可能展开到密钥面的 glob 目标也计入，`xargs rm` 的 source tokens 与命令自身目标同判；`find` 的起始路径、`-name`/`-path` 取值、`-delete`、`-exec rm` 与包在 `sh -c` 里的删除命令一并过密钥面；花括号（`.env{,.local}`、`~/.ssh/{id_rsa,config}`）按 shell 语义展开后逐项判 | 工作区档/未知档会问，只读档拒绝，完全权限档放行；不让路给沙箱。`.env.example` 与非密钥相对路径放行 |
+| 密钥读取族（`secretRead`） | `cat` / `head` / `tail` / `less` / `more` / `bat` / `strings` / `xxd` / `od` / `base64`，以及 pattern-first 的 `grep` / `rg` / `sed` / `awk` 读取密钥路径；含 `-e` / `-f` / `--regexp=` / `--expression=` 的附着写法与 `xargs` source；`find` 的起始路径/`-name` 取值与 `-exec cat`（含 `sh -c` 包装）同判；花括号展开同删除族 | 能问的档位都会问；不让路给沙箱。非密钥文件、`grep .env README.md` 放行 |
+| GitHub 远端破坏族（`ghDestroy`） | `gh repo delete`、`gh release delete`、`gh release delete-asset`、`gh project delete`、`gh codespace delete`、`gh pr merge --admin`、`gh api -X DELETE` / `--method DELETE`，以及可见的 `gh api graphql` mutation | 会问；`gh repo view` / `gh pr view` / `gh release view` 这类只读查询与 GraphQL query 放行。本地沙箱不管网络 |
 | git 破坏族（全部 `ask`） | `reset --hard`（含 `--har` 这类无歧义缩写）、`checkout -- <path>` / `checkout .` / `checkout -f` / `checkout <rev> <path>`、`restore <path>`（`--staged` 单用**不判**——只动索引）、`clean -f*`（含 `-xf` / `-x -f`）、`stash drop` / `clear`、`branch -D` / `--delete --force`、`push -f` / `--force` / `--force-with-lease` / `+refspec`。短旗标取值**按子命令**解析（`push -u` 与 `clean -x` 是布尔，`commit -m` 与 `clean -e` 才取值）。与 no-verify 那条**共用一趟走查** | 每一条都有正当用法。硬拒"危险但有时正确"的操作会**逼模型找绕路写法**——`git reset --hard` 被拒后它可能直接 `rm` 掉那些文件，一个更糟且不被拦的写法。所以这一族是问，不是拒 |
-| 基础设施破坏族（全部 `ask`） | `terraform destroy`、`terraform apply -auto-approve`、`docker … prune`、`kubectl delete`，以及迁移族（`manage.py migrate`、`prisma migrate`、`rails db:migrate`、`alembic upgrade`、`flyway migrate`、`typeorm migration:run`、`knex migrate:latest`…） | `plan -destroy`（plan 只打印）、不带 `-auto-approve` 的 `apply`（terraform 自己会问）、`kubectl --dry-run=client` / `server`（只有这两个取值；`none` 会实际执行）、只读动作（`prisma migrate status`、`flyway info`）与按工具分表的干跑旗标（`manage.py --plan` / `--sql`、`alembic --sql`）。迁移族另接受 `uv run` / `poetry run` / `pnpm exec` / `python -m` 等启动器前缀，同时在文档里搜这串仍不会假命中 |
+| 基础设施破坏族（全部 `ask`） | `terraform destroy` / `terraform apply -destroy`、`terraform apply -auto-approve`、`docker … prune`、`docker compose down -v/--volumes`、`kubectl delete`，以及迁移族（`manage.py migrate`、`prisma migrate`、`rails db:migrate`、`alembic upgrade`、`flyway migrate`、`typeorm migration:run`、`knex migrate:latest`…） | `plan -destroy`（plan 只打印）、`apply -destroy=false`、不带 `-auto-approve` 的 `apply`（terraform 自己会问）、`kubectl --dry-run=client` / `server`（只有这两个取值；`none` 会实际执行）、`docker compose down` 不带 `-v`、只读动作（`prisma migrate status`、`flyway info`）与按工具分表的干跑旗标（`manage.py --plan` / `--sql`、`alembic --sql`）。迁移族另接受 `uv run` / `poetry run` / `pnpm exec` / `python -m` 等启动器前缀，同时在文档里搜这串仍不会假命中 |
 
 ## <img src="https://api.iconify.design/lucide/sliders-horizontal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 设置项
 
@@ -179,16 +182,21 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 | `noVerify`（git 钩子绕过） | deny | deny | **deny** | **deny** |
 | `rmrf`（包住可写根 / 家目录 / 根） | allow¹ | deny | allow | **deny** |
 | `rmrf`（沙箱完全覆盖这次目标） | allow | allow | allow | allow |
+| `findDelete`（带谓词/范围的 `find` 删除） | deny | ask | allow | allow |
+| 密钥删除族（`secretDelete`） | deny | ask | allow | allow |
+| 密钥读取族（`secretRead`） | ask | ask | allow | allow |
 | `pipeShell`（下载即执行） | ask | **deny** | allow | **deny** |
 | `devServer`（长驻服务） | allow² | allow² | allow² | allow² |
+| `interpreterCode`（解释器代码串/stdin） | ask | ask | allow | allow |
 | `nestedShellUnconfirmed`（认不准） | ask | allow | allow | allow |
+| GitHub 远端破坏族（`ghDestroy`） | ask | ask | allow | allow |
 | git 破坏族 | ask | ask | allow | allow |
 | 基础设施破坏族 | ask | ask | allow | allow |
 
 ¹ 只读档拒一切写，所以不存在"部分删除成功"——每个目标都被完全覆盖，整族让给宿主；宿主会给出官方拒绝标记与 `sandbox_permissions` 升级路径。
 ² 宿主自带的协作式超时与 `promoteOnTimeout` 已经管住长驻命令，这条规则不再提供安全属性，故整条让给宿主。
 
-- **完全权限 = 零兜底，但仅限"问不了"的那一支，且有一处例外。** 官方预设把这一档绑死 `approval: never`，用户选它就是"不要拦、不要问"：命中只进设置卡的统计，模型侧一个字都不改；例外是 `noVerify`，它仍然拒绝——绕 git 钩子与沙箱无关，整档放行会让它成为唯一的绕过口。而 `danger-full-access + ask`（自定义组合，或没装预设服务时的默认）**还能问**，那一支沿用工作区档的处置——沙箱什么都不拦却把动作静默放行，方向正好相反。
+- **完全权限 = 零兜底，但仅限"问不了"的那一支，且有一处例外。** 官方预设把这一档绑死 `approval: never`，用户选它就是"不要拦、不要问"：命中只进设置卡的统计，模型侧一个字都不改；例外是 `noVerify`，它仍然拒绝——绕 git 钩子与沙箱无关，整档放行会让它成为唯一的绕过口。而 `danger-full-access + ask`（自定义组合，或没装预设服务时的默认）**还能问**，那一支沿用工作区档的处置，**唯一例外是 `nestedShellUnconfirmed`：工作区档的 allow 依赖常驻沙箱仍会拦住写入，而这一档没有沙箱，必须回 `ask`（问不了则 `deny`）**；**其余键（含 `findDelete`、密钥删除/读取）按工作区档取值**——工作区档会问的仍会问，工作区档 allow 的仍 allow；`rmrf` 仍是 deny。
 - **自动审查留三条确定性硬拦**（`rmrf`、`pipeShell` 与 `noVerify`）。reviewer 是一个 LLM，它的 allow 不等于用户批准，而这一档沙箱什么都不拦；`noVerify` 与其余各列一样拒绝——绕 git 钩子与沙箱无关，不交给 reviewer 决定。其余**全部**交给 reviewer，避免同一动作问两次。
 - **一条硬规则：「能不能问」决定 `ask` 能不能落地。** `never` 在**任何应答者之前**就确定性返回 `rejected`（理由还会被宿主换成它自己的固定串），所以本该 `ask` 的规则在这一档由我们自己统一处理成 `deny`，并附一段"这档问不了、换哪一档才能问"，不让模型只拿到一句"不许"。
 - **读不到沙箱模式时**（没有可约束的执行器，或服务形状不符）走一条保守列：写类判据照拦，"认不准"照问。它**刻意不复用**工作区档那一列——那一列依赖"沙箱会拦住一部分"这个前提，而这里没有这个前提。
@@ -208,8 +216,10 @@ dsh plugin --profile web add @jayyuen66/dsh-danger-guard
 - **`cmd` 当段头判不到。** `cmd.exe /c rd /s /q C:\Windows` 及其去 `.exe`、带路径前缀的写法仍逃逸：`cmd` 既不在删除命令词表、也不在下钻名单里，而它的引号规则（`%VAR%`、`^` 续行、`&` 不分段）离 POSIX 太远，拿 POSIX 词法器读它的 `/c` 体会新开一批误拦。**PowerShell 家族已收**：`pwsh` / `powershell` 的 `-c` / `-Command` 体按 join 语义取出、逐段判，并在体内强制开 Windows 字形轨道。点了 `-File` / `-EncodedCommand` 而没有取体旗标 ⇒ 要跑的东西注定不在输入里，升格为需确认。
 - **干跑修饰不进判据**（`Remove-Item -WhatIf -Recurse ~` 照拦）。`-WhatIf` / `-Confirm` 只是让 pwsh 打印将做什么；把干跑算成一类可豁免形态是一个还没人拍板的策略决定，所以现状按现状钉住。
 - **词尾没有分隔符的 `~user` 不收。** `rm -rf ~root` 展开成什么取决于本机账号表，而本闸既不碰文件系统也不查用户。**带分隔符的 `~user/…` 已收**。
-- **PATH 上的解释器跑代码串一律需确认。** `python3 -c "print(1)"` 是良性的，也仍要确认——这是"看不见就不会静默放行"的定价。
-- **`bash` 重定向写入不在事实门覆盖面。** 门禁挂在 `edit` / `write` / `apply_patch` 三类工具上；`printf > f`、`tee`、`cat >`、`sed -i` 绕过"先取证"这条。纳入它要解析 shell 重定向与就地编辑器。
+- **PATH 上的解释器跑代码串一律需确认。** `python3 -c "print(1)"`、`python3.14 -c "print(1)"`、`python -` 都是良性的，也仍要确认——这是"看不见就不会静默放行"的定价；工作区档同样要问。
+- **MCP 命令工具按 shell 文本判，但背后没有 bash 沙箱。** 名为 `mcp__<server>__<tool>`、参数带 `command` / `cmd` 的工具会折成 `bash`（POSIX）或 `pwsh`（Win32），走同一套规则。MCP 的 stdio server 由宿主直接 spawn，这些调用背后没有 bash 沙箱，所以写侧规则**不会**让位给常驻沙箱。`bash` 调用显式带非空 `sandbox_permissions` 时同理——它按升权后的模式执行，不再代表常驻档位，`rmrf` 照样硬拒。`code` 刻意不认：CUA/PTC 的代码在它自己的沙箱里跑，不在这条面上。
+- **MCP 文件工具按名字末段进事实门。** 末段为 `write_file`、`edit_file`、`create_file`、`replace_in_file`、`patch_file`、`apply_patch`、`str_replace`、`write_text_file`、`append_file`、`replace_text`、`insert_text`、`delete_text_range` 或 `apply_diff` 的工具按编辑工具处理，`path` / `file_path` 是被门禁的目标，写入文本按 `content` / `file_text` / `new_text` / `new_string` / `new_str` / `text` 记入本会话自己的编辑台账；末段为 `read_file`、`read_text_file`、`get_file_contents`、`view_file` 或 `read_multiple_files` 的调用算读证据，`read_multiple_files` 的 `paths` / `file_paths` 数组逐个目标记基线、逐个结算。`move_file` / `rename_file` / `delete_file` 这类源/目的或删除形态仍不猜——它们不是单目标写入，纳入前要先解析成对目标；其他未知 MCP 工具名同样不猜，它的文件效应仍归宿主沙箱。
+- **`bash` 重定向写入不在事实门覆盖面。** 门禁挂在 `edit` / `write` / `str_replace_editor` / `apply_patch` 与上面那批 MCP 编辑工具上；`printf > f`、`tee`、`cat >`、`sed -i` 绕过"先取证"这条。纳入它要解析 shell 重定向与就地编辑器。
 - **`terminal_send` 按 shell 文本判，不按终端状态判。** 调用里没有后端类型，所以 REPL 会话的输入也走同一套 shell 规则（正常的 REPL 输入可能被误拦），命令拆成多次发送时可以绕过词法判定；`submit: false` 不豁免——文本可能在后续 Enter 时执行。用户自己往终端里敲的内容完全不经过这道闸。
 - **少数 `ask` 档形态是盲问。** 只给一个参数、不带 `--` 的 `git checkout <path>` 与"切分支"在词法上不可分（显式的 `checkout <rev> <path>` 会判），`git push --force` 不解析目标分支。经 shell 重定向落笔的改动、以及目标在会话外被改动的残窗，同理。
 - **MSYS/Cygwin 挂载形态不折算。** 真实 Windows 宿主上 `rm -rf /c/Windows/System32` 要一张挂载表，那是新依赖加新设计决定。

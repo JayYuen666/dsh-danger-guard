@@ -66,6 +66,7 @@ overrides:
   "@deepseek-ai/dsh-workspace": 0.2.3-alpha.2
   "@deepseek-ai/schemastery": 3.20.0-alpha.1
   koffi: 3.3.8
+  minimatch: 11.0.9
   zod: 4.6.7
 # esbuild 由 vite 传递引入，其安装脚本负责落下当前平台的二进制；本仓没有包直接依赖它。
 # koffi 是 @deepseek-ai/dsh-fs-local 的直接依赖（真 spine 那两层测试要真 FsLocal 才装它），

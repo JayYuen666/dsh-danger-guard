@@ -31,6 +31,7 @@
 // 上界约 maxSessions × 2 × maxFiles 个文件条目。dropSession() 由 host 接线到官方
 // `session/disposed` 事件主动回收分片（host.ts apply()）；LRU 淘汰只是兜底。
 
+import { isEditToolName } from "./tool-names.ts";
 import { fillTemplate } from "./messages.ts";
 import type { DangerGuardMessages } from "./messages.ts";
 import { NEED_ORDER, gapLine } from "./gap-directives.ts";
@@ -205,11 +206,6 @@ export function renderDenyMessage(denial: FactDenial, messages: DangerGuardMessa
   return [head, ...lines, messages.declareTail].join("\n");
 }
 
-/** 编辑类工具名。str_replace_editor 是 dsh-base 并存的另一套编辑器
- *  （create/str_replace/insert 是写操作）；view 只读，host 侧把它算作 read 证据。
- *  apply_patch 是多目标补丁，目标清单由 host 侧逐枚传入；这里只负责状态机按键分片。 */
-const EDIT_TOOLS = new Set(["edit", "write", "str_replace_editor", "apply_patch"]);
-
 /** 明确放行的文件类型：**文档格式**扩展名（md/markdown/rst/adoc）。
  *  `.txt` 不在其中：它是通用文本容器，`CMakeLists.txt` / `requirements.txt` 是构建与
  *  依赖逻辑，不是"无执行影响"的文档。`.md` 也可能被文档构建系统消费，所以这条豁免
@@ -341,7 +337,7 @@ export class FactGate {
     input?: FactEvidenceInput,
     maxDenies = this.maxDenies,
   ): FactDecision {
-    if (name === undefined || !EDIT_TOOLS.has(name)) {
+    if (!isEditToolName(name)) {
       return { kind: "allow" };
     }
     if (typeof filePath !== "string" || filePath.length === 0) {

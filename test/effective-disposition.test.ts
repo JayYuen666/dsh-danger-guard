@@ -64,6 +64,43 @@ describe("effectiveDispositionOf：惰性与覆盖", () => {
     assert.equal(reads, 0);
   });
 
+  it("sandbox:false（MCP / 显式升权）不给 rmrf 让路，也不读宿主沙箱面", () => {
+    let reads = 0;
+    const effective = effectiveDispositionOf({
+      facts: FACTS,
+      session: undefined,
+      cwd: undefined,
+      sandbox: false,
+      shellRaw: () => {
+        reads += 1;
+        return confiningHost.shellRaw();
+      },
+      policyRaw: () => {
+        reads += 1;
+        return confiningHost.policyRaw();
+      },
+      canonicalize: confiningHost.canonicalize,
+      tempDir: confiningHost.tempDir,
+    });
+    // 同一份目标在 sandbox:true 下会被 `sandboxDropsOf` 判成覆盖（/etc 在工作区根 /ws 外），
+    // sandbox:false 时必须保持 deny —— 这正是 MCP stdio 无沙箱 / 升权后全权执行的那一格。
+    assert.equal(effective.dispositionOf(rmrfWith(["/etc"])), "deny");
+    assert.equal(
+      effective.verdictOf("rmrf", { role: "disasterTarget", offending: ["/etc"] }).verdict,
+      "deny",
+    );
+    // `nestedShellUnconfirmed` 在工作区档的 allow 以“沙箱仍在拦写入”为前提；没有沙箱时
+    // 必须换成 unknown 档（ask），不能静默放行。
+    assert.equal(effective.dispositionOf({ key: "nestedShellUnconfirmed" }), "ask");
+    assert.equal(effective.verdictOf("nestedShellUnconfirmed", undefined).verdict, "ask");
+    assert.equal(
+      effective.verdictOf("nestedShellUnconfirmed", undefined).facts.mode,
+      "unknown",
+      "无沙箱时这一键按 unknown 档求值",
+    );
+    assert.equal(reads, 0, "不让路就不读沙箱面");
+  });
+
   it("沙箱覆盖把 rmrf 从 deny 折成 allow；同一实例只读一次宿主接口", () => {
     let reads = 0;
     const effective = effectiveDispositionOf({

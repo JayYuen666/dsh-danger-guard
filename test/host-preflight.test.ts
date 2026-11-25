@@ -141,7 +141,16 @@ function createMockCtx(): MockCtx {
     value: { ...BUILTIN_BASE },
     tools: {
       guard(fn) {
-        ctx.guardInstalled = { fn };
+        // 生产 guard 现在可能交回 `{ reason, info }`；存量用例断言的是模型看到的文案，
+        // 这里统一折回 `reason`。结构化身份的断言只在 host.test 的 raw 口上做。
+        ctx.guardInstalled = {
+          fn: (exec) => {
+            const result = fn(exec);
+            return typeof result === "string"
+              ? result
+              : (result as { reason?: string } | undefined)?.reason;
+          },
+        };
         return () => {
           ctx.guardInstalled = null;
         };

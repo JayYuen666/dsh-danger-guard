@@ -73,8 +73,12 @@ describe("派生台账的生命周期", () => {
     // 上一代已卸载时这里的残留必须清零：拿旧谓词判新用例是「红/绿都与台账回收无关」。
     predicate = undefined;
     ctx.provide("tools", {
-      guard(registered: (exec: Record<string, unknown>) => string | undefined) {
-        predicate = registered;
+      guard(registered: (exec: Record<string, unknown>) => unknown) {
+        // 生产 guard 可能交回 `{ reason, info }`；本文件只读文案，统一折回 reason。
+        predicate = (exec) => {
+          const raw = registered(exec);
+          return typeof raw === "string" ? raw : (raw as { reason?: string } | undefined)?.reason;
+        };
         return (): void => {
           predicate = undefined;
         };

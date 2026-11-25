@@ -33,8 +33,20 @@ import path from "node:path";
 // 段边界这一层单列在 lib/command-segments.ts：四类规则都只在"段"上判定，断在哪里与判成什么无关。
 // 同一个模块也负责切词与结构视图——三处读法必须同源，否则"这一段里有哪些词"会随判据而变。
 import { hasUnclosedQuote, lexTokens, splitSegments, structureView } from "./command-segments.ts";
+import { findXargsDanger } from "./find-xargs.ts";
+import { ghDestroyDanger } from "./gh-rules.ts";
+import type { FindXargsDeps } from "./find-xargs.ts";
 import { dockerDanger, kubectlDanger } from "./container-rules.ts";
+import {
+  codeFlagIndex,
+  codeInterpreterHead,
+  isPythonInterpreterName,
+  PYPY_BIN_NAME,
+  PYTHON_BIN_NAME,
+} from "./interpreter-rules.ts";
 import { DANGER_RE } from "./danger-regexes.ts";
+import { absoluteGlobCouldHit, globRegExp, GLOB_METACHAR_RE } from "./glob-match.ts";
+import { isDotfileOnlyGlob, SECRET_GLOB_PROBES, SECRET_GLOB_STEM_RE } from "./secret-glob.ts";
 import { declaredTargets } from "./edit-targets.ts";
 import {
   DURATION_WORD_RE,
@@ -47,13 +59,14 @@ import {
 import { userSecretRegexes } from "./secret-patterns.ts";
 import type { ShellToken } from "./command-segments.ts";
 import type { Fix } from "./fix.ts";
+import { isApplyPatchToolName, isEditToolName } from "./tool-names.ts";
+import { readTargetTokens, READ_PATTERN_FIRST_BIN_WORDS } from "./read-targets.ts";
 
 // 灾难目标归一与目标键提取各自单独成模块：判定层只保留规则。
 export { disasterTargetPathOf } from "./disaster-target.ts";
 export { declaredTargets } from "./edit-targets.ts";
 // 出路形状定义在零依赖的 ./fix.ts（为什么不在本文件：见那枚模块的头部注释）。
 export type { Fix, FixRole } from "./fix.ts";
-
 /**
  * 命中规则的标识 = lib/messages.ts 文案表的键（宿主按键取当前语言的拒绝理由，
  * 写清楚替代方案，模型可直接改写命令）。
@@ -64,6 +77,21 @@ export type { Fix, FixRole } from "./fix.ts";
 export type BashDenialKey =
   | "noVerify"
   | "rmrf"
+  | "findDelete"
+  /** 删除目标是凭据面（`.env`/`.ssh`/私钥…）或 git 元数据（`.git`）：沙箱只按路径放行，
+   *  不区分"这是密钥"与"这是普通文件"，所以由插件补。 */
+  | "secretDelete"
+  /** 直接读取凭据面（`cat ~/.ssh/id_rsa`、`grep KEY .env`）：沙箱允许读，插件补语义。 */
+  | "secretRead"
+  /** `gh repo delete` / `gh release delete` / `gh pr merge --admin` / `gh api -X DELETE`：
+   *  远端破坏，沙箱的网络 vocabulary 之外。 */
+  | "ghDestroy"
+  /** 段头是非 shell 的解释器、且它在执行**代码串**（`python3.14 -c` / `node -e` / `python -`
+   *  从 stdin 读）。语言层的动作不在命令词法面上，沙箱也管不到它跑起来之后做什么；
+   *  与 `nestedShellUnconfirmed` 分开：后者是"壳的体看不见"，前者是"看得见壳、看不见壳里的语言"。
+   *  分开的原因是处置不同：`nestedShellUnconfirmed` 在工作区档可以让路给沙箱，而代码串
+   *  可以发起网络/进程副作用，不能按"沙箱仍在保护写入"放行。 */
+  | "interpreterCode"
   | "pipeShell"
   | "devServer"
   | "nestedShellUnconfirmed"
@@ -96,6 +124,8 @@ export type BashDenialKey =
   | "tfAutoApprove"
   /** `docker * prune`：删未使用的镜像/容器/卷/网络（`-a` 扩到"没在跑的"）。 */
   | "dockerPrune"
+  /** `docker compose down -v/--volumes`：连 Compose 文件声明的命名卷一起删，数据不可撤销。 */
+  | "composeDownVolumes"
   /** `kubectl delete`：删集群对象（`--dry-run` 除外）。 */
   | "kubectlDelete"
   /** 数据库迁移命令（`manage.py migrate` / `prisma migrate` / `rails db:migrate` …）：改 schema。 */
@@ -181,6 +211,12 @@ export const RULE_TIER: Readonly<Record<BashDenialKey, RuleTier>> = {
   // 已确认危险：命令形态本身就是错的，出路是改写命令（各有 `Fix` 或文案里的静态指示）。
   noVerify: "deny",
   rmrf: "deny",
+  // 已知在删、但删的是谓词匹配集：让用户看范围再拍板，不按 `rmrf` 硬拒。
+  findDelete: "ask",
+  secretDelete: "ask",
+  secretRead: "ask",
+  ghDestroy: "ask",
+  interpreterCode: "ask",
   pipeShell: "deny",
   devServer: "deny",
   // 认不准那一档 —— **真 `ask`**。它的文案本来就写着"把它贴给用户、由用户显式确认后再
@@ -206,10 +242,10 @@ export const RULE_TIER: Readonly<Record<BashDenialKey, RuleTier>> = {
   tfDestroy: "ask",
   tfAutoApprove: "ask",
   dockerPrune: "ask",
+  composeDownVolumes: "ask",
   kubectlDelete: "ask",
   dbMigrate: "ask",
 };
-
 /** 运行时规则键校验：动态分支回传的值在进入宿主前必须真的是本表的一枚键。 */
 const isBashDenialKey = (key: unknown): key is BashDenialKey =>
   typeof key === "string" && Object.hasOwn(RULE_TIER, key);
@@ -708,7 +744,8 @@ function hasForceRecursive(
  *  包装词不在这张名单里：执行端前面的 sudo/timeout/nice/xargs… 一律由 `runPrefixEnd`
  *  按**同一张**前缀词表去掉（旧实现在这里另写了一份 `EXEC_WRAPPERS`，与 runPrefixEnd 的
  *  词表不同步，`| timeout 5 sh`、`| sudo -u root sh`、`| command sh` 因此全套漏拦）。 */
-const PIPE_EXECUTOR_NAMES = String.raw`sh|bash|zsh|dash|ksh|pwsh|powershell|invoke-expression|iex|python(?:2|3)?|pypy(?:3)?|node(?:js)?|perl5?|ruby|php|lua(?:jit|[0-9.]*)?|osascript`;
+const PIPE_EXECUTOR_NAMES = String.raw`sh|bash|zsh|dash|ksh|pwsh|powershell|invoke-expression|iex|${PYTHON_BIN_NAME}|${PYPY_BIN_NAME}|node(?:js)?|perl5?|ruby|php|lua(?:jit|[0-9.]*)?|osascript`;
+
 /** 执行端整词窗口（命令头已剥过包装词，这里只比去掉路径与 `.exe` 之后的命令名）。 */
 const PIPE_EXECUTOR_HEAD = new RegExp(`^(?:${PIPE_EXECUTOR_NAMES})$`, "iu");
 /** "取回即执行"的命令头：解释器与 `source`/`eval`/`.`（`sh <(curl x)`、`eval "$(curl x)"`）。 */
@@ -1271,6 +1308,8 @@ const TF_AUTO_APPROVE_FALSE: ReadonlySet<string> = new Set(["false", "0", "f", "
 
 /** `-auto-approve` / `--auto-approve` / 带取值的等号形态（terraform 用单横线，双横线一并认）。 */
 const TF_AUTO_APPROVE_RE = /^--?auto-approve(?:=(?<value>.*))?$/u;
+/** `-destroy` 的等号形态；`terraform apply -destroy` 与 `terraform destroy` 等价（官方文档）。 */
+const TF_DESTROY_RE = /^--?destroy(?:=(?<value>.*))?$/u;
 
 /** 这一枚词是不是"确实跳过了确认"的 auto-approve：不带 `=` 的写法与非假取值算，`=false` 一类不算。 */
 function skipsApproval(word: string): boolean {
@@ -1281,12 +1320,23 @@ function skipsApproval(word: string): boolean {
   );
 }
 
+/** 这一枚词是不是真的 `-destroy`（`=false` 一类不算；`apply -destroy` 是 `destroy` 的别名）。 */
+function destroysTarget(word: string): boolean {
+  const matched = TF_DESTROY_RE.exec(word);
+  /* v8 ignore next 1 —— 取不到分组只在正则改坏时发生，调用点保证形式已匹配。 */
+  return (
+    matched !== null && !TF_AUTO_APPROVE_FALSE.has((matched.groups?.["value"] ?? "").toLowerCase())
+  );
+}
+
 /** `terraform`（与它的开源分支 `tofu`）的破坏性形态。 */
 function terraformDanger(words: readonly string[]): BashDenialKey | undefined {
   const [sub] = positionalsOf(words.slice(1));
   let key: BashDenialKey | undefined;
-  if (sub === "destroy") {
+  if (sub === "destroy" || (sub === "apply" && words.some((word) => destroysTarget(word)))) {
     // `terraform plan -destroy` **不是**这条：`plan` 只打印，`sub` 取到的是 `plan`。
+    // `terraform apply -destroy` 是 `destroy` 的官方别名，必须与 `destroy` 同判；
+    // 它若同时带 `-auto-approve`，仍先按 destroy 归类（两者都是 ask，文案更贴近"删资源"）。
     key = "tfDestroy";
   } else if (sub === "apply" && words.some((word) => skipsApproval(word))) {
     key = "tfAutoApprove";
@@ -1324,15 +1374,6 @@ const MIGRATE_RUN_SUBS: ReadonlySet<string> = new Set(["run", "exec", "dlx", "x"
 /** 包管理器"旗标 + 空格 + 取值"的全局旗标；迁移启动器前缀与包管理器判定共用。 */
 const PKG_VALUE_FLAGS = new Set(["--filter", "--prefix", "--cwd", "-C", "--dir", "--registry"]);
 
-/** `python -m <module>`：`-m` 是解释器旗标，不是命令词。 */
-const PYTHON_LAUNCHERS: ReadonlySet<string> = new Set([
-  "python",
-  "python2",
-  "python3",
-  "pypy",
-  "pypy3",
-]);
-
 /** 迁移命令之前的词是否全是启动器（含 `run`/`-m` 与包管理器旗标）。
  *  `grep manage.py migrate` 因 `grep` 不是启动器而仍然不命中。 */
 function isMigrateLauncherPrefix(words: readonly string[]): boolean {
@@ -1342,9 +1383,9 @@ function isMigrateLauncherPrefix(words: readonly string[]): boolean {
     /* v8 ignore next —— while 条件已保证下标在界内 */
     const word = words[index] ?? "";
     const prev = words[index - 1];
-    if (MIGRATE_LAUNCHERS.has(word)) {
+    if (MIGRATE_LAUNCHERS.has(word) || isPythonInterpreterName(word)) {
       index += 1;
-    } else if (word === "-m" && prev !== undefined && PYTHON_LAUNCHERS.has(prev)) {
+    } else if (word === "-m" && prev !== undefined && isPythonInterpreterName(prev)) {
       index += 1;
     } else if (MIGRATE_RUN_SUBS.has(word) && prev !== undefined && MIGRATE_LAUNCHERS.has(prev)) {
       index += 1;
@@ -1796,53 +1837,6 @@ function isHomeVarDisaster(value: string, home: string): boolean {
   return isHomeDisasterPath(`${home}${tail}`, home);
 }
 
-/** 目标里出现未展开的 glob 元字符：shell 会先展开它，判据该看展开后的那批路径。 */
-const GLOB_METACHAR_RE = /[*?[]/u;
-
-/** 正则元字符：glob 模式的字面部分进 `new RegExp` 前必须转义。 */
-const REGEX_METACHARS: ReadonlySet<string> = new Set(String.raw`\^$.|+()[]{}*?`);
-
-/**
- * 把 glob 模式编译成**同段匹配**的正则：`*` → `[^/]*`、`?` → 一枚非分隔符、`[...]` 整类 →
- * 一枚非分隔符（字符类内容不解析：判据只问"能否落到受保护前缀上"，取超集是安全方向）。
- * 未闭合的 `[` 在真实 shell 里是字面量，故按字面转义。
- *
- * 为什么不枚举展开结果：条目数由目录内容决定，而这是一条同步纯函数判定。
- * 花括号展开（`{a,b}`）**不在**此列——它不是 glob，且要解析嵌套与不配对形态；
- * 见 README 的「不拦」列，登记为已知洞而不是猜着收。
- */
-function globRegExp(pattern: string): RegExp {
-  let src = "";
-  let i = 0;
-  while (i < pattern.length) {
-    const ch = pattern.charAt(i);
-    if (ch === "*") {
-      src += "[^/]*";
-    } else if (ch === "?") {
-      src += "[^/]";
-    } else if (ch === "[") {
-      const close = pattern.indexOf("]", i + 1);
-      src += close === -1 ? String.raw`\[` : "[^/]";
-      i = close === -1 ? i : close;
-    } else {
-      src += REGEX_METACHARS.has(ch) ? `\\${ch}` : ch;
-    }
-    i += 1;
-  }
-  return new RegExp(`^${src}$`, "u");
-}
-
-/**
- * 一枚绝对 glob 目标**能否**落到受保护前缀上——根到系统前缀各试"前缀本身"与"其下一层"
- * （`/etc/*` 展开的是 `/etc/<项>`，不是 `/etc` 本身）。
- * 判"能否"而不是"会"：命中即拦，方向与 `rm` 那一族"看不见就不放行"一致。
- */
-function globCouldHitProtected(pattern: string, home: string): boolean {
-  // 尾斜杠不改变展开结果（`/e*/` 与 `/e*` 都展开成 `/etc`），但会让同段正则多要一格。
-  const re = globRegExp(pattern.replace(DANGER_RE.trailingSlashes, ""));
-  return [home, ...SYSTEM_PATH_PREFIXES].some((probe) => re.test(probe) || re.test(`${probe}/x`));
-}
-
 /** 花括号展开的预算：超过即按"形状不可判"处理（绝对路径 fail-closed）。 */
 const BRACE_EXPANSION_BUDGET = 64;
 
@@ -2117,7 +2111,9 @@ function isPosixDisasterTargetWord(value: string): boolean {
     // `rm -rf /e*/` 展开成 `/etc/`。上面那支只剥尾部 `*`（把 `/e*/` 削成 `/e` 后不再成灾），
     // 于是 `?`/`[...]`/中缀 `*` 三族整片漏——而这三族与 `/*` 是同一件事：shell 先展开、
     // rm 只看结果。读**归一值**而不是上面那支的转换结果：转换已经把命中形态削掉了。
-    (GLOB_METACHAR_RE.test(posixNormalized) && globCouldHitProtected(posixNormalized, home)) ||
+    // 探针本身只收绝对路径；相对 `*` 的展开域是当前目录，详见 absoluteGlobCouldHit。
+    (GLOB_METACHAR_RE.test(posixNormalized) &&
+      absoluteGlobCouldHit(posixNormalized, [home, ...SYSTEM_PATH_PREFIXES])) ||
     posixTarget === "." ||
     posixTarget === ".." ||
     posixTarget.startsWith("../") ||
@@ -2248,6 +2244,22 @@ function partitionRmArgs(
   return { flags: walk.flags, targets: walk.targets };
 }
 
+/** 单枚目标词是否落在灾难目标集合内。`catastrophicRm` 与 `find`/`xargs` 删除规则
+ *  共用这一份判据——两处各写一遍时，"rm 认的目标"与"find 认的目标"迟早会漂。 */
+function isDisasterToken(token: ShellToken, windowsTrack: boolean): boolean {
+  return (
+    [token.value, token.raw]
+      .filter((form) => form.length > 0)
+      .some(
+        (form) =>
+          ENV_SYSTEM_ROOT_RE.test(form) ||
+          ENV_USER_ROOT_RE.test(form) ||
+          isPosixDisasterTarget(form),
+      ) ||
+    (windowsTrack && isWindowsShapeTarget(token.raw, os.homedir()))
+  );
+}
+
 /**
  * 单段（已按候选头切好）：灾难删除？目标含家/根/系统前缀/上跳即拦；项目内相对路径放行。
  *  命令用词（RM_BIN_WORDS）覆盖 rm + pwsh 原生命令/别名 + cmd 内建，比对一律小写；
@@ -2291,16 +2303,7 @@ function catastrophicRm(
   // 那一串按两种读法都正是家目录本身（只读词值会折成 `E:workbob` 而放行）。
   // 反斜杠在 POSIX 判据里不是分隔符，`\etc`、`\\` 在两形下都不成灾 ⇒ 多这一遍没有误拦代价。
   // Windows 字形轨道只读源文本：词值 `C:WindowsSystem32` 已经不是任何 Windows 形状。
-  const disaster = (token: ShellToken): boolean =>
-    [token.value, token.raw]
-      .filter((form) => form.length > 0)
-      .some(
-        (form) =>
-          ENV_SYSTEM_ROOT_RE.test(form) ||
-          ENV_USER_ROOT_RE.test(form) ||
-          isPosixDisasterTarget(form),
-      ) ||
-    (windowsTrack && isWindowsShapeTarget(token.raw, os.homedir()));
+  const disaster = (token: ShellToken): boolean => isDisasterToken(token, windowsTrack);
   if (
     (hasForceRecursive(flags, cmdDialect, psParamTrack) || psAliasRecurses) &&
     targets.some((target) => disaster(target))
@@ -2320,6 +2323,135 @@ function catastrophicRm(
       ...new Set(targets.filter((target) => disaster(target)).map((target) => target.raw)),
     ];
     result = { key: "rmrf", fix: { role: "disasterTarget", offending } };
+  }
+  return result;
+}
+
+/** 凭据目录**本身**（`.ssh` 不是 `.ssh/config`，`isSecretPath` 的凭据目录分支要求
+ *  目录后还有分隔符）与 git 元数据目录（`.git` 不是 `.git/config`）。 */
+const SECRET_DIR_SELF_RE = /(?:^|[\\/])(?:\.ssh|\.gnupg|\.aws|\.kube|\.docker)(?:$|[\\/])/iu;
+const GIT_METADATA_RE = /(?:^|[\\/])\.git(?:$|[\\/])/u;
+
+function secretGlobCouldMatch(form: string): boolean {
+  if (
+    !GLOB_METACHAR_RE.test(form) ||
+    !(isDotfileOnlyGlob(form) || SECRET_GLOB_STEM_RE.test(form))
+  ) {
+    return false;
+  }
+  const home = os.homedir();
+  const variants = [form, form.replaceAll(String.fromCodePoint(92), "/")];
+  return variants.some((variant) => {
+    const re = globRegExp(variant.replace(DANGER_RE.trailingSlashes, ""));
+    return SECRET_GLOB_PROBES.some((probe) =>
+      [probe, `./${probe}`, `~/${probe}`, path.posix.join(home, probe)].some((candidate) =>
+        re.test(candidate),
+      ),
+    );
+  });
+}
+
+/** 单个字面形态是否命中凭据面；`isSecretPath` 与两个目录自检共用这一份词表。 */
+function secretFormMatches(form: string): boolean {
+  // oxlint-disable-next-line no-use-before-define -- isSecretPath 与 secretPathDeny 同文件、同词表；把整条密钥判据前移会牵动它依赖的解析器，保持调用点就近
+  return isSecretPath(form) || SECRET_DIR_SELF_RE.test(form) || GIT_METADATA_RE.test(form);
+}
+
+/** 花括号展开失败时的保守兜底：`prefix{.a,.b}` 的真前缀已经是凭据面，
+ *  即使整词的形状不可判，也不能因为解析器放弃而当成普通路径放行。 */
+function secretBracePrefixCouldMatch(form: string): boolean {
+  const open = form.indexOf("{");
+  if (open <= 0) {
+    return false;
+  }
+  const prefix = form.slice(0, open);
+  return (
+    secretFormMatches(prefix) ||
+    secretGlobCouldMatch(prefix) ||
+    SECRET_DIR_SELF_RE.test(prefix) ||
+    GIT_METADATA_RE.test(prefix)
+  );
+}
+
+function secretFormCouldMatch(form: string): boolean {
+  const expanded = expandBraces(form);
+  if (expanded === null) {
+    return (
+      secretFormMatches(form) || secretGlobCouldMatch(form) || secretBracePrefixCouldMatch(form)
+    );
+  }
+  return expanded.some(
+    (candidate) => secretFormMatches(candidate) || secretGlobCouldMatch(candidate),
+  );
+}
+
+function isSecretTarget(token: ShellToken, windowsTrack: boolean): boolean {
+  // 源形只在 Windows 轨道参与：POSIX 上 `\` 是转义而不是分隔符，把 `/data/bob\.ssh`
+  // 读成 `/data/bob/.ssh` 会误拦一个普通文件（实测该形在 bash 里就是 `/data/bob.ssh`）。
+  const forms = windowsTrack ? [token.value, token.raw] : [token.value];
+  return forms.some((form) => secretFormCouldMatch(form));
+}
+
+/** rm 家族的凭据/git 元数据删除：`rm .env`、`rm -rf .git`、`del .ssh` …
+ *  沙箱只按路径放行，不区分密钥与普通文件；这一条与沙箱零重叠，不能让它让路。 */
+function secretRmDanger(
+  head: ShellToken,
+  tokens: readonly ShellToken[],
+  windowsDialect: boolean,
+): BashVerdict | undefined {
+  const bin = rmBinOf(head);
+  let result: BashVerdict | undefined;
+  if (bin !== "") {
+    const { targets } = partitionRmArgs(tokens.slice(1), CMD_BUILTINS.has(bin));
+    const windowsTrack = isWindowsHost() || windowsDialect;
+    const offending = [
+      ...new Set(
+        targets
+          .filter((target) => isSecretTarget(target, windowsTrack))
+          .map((target) => target.raw),
+      ),
+    ];
+    if (offending.length > 0) {
+      result = { key: "secretDelete", fix: { role: "disasterTarget", offending } };
+    }
+  }
+  return result;
+}
+
+/** 直接读文件的命令：目标里出现凭据面时，沙箱允许读，但语义上该问一次。 */
+const READ_ALL_BIN_WORDS = new Set([
+  "cat",
+  "head",
+  "tail",
+  "less",
+  "more",
+  "bat",
+  "strings",
+  "xxd",
+  "od",
+  "base64",
+]);
+/** 直接读取凭据面的命令：`cat ~/.ssh/id_rsa`、`grep KEY .env`、`head -n 5 .env` …
+ *  读不改变磁盘，沙箱不会拦；但凭据进入输出就可能被记录或外传，按需确认。 */
+function secretReadDanger(
+  head: ShellToken,
+  tokens: readonly ShellToken[],
+  windowsDialect: boolean,
+): BashVerdict | undefined {
+  const bin = binNameOf(head.value).toLowerCase();
+  let result: BashVerdict | undefined;
+  if (READ_ALL_BIN_WORDS.has(bin) || READ_PATTERN_FIRST_BIN_WORDS.has(bin)) {
+    const windowsTrack = isWindowsHost() || windowsDialect;
+    const offending = [
+      ...new Set(
+        readTargetTokens(bin, tokens.slice(1))
+          .filter((target) => isSecretTarget(target, windowsTrack))
+          .map((target) => target.raw),
+      ),
+    ];
+    if (offending.length > 0) {
+      result = { key: "secretRead", fix: { role: "disasterTarget", offending } };
+    }
   }
   return result;
 }
@@ -2589,27 +2721,6 @@ const PSHELL_OPAQUE_FLAGS = new Set([
  *  `eval "rm -rf /"` 直接跑），所以取体是 join 而非只取一枚——与 shell 的 `-c` 相反。 */
 const EVAL_BIN_NAMES = new Set(["eval"]);
 
-/** **取代码串再执行、但不是 shell** 的解释器 → 其"代码串"旗标（值旗标取紧跟的那一枚）。
- *  这些语言的动作不在词法层面可见（`python3 -c "import os; os.system('rm -rf ~')"` 里
- *  rm 是字符串的一个片段，不是段头），判据看不见就是真看不见——按文件头的例外条款
- *  一律升格为需确认，不享受"认不准就放行"。
- *  已知不收的同类写法：子命令形态（`deno eval …`）与 `sh -c` 之外的脚本文件
- *  （`bash deploy.sh`——文件内容不在输入里，判据不读 fs）。 */
-const CODE_EVAL_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  python: ["-c"],
-  python2: ["-c"],
-  python3: ["-c"],
-  pypy: ["-c"],
-  pypy3: ["-c"],
-  node: ["-e", "--eval", "-p", "--print"],
-  perl: ["-e", "-E"],
-  perl5: ["-e", "-E"],
-  ruby: ["-e"],
-  php: ["-r"],
-  lua: ["-e", "-ex"],
-  osascript: ["-e"],
-};
-
 /** `-c` 体下钻的最大层数。每层至少吃掉 `bash -c ` 两词，故递归必然终止；但**终止≠有界**：
  *  栈深与每层 O(输入长度) 的成本都得由本上限给出。
  *  取 16 的依据是"真 bash 收得下的最深套娃"：POSIX 单引号套娃每加一层长度约 ×4
@@ -2627,9 +2738,11 @@ type NestedShellVerdict =
   | { kind: "body"; body: string; windowsFace: boolean }
   // 段头不是执行上下文 / 没有取体旗标 / 旗标后没有参数：本段没有下钻（不是"取不出"）
   | { kind: "none" }
+  // 段头是**非 shell 的代码串解释器**（语言层的动作不在词法上）：与"壳的体取不出"分开，
+  // 因为处置不同——代码串可发起网络/进程副作用，不能按沙箱仍保护写入而放行。
+  | { kind: "interpreter" }
   // 看不见要做什么：体取不出可靠文本（引号未闭合、体内残留落单引号）、体在磁盘或 base64 里
-  // （`-File`、`-EncodedCommand`），或段头是**非 shell 的代码串解释器**（语言层的动作不在词法上）
-  // ⇒ 由调用方升格为需确认
+  // （`-File`、`-EncodedCommand`）⇒ 由调用方升格为需确认
   | { kind: "opaque" };
 
 /**
@@ -2639,19 +2752,6 @@ type NestedShellVerdict =
  * 切词吞掉的是配对引号，落单那枚只可能来自引号内的字面量，重接出的串与 shell 看到的
  * 词边界已不等价（`bash -c 'echo " ; vite'` 即此）。两种都由调用方升格为需确认。
  */
-/** 执行上下文旗标的位置：段头不参与匹配（真实形态里 `-c`/`-e` 必在命令名之后），
- *  合写形态（`-lc`/`-ic`）同义。 */
-function codeFlagIndex(words: readonly string[], isCodeFlag: (word: string) => boolean): number {
-  return words.findIndex((word, index) => index > 0 && isCodeFlag(word));
-}
-
-/** 段头是不是"取代码串再执行"的非 shell 解释器（它的动作看不见 ⇒ 需确认）。 */
-function codeInterpreterHead(words: readonly string[]): boolean {
-  const [head] = words;
-  const flags = head === undefined ? undefined : ownLookup(CODE_EVAL_FLAGS, binNameOf(head));
-  return flags !== undefined && codeFlagIndex(words, (word) => flags.includes(word)) !== -1;
-}
-
 /** 命令串形态的判据：含空白或 shell 元字符（`;` `|` `$(` 反引号 `&&`）才像"一整条命令"，
  *  单纯一个词（`ls`/`uptime`）按位置参数对待、不下钻。 */
 const COMMAND_STRING_RE = /[\s;|&$`()<>]/u;
@@ -2833,7 +2933,7 @@ function shellBodyVerdict(segText: string, words: readonly string[]): NestedShel
  * 体为空串（`bash -c "" rm -rf /`）给 "none"：实测 bash 什么都不执行，后面的词是 `$0`。
  */
 function nestedShellVerdictOf(segText: string, words: readonly string[]): NestedShellVerdict {
-  return codeInterpreterHead(words) ? { kind: "opaque" } : shellBodyVerdict(segText, words);
+  return codeInterpreterHead(words) ? { kind: "interpreter" } : shellBodyVerdict(segText, words);
 }
 
 /** 严重度次序：`allow` < `ask` < `deny`（数字只用于比较，不对外）。 */
@@ -2924,9 +3024,28 @@ const COMMAND_RULES: readonly HeadRule[] = [
   {
     matchesHead: (head) => {
       const bin = binNameOf(head.value);
-      return ownLookup(INFRA_DESTRUCTIVE, bin) !== undefined || MIGRATE_HEADS.has(bin);
+      return (
+        ownLookup(INFRA_DESTRUCTIVE, bin) !== undefined ||
+        MIGRATE_HEADS.has(bin) ||
+        isPythonInterpreterName(bin)
+      );
     },
     run: (head, candidate) => infraDestructiveOf(head, candidate),
+  },
+  {
+    matchesHead: (head) => binNameOf(head.value).toLowerCase() === "gh",
+    run: (head, candidate) => ghDestroyDanger(head, candidate),
+  },
+  {
+    matchesHead: (head) => {
+      const bin = binNameOf(head.value).toLowerCase();
+      return READ_ALL_BIN_WORDS.has(bin) || READ_PATTERN_FIRST_BIN_WORDS.has(bin);
+    },
+    run: (head, candidate, ctx) => secretReadDanger(head, candidate, ctx.windowsDialect),
+  },
+  {
+    matchesHead: (head) => rmBinOf(head).length > 0,
+    run: (head, candidate, ctx) => secretRmDanger(head, candidate, ctx.windowsDialect),
   },
   {
     matchesHead: (head) => rmBinOf(head).length > 0,
@@ -2980,7 +3099,9 @@ function faceDenialOf(
 ): BashVerdict | undefined {
   const verdict = nestedShellVerdictOf(segText, words);
   let denial: BashVerdict | undefined;
-  if (verdict.kind === "opaque") {
+  if (verdict.kind === "interpreter") {
+    denial = { key: "interpreterCode" };
+  } else if (verdict.kind === "opaque") {
     denial = { key: "nestedShellUnconfirmed" };
   } else if (verdict.kind === "body") {
     // 下钻与否（含"到界就不再取体、按需确认统一处理"）由调用方给的 drill 决定
@@ -3048,6 +3169,23 @@ const withWindowsFace = (ctx: DangerContext): DangerContext =>
  * - 执行上下文区 `$( )`/反引号的层数（`REGION_MAX_DEPTH`，在词法层界住）：每多一层就要重扫
  *   一遍所在串的文本，长度上限只界得住单次扫描，界不住"层数 × 长度"。
  */
+/** `find`/`xargs` 的依赖注入：投影函数全部来自本文件的同一套实现，不另造读法。 */
+const FIND_XARGS_DEPS: FindXargsDeps = {
+  splitSegments,
+  lexTokens,
+  peelSeg,
+  runPrefixEnd,
+  headStarts,
+  binNameOf,
+  rmBinOf,
+  shellBinNames: SHELL_BIN_NAMES,
+  isWindowsHost,
+  isDisasterToken,
+  isSecretTarget,
+  secretRmDanger,
+  secretReadDanger,
+};
+
 function commandDanger(
   command: string,
   ctx: DangerContext,
@@ -3061,6 +3199,9 @@ function commandDanger(
   // 按字面读时结构视图把 `|${IFS}sh` 读成一枚普通词，执行端就不存在了（下方 IFS 段同一条归一）。
   const normalized = normalizeIfs(command);
   let result = pipeToShell(structureView(normalized));
+  // `find`/`xargs` 的删除形态命令头不是 rm，`catastrophicRm` 看不到；在整命令视野里先判，
+  // 命中后复用 `rmrf` 的键、出路与沙箱让路逻辑。
+  result = preferSevere(ctx, result, findXargsDanger(normalized, ctx, FIND_XARGS_DEPS));
   // 方言在上下文里收窄一次，随嵌套 `-c` 体一路继承：换一层 shell **不换**方言的读法
   // （`pwsh` 调用点里的 `bash -c "rm -rf C:/Windows"` 内层按 Windows 轨道判 ⇒ 拦）。
   // `rm${IFS}-rf${IFS}~`：`${IFS}` 在真 shell 里展开成空格/制表符/换行，于是它既不是命令词
@@ -3117,7 +3258,7 @@ export function editTargetPath(
   name: string | undefined,
   args: Record<string, unknown>,
 ): string | null {
-  if (name !== "edit" && name !== "write" && name !== "str_replace_editor") {
+  if (!isEditToolName(name) || isApplyPatchToolName(name)) {
     return null;
   }
   if (name === "str_replace_editor") {
